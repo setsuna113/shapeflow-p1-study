@@ -1,0 +1,41 @@
+# shapeflow-api-provider unit (plan §3.1, §17.2). The ONLY unit that holds API credentials. It
+# exposes a local Unix-socket provider with a fixed schema (rate limit, budget reservation, redacted
+# logging) and never forwards arbitrary URLs/headers. Runner and infer units cannot read the
+# credential path. Fill @PLACEHOLDERS@.
+[Unit]
+Description=ShapeFlow P1 API provider (sole credential holder)
+After=network.target
+
+[Service]
+Type=simple
+User=@API_USER@
+WorkingDirectory=@REPO@
+ExecStart=@REPO@/.venv/bin/shapeflow-p1-provider --socket /run/shapeflow/api.sock
+
+# Credentials via systemd encrypted credentials, decrypted into the unit's memory only.
+# (Alternatively a root-owned 0400 file readable solely by @API_USER@.)
+LoadCredentialEncrypted=tavily:@CRED_DIR@/tavily.key.cred
+LoadCredentialEncrypted=deepseek:@CRED_DIR@/deepseek.key.cred
+# The app reads them from $CREDENTIALS_DIRECTORY; they never enter argv, env, or logs.
+Environment=TAVILY_API_KEY_FILE=%d/tavily
+Environment=DEEPSEEK_API_KEY_FILE=%d/deepseek
+
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@REPO@/runs @REPO@/logs
+RuntimeDirectory=shapeflow
+# The provider executes no web-page content and no model generation code.
+
+StandardOutput=append:@REPO@/logs/provider.log
+StandardError=append:@REPO@/logs/provider.err
+
+[Install]
+WantedBy=multi-user.target

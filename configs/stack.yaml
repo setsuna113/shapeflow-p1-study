@@ -1,0 +1,47 @@
+# Frozen stack (plan §5.3). Doctor re-verifies EVERY field against the live host and refuses to run
+# on any mismatch -- no silent upgrade/downgrade. These are the candidate values from the plan; the
+# actual host artifacts (model revision, vLLM SHA, driver, attention backend) must be confirmed by
+# doctor before they are trusted. The device is frozen by GPU UUID, never index.
+version: v0.1
+
+model:
+  repo: Qwen/Qwen3-14B-AWQ
+  revision: 31c69efc29464b6bb0aee1398b5a7b50a99340c3
+  path: /storage/nvme/reme/models/Qwen3-14B-AWQ
+  enable_thinking: false
+  quantization: awq
+  kv_dtype: auto
+
+engine:
+  vllm_version: "0.24.0"        # doctor must confirm the git SHA of the reused venv
+  vllm_venv: /storage/nvme/drbat/.venv
+  max_model_len: 16384
+  gpu_memory_utilization: 0.90
+  enable_prefix_caching: true
+  enable_chunked_prefill: true
+  attention_backend: "@DOCTOR_CONFIRMS@"
+
+sampling:
+  temperature: 0.3
+  top_p: 1.0
+  n: 1
+
+host:
+  # Frozen at doctor time; UUID not index. Candidate observed 2026-07-24 (must re-verify).
+  gpu_name: "NVIDIA GeForce RTX 4090"
+  gpu_uuid: "@DOCTOR_CONFIRMS@"
+  driver_version: "550.163.01"
+  cuda_runtime: "@DOCTOR_CONFIRMS@"
+  python: "3.12"
+
+determinism:
+  pythonhashseed: 0
+  timezone: UTC
+
+isolation:
+  # Primary causal mode: single upstream request in flight; APC off; one task attempt at a time.
+  causal_max_num_seqs: 1
+  causal_gateway_max_upstream_inflight: 1
+  causal_apc: false
+  # Operational mode: native APC on, continuous batching per the frozen deployment config.
+  operational_apc: true

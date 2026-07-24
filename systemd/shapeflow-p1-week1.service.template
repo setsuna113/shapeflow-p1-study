@@ -1,0 +1,39 @@
+# shapeflow-p1-week1 coordinator unit (plan §17.2). Fill @PLACEHOLDERS@ and install as
+# /etc/systemd/system/shapeflow-p1-week1.service. Runs as the downgraded runner identity: it never
+# holds a credential path (the provider does), only reads the frozen corpus and writes run state.
+[Unit]
+Description=ShapeFlow P1 Week-1 coordinator
+After=network.target shapeflow-api-provider.service shapeflow-vllm.service
+Requires=shapeflow-api-provider.service shapeflow-vllm.service
+
+[Service]
+Type=simple
+User=@RUNNER_USER@
+WorkingDirectory=@REPO@
+# Resume-only once launched; the exact protocol SHA is pinned so a drifted config cannot run.
+ExecStart=@REPO@/.venv/bin/shapeflow-p1 run-week1 --config configs/week1.yaml --resume --protocol-sha @PROTOCOL_SHA@
+ExecStop=@REPO@/scripts/stop_safely.sh
+
+# Restart policy: at most 3 restarts in 30 min, else give up (BLOCKED_REPEATED_CRASH).
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+# Hardening.
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Only these paths are writable; everything else is read-only to this unit.
+ReadWritePaths=@REPO@/runs @REPO@/reports @REPO@/logs @REPO@/object_store @REPO@/data
+# The runner gets an explicit environment allowlist; no credential variables are present.
+Environment=PYTHONHASHSEED=0 TZ=UTC
+
+# Redacted logs (the app's SecretRedactor runs before every handler; journald captures stdio).
+StandardOutput=append:@REPO@/logs/coordinator.log
+StandardError=append:@REPO@/logs/coordinator.err
+
+[Install]
+WantedBy=multi-user.target
