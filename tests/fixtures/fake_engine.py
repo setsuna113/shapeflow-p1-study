@@ -13,6 +13,7 @@ completes with no network at all -- not what the model said.
 from __future__ import annotations
 
 import json
+import re as _re
 from typing import Optional
 
 
@@ -91,6 +92,13 @@ class FakeEngine:
                     "key_excerpts": text[:200]}
         if schema == "ConductResearch":
             return {"research_topic": text[:300] or "the question"}
+        if schema == "selector_output":
+            # The P1 selector call. On the real stack this is response_format: json_schema, and
+            # the served model returns a P1_ID selection; the fixture mirrors that so the offline
+            # tests exercise the real structured-output path rather than falling back silently.
+            if self.selector_ids is not None:
+                return {"contract": "P1_ID", "selected_ids": list(self.selector_ids)}
+            return {"contract": "P1_ID", "selected_ids": _labels_in(text)[:4]}
         return {}
 
     # --- reply shapes ---------------------------------------------------------------
@@ -126,6 +134,18 @@ class FakeEngine:
             }],
             "usage": {"prompt_tokens": 256, "completion_tokens": 64},
         }, 0.01
+
+
+_LABEL = _re.compile(r"\b([EQ]\d+)\b")
+
+
+def _labels_in(text: str) -> list:
+    """Candidate labels (E1, Q2) the selector prompt offered, in first-seen order."""
+    seen = []
+    for m in _LABEL.findall(text or ""):
+        if m not in seen:
+            seen.append(m)
+    return seen or ["E1"]
 
 
 def _response_schema_name(body: dict) -> Optional[str]:

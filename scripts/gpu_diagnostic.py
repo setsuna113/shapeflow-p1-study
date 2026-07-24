@@ -129,7 +129,7 @@ async def main() -> int:
     # Enough react turns that the real model reliably issues a search (one turn is not
     # enough -- it often answers or completes directly), but a single researcher
     # iteration so a cell stays a few minutes rather than fifteen.
-    lean["odr"] = {**lean["odr"], "max_react_tool_calls": 3, "max_researcher_iterations": 1,
+    lean["odr"] = {**lean["odr"], "max_react_tool_calls": 5, "max_researcher_iterations": 1,
                    "max_concurrent_research_units": 1}
     settings.configs["week1"] = lean
     settings.ensure_paths("runner_root", "runs", "object_store")
