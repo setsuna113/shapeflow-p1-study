@@ -43,7 +43,12 @@ cleanup() {
   [ -n "${CHILD_PGID:-}" ] && kill -TERM "-$CHILD_PGID" 2>/dev/null || true
   rm -f "$PIDFILE"
 }
-trap cleanup EXIT INT TERM
+# A signal handler that cleans up but does not exit leaves the supervisor waiting: bash resumes
+# the interrupted `wait` and the loop carries on, so a stop request would look like it worked and
+# the coordinator would still be running.
+on_signal() { cleanup; trap - EXIT; exit 143; }
+trap cleanup EXIT
+trap on_signal INT TERM
 
 starts=()
 say "starting: role=$ROLE cmd=$*"
