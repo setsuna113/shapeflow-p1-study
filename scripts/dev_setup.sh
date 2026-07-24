@@ -9,6 +9,7 @@ cd "$(dirname "$0")/.."
 uv venv --python 3.12 .venv >/dev/null 2>&1 || true
 # Dependencies actually imported by the pure-Python modules and their tests.
 uv pip install --python .venv/bin/python -q \
-  pytest pytest-asyncio hypothesis jsonschema pydantic PyYAML orjson httpx tenacity zstandard
+  pytest pytest-asyncio hypothesis jsonschema pydantic PyYAML orjson httpx tenacity zstandard \
+  numpy scipy
 
 echo "dev venv ready: $(.venv/bin/python --version)"
