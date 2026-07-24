@@ -1,0 +1,24 @@
+# Budget caps — protocol v0.1 (plan §3.5). These are the authorized HARD upper bounds, not
+# placeholders. The provider reads real balance at launch and may only TIGHTEN the effective
+# cap by a deterministic formula (min(cap, available - reserve)); it may never raise a cap or
+# raise one after the fact.
+version: v0.1
+
+api_budget:
+  tavily_max_requests: 500
+  tavily_max_credits: 1000
+  deepseek_max_requests: 2000
+  deepseek_max_input_tokens: 20000000
+  deepseek_max_output_tokens: 3000000
+  deepseek_max_usd: 10.00
+  max_remote_calls: 2500
+
+campaign_budget:
+  max_gpu_hours: 150
+  max_wall_hours: 168
+  max_disk_bytes: 8589934592        # 8 GiB object-store cap
+  min_free_disk_bytes: 12884901888  # 12 GiB floor -> pause admission below this
+
+retry_policy:
+  max_retries_per_request: 3
+  max_consecutive_failures: 5
