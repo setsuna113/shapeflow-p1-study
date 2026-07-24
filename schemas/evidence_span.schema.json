@@ -4,8 +4,12 @@
   "title": "Span (two disjoint namespaces)",
   "description": "An addressable, exactly-reconstructible region of frozen text. The two namespaces are kept apart by a discriminator AND by different ID field names, so mixing them is a schema violation rather than a silent methodological error. EvidenceSpan addresses raw source bytes and is visible to WEBPAGE_P1 and C_REGISTRY only. VisibleMessageSpan addresses the exact researcher_messages bytes that vendor compress_research saw, and is the only namespace C_VISIBLE may select from -- reverse-mapping a model-written page summary back to raw page text would smuggle evidence P0's compressor never had, which is the difference between the compressor-only experiment and the registry-assisted one.",
   "oneOf": [
-    { "$ref": "#/$defs/EvidenceSpan" },
-    { "$ref": "#/$defs/VisibleMessageSpan" }
+    {
+      "$ref": "#/$defs/EvidenceSpan"
+    },
+    {
+      "$ref": "#/$defs/VisibleMessageSpan"
+    }
   ],
   "$defs": {
     "EvidenceSpan": {
@@ -25,8 +29,13 @@
         "chunker_version"
       ],
       "properties": {
-        "namespace": { "const": "RAW_SOURCE" },
-        "span_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "namespace": {
+          "const": "RAW_SOURCE"
+        },
+        "span_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
         "content_hash": {
           "description": "Snapshot this span is carved from. char offsets index that snapshot's decoded text.",
           "type": "string",
@@ -36,32 +45,139 @@
           "description": "Every occurrence this span is citable through. Must be non-empty: a span with no occurrence is a dangling citation and is a fatal integrity error.",
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
         },
-        "char_start": { "type": "integer", "minimum": 0 },
-        "char_end": { "type": "integer", "minimum": 0 },
-        "token_start": { "type": ["integer", "null"], "minimum": 0 },
-        "token_end": { "type": ["integer", "null"], "minimum": 0 },
+        "char_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "char_end": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "token_start": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "token_end": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
         "text_sha256": {
           "description": "Digest of the exact span text. Re-derived at preflight; a mismatch means the offsets no longer address what was selected.",
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
         "kind": {
-          "enum": ["paragraph", "sentence", "list_item", "table_row", "table_header", "heading", "code", "blockquote", "fixed_window"]
+          "enum": [
+            "paragraph",
+            "sentence",
+            "list_item",
+            "table_row",
+            "table_header",
+            "heading",
+            "code",
+            "blockquote",
+            "fixed_window"
+          ]
         },
         "heading_path": {
           "description": "Breadcrumb of enclosing headings, carried as metadata so the markdown chunker can preserve context without duplicating text via large overlaps.",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "facet_ids": {
           "description": "EVALUATOR-ONLY. Gold facet labels, if any. This field MUST be absent from any structure rendered into a selector prompt -- populating it in the treatment view would hand P1 the answer key. The treatment-visible projection strips it.",
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
-        "token_len": { "type": "integer", "minimum": 0 },
-        "chunker_version": { "type": "string", "minLength": 1 }
+        "token_len": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chunker_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "context_refs": {
+          "description": "Ranges elsewhere in the SAME snapshot that are needed to read this span -- currently a table's header row for a table_row span. Addressed and hashed exactly like the span itself and re-derived at preflight. Metadata, never part of the span: anchoring a row on the header's offset would make an n-row table's chunks span O(n^2) bytes, while carrying the header as free text would be an unbound channel into the prompt that leaves the span id and every reconstruction check untouched.",
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "content_hash",
+              "char_start",
+              "char_end",
+              "text_sha256"
+            ],
+            "properties": {
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "char_start": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "char_end": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "text_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        },
+        "heading_refs": {
+          "description": "Ranges of the enclosing heading lines in the SAME snapshot. `heading_path` is the convenience view; these are what preflight re-hashes. A breadcrumb rendered into the selector prompt is evidence, and as a free string it was an unbound injection channel that left the span id and every reconstruction check untouched.",
+          "type": "array",
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "content_hash",
+              "char_start",
+              "char_end",
+              "text_sha256"
+            ],
+            "properties": {
+              "content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "char_start": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "char_end": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "text_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
       }
     },
     "VisibleMessageSpan": {
@@ -80,16 +196,44 @@
         "visible_compressor_view_hash"
       ],
       "properties": {
-        "namespace": { "const": "VISIBLE_MESSAGE" },
-        "visible_span_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "message_id": { "type": "string", "minLength": 1 },
-        "message_role": { "enum": ["tool", "ai", "human", "system"] },
-        "byte_start": { "type": "integer", "minimum": 0 },
-        "byte_end": { "type": "integer", "minimum": 0 },
-        "exact_text_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "namespace": {
+          "const": "VISIBLE_MESSAGE"
+        },
+        "visible_span_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "message_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message_role": {
+          "enum": [
+            "tool",
+            "ai",
+            "human",
+            "system"
+          ]
+        },
+        "byte_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "byte_end": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "exact_text_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
         "kind": {
           "description": "Only TOOL_EVIDENCE may produce a citation or source binding. MODEL_DERIVED_CONTEXT (the researcher's own reasoning, and model-written page summaries) can be retained to preserve plans and gap statements, but is never promoted to source evidence -- and primary quality evidence metrics count TOOL_EVIDENCE only.",
-          "enum": ["TOOL_EVIDENCE", "MODEL_DERIVED_CONTEXT", "USER_CONTEXT"]
+          "enum": [
+            "TOOL_EVIDENCE",
+            "MODEL_DERIVED_CONTEXT",
+            "USER_CONTEXT"
+          ]
         },
         "visible_compressor_view_hash": {
           "description": "Hash of the immutable view derived from the exact bytes vendor compress_research received. Ties every selectable span to one provable input state.",
@@ -99,9 +243,15 @@
         "source_occurrence_ids": {
           "description": "Provenance back-edge, permitted only for TOOL_EVIDENCE. It may be used to attribute a citation, never to fetch text absent from the visible bytes.",
           "type": "array",
-          "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
         },
-        "token_len": { "type": "integer", "minimum": 0 }
+        "token_len": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     }
   }

@@ -51,15 +51,30 @@ TOKEN BUDGET for your selected evidence: {budget}
 """
 
 
-def _render_candidates(candidates: list[tuple[str, str]]) -> str:
-    # candidates: list of (label, exact_text). Text is shown so the model can judge relevance.
-    return "\n".join(f"[{label}] {text}" for label, text in candidates)
+def _render_candidates(candidates: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]]) -> str:
+    """Render one line per candidate: ``(label, exact_text, heading_path, context)``.
+
+    The chunker computes a heading breadcrumb and, for table rows, the header row that names
+    the columns. Both were previously dropped before the prompt was built, so the selector saw
+    a bare "| a | 1 |" with no way to know what column "1" was in -- and then the study
+    attributed the resulting bad selection to the *contract* rather than to the missing context.
+    They are shown as metadata, clearly separated from the span's own bytes.
+    """
+    lines = []
+    for label, text, heading_path, context in candidates:
+        prefix = f"[{label}]"
+        if heading_path:
+            prefix += f" (under: {' > '.join(heading_path)})"
+        lines.append(f"{prefix} {text}")
+        for ctx in context:
+            lines.append(f"    ctx| {ctx}")
+    return "\n".join(lines)
 
 
 def render_selector_prompt(
     *,
     topic: str,
-    candidates: list[tuple[str, str]],
+    candidates: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]],
     query_attempts: list[tuple[str, str]],
     budget: int,
     contract: str,

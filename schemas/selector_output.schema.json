@@ -9,9 +9,15 @@
     { "$ref": "#/$defs/P1_BRIDGE" }
   ],
   "$defs": {
-    "label": {
+    "evidence_label": {
+      "description": "A label for an OFFERED EVIDENCE SPAN. E and Q are different kinds and are deliberately not interchangeable at the schema level either: accepting 'Q1' in a span position would let a selector point 'evidence' at a search query, which parses cleanly and is meaningless.",
       "type": "string",
-      "pattern": "^[EQ][0-9]{1,4}$"
+      "pattern": "^E[0-9]{1,4}$"
+    },
+    "query_label": {
+      "description": "A label for an OFFERED QUERY ATTEMPT. Accepting 'E1' here would let a selector claim a gap was probed by a piece of evidence.",
+      "type": "string",
+      "pattern": "^Q[0-9]{1,4}$"
     },
     "role": {
       "description": "How the selected span bears on the question. 'contradict' is what lets the aggregator keep both sides of a disagreement instead of silently presenting one.",
@@ -26,8 +32,10 @@
       "properties": {
         "contract": { "const": "P1_ID" },
         "selected_ids": {
+          "description": "Bounded, but duplicates are allowed. maxItems is a POST-HOC validator, not a decode cap: by the time this runs the tokens are already generated and already charged to the P1 arm. A real ceiling needs a completion max_tokens and schema-constrained generation on the model call itself; this bounds what may be PUBLISHED, and an over-long list fails the sample rather than silently truncating. Repeated labels, by contrast, are harmless redundancy the parser normalizes under stated rules, so rejecting them would only manufacture P1 failures and bias the comparison toward P0.",
           "type": "array",
-          "items": { "$ref": "#/$defs/label" }
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/evidence_label" }
         }
       }
     },
@@ -41,16 +49,18 @@
         "contract": { "const": "P1_TYPED" },
         "selections": {
           "type": "array",
+          "maxItems": 64,
           "items": {
             "type": "object",
             "additionalProperties": false,
             "required": ["span_id", "role"],
             "properties": {
-              "span_id": { "$ref": "#/$defs/label" },
+              "span_id": { "$ref": "#/$defs/evidence_label" },
               "role": { "$ref": "#/$defs/role" },
               "facet_ids": {
                 "description": "Selector-declared facet labels. These are treatment OUTPUT, not gold: they are checked for internal consistency (every declared facet is covered or explicitly gapped) and never against the TruthPacket at preflight time.",
                 "type": "array",
+                "maxItems": 8,
                 "items": { "type": "string", "maxLength": 64 }
               }
             }
@@ -59,6 +69,7 @@
         "gaps": {
           "description": "Facets the selector believes are unmet, each grounded in real failed lookups rather than asserted.",
           "type": "array",
+          "maxItems": 16,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -68,7 +79,8 @@
               "query_attempt_ids": {
                 "type": "array",
                 "minItems": 1,
-                "items": { "$ref": "#/$defs/label" }
+                "maxItems": 8,
+                "items": { "$ref": "#/$defs/query_label" }
               }
             }
           }
@@ -87,6 +99,7 @@
         "gaps": { "$ref": "#/$defs/P1_TYPED/properties/gaps" },
         "bridges": {
           "type": "array",
+          "maxItems": 16,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -102,7 +115,8 @@
                 "description": "At least one binding: a bridge with no evidence is an unsourced assertion.",
                 "type": "array",
                 "minItems": 1,
-                "items": { "$ref": "#/$defs/label" }
+                "maxItems": 16,
+                "items": { "$ref": "#/$defs/evidence_label" }
               }
             }
           }

@@ -37,12 +37,56 @@ _TOKEN = re.compile(r"[a-z0-9]+")
 
 
 @dataclass(frozen=True)
+class Candidate:
+    """One offered evidence span, as the selector will see it.
+
+    ``heading_path`` and ``context`` are the chunker's metadata (enclosing headings; a table's
+    header row). They are carried here so they actually reach the prompt: dropping them made a
+    selected table row unreadable and then charged the resulting bad selection to the contract
+    under test rather than to the missing context.
+    """
+
+    span_id: str
+    text: str
+    heading_path: tuple[str, ...] = ()
+    context: tuple[str, ...] = ()
+
+    @classmethod
+    def from_span(cls, span: dict, text: str, *, snapshot_texts: dict[str, str]) -> "Candidate":
+        """Resolve a span's addressed metadata into the strings the prompt will show.
+
+        Reads ``heading_refs``/``context_refs`` -- the addressed, re-hashable form. It used to
+        read a free-text ``context`` key the schema no longer has, so the real chain
+        (chunk.context_ranges -> span.context_refs -> Candidate.context) silently produced an
+        empty tuple and every table row reached the selector with no header at all.
+        """
+        def resolve(refs: list[dict]) -> tuple[str, ...]:
+            out = []
+            for ref in refs or ():
+                snapshot = snapshot_texts.get(ref["content_hash"])
+                if snapshot is None:
+                    raise KeyError(
+                        f"candidate metadata addresses snapshot {ref['content_hash'][:12]}, "
+                        "which was not supplied; a candidate must never be offered with "
+                        "unresolvable metadata"
+                    )
+                out.append(snapshot[ref["char_start"]:ref["char_end"]])
+            return tuple(out)
+
+        return cls(
+            span_id=span.get("span_id") or span["visible_span_id"],
+            text=text,
+            heading_path=resolve(span.get("heading_refs")),
+            context=resolve(span.get("context_refs")),
+        )
+
+
+@dataclass(frozen=True)
 class SelectorInput:
-    """What a selector is given for one call. ``candidates`` is an ordered list of
-    (span_id, exact_text); ``query_attempts`` is (attempt_id, text)."""
+    """What a selector is given for one call. ``query_attempts`` is (attempt_id, text)."""
 
     topic: str
-    candidates: list[tuple[str, str]]
+    candidates: list[Candidate]
     query_attempts: list[tuple[str, str]]
     token_budget: int
     contract: str
@@ -62,15 +106,15 @@ class CpuLexicalSelector:
     def select(self, task_ctx: TaskContext, inp: SelectorInput) -> dict:
         q_terms = Counter(_TOKEN.findall(inp.topic.lower()))
         scored: list[tuple[float, str]] = []
-        for span_id, text in inp.candidates:
-            tf = Counter(_TOKEN.findall(text.lower()))
+        for cand in inp.candidates:
+            tf = Counter(_TOKEN.findall(cand.text.lower()))
             score = float(sum(q_terms[t] * tf[t] for t in q_terms))
             if score > 0:
-                scored.append((score, span_id))
+                scored.append((score, cand.span_id))
         # Deterministic: score desc, then span_id asc.
         scored.sort(key=lambda pair: (-pair[0], pair[1]))
         # Build a CandidateSet local to this call to convert ids -> labels for output.
-        cs = CandidateSet.build([sid for sid, _ in inp.candidates])
+        cs = CandidateSet.build([c.span_id for c in inp.candidates])
         selected = [cs.label_for(sid) for _, sid in scored[: self._max]]
         return {"contract": "P1_ID", "selected_ids": selected}
 
@@ -82,7 +126,22 @@ ModelCall = Callable[[str], dict]
 class LlmSelector:
     """Runs the local target model via an injected callable. The callable is responsible for
     the actual (proxied, telemetered) request and for returning parsed JSON; this class only
-    renders the prompt and passes the result through."""
+    renders the prompt and passes the result through.
+
+    NOT YET a bounded decode. The contract's ``maxItems`` is a post-hoc validator: an
+    over-long selection is rejected *after* its tokens were generated and charged to the P1
+    arm. A real ceiling needs both halves of the model call, which land with the telemetry
+    proxy (Block 5):
+
+    - a completion ``max_tokens`` derived from ``token_budget``, so runaway output is cut at
+      the engine rather than measured and discarded;
+    - schema-constrained generation (guided decoding against
+      ``schemas/selector_output.schema.json``), so malformed output is unrepresentable rather
+      than repaired afterwards -- repair is free for us and not for the GPU.
+
+    Until then, P1's measured decode cost includes work that a deployed P1 would not do, which
+    biases *against* P1. That direction is the safe one, but it is not zero.
+    """
 
     def __init__(self, model_call: ModelCall) -> None:
         self._model_call = model_call
@@ -90,7 +149,10 @@ class LlmSelector:
     def select(self, task_ctx: TaskContext, inp: SelectorInput) -> dict:
         prompt = render_selector_prompt(
             topic=inp.topic,
-            candidates=[(_label(i), text) for i, (_, text) in enumerate(inp.candidates, 1)],
+            candidates=[
+                (_label(i), c.text, c.heading_path, c.context)
+                for i, c in enumerate(inp.candidates, 1)
+            ],
             query_attempts=[(f"Q{j}", text) for j, (_, text) in enumerate(inp.query_attempts, 1)],
             budget=inp.token_budget,
             contract=inp.contract,

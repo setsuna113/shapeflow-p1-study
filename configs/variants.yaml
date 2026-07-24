@@ -5,6 +5,14 @@
 # The controls are not optional: SHORT_PROSE separates the pointer mechanism from simply decoding
 # fewer tokens, and CPU_LEXICAL separates LLM selection from deterministic lexical selection.
 version: v1
+
+# Sharing one SOURCE header across a contiguous run changes how many tokens P1 materializes
+# relative to P0, so it is part of the protocol, not an implementation detail. Declaring it in
+# a code comment did nothing; here config_sha digests it and changing it mints a new protocol
+# SHA. Asserted equal to renderer.RENDERER_GROUPING_VERSION by tests.
+renderer:
+  grouping_version: renderer_source_grouping_v1
+
 variants:
   - {variant_id: P0,            node: P0,          chunker: vendor,               scope: vendor,        contract: VENDOR_PROSE, aggregation: vendor,           close_mode: vendor,             is_control: true}
 

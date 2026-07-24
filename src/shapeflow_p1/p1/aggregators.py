@@ -32,8 +32,10 @@ __all__ = [
     "AggregationError",
 ]
 
-# Estimates rendered tokens for a list of items given the span registry.
-Coster = Callable[[list["AggregatedItem"], dict], int]
+# Estimates rendered tokens for a whole evidence object given the span registry. It takes the
+# full object, not just the items, because gaps and bridges are rendered too -- costing items
+# alone understates the P1 budget by exactly the output that distinguishes the contracts.
+Coster = Callable[["AggregatedEvidence", dict], int]
 
 
 class AggregationError(ValueError):
@@ -42,9 +44,22 @@ class AggregationError(ValueError):
 
 @dataclass(frozen=True)
 class AggregatedItem:
+    """A published span, carrying exactly the annotations the selector gave it.
+
+    ``relations`` is the authoritative (facet, role) list; ``role``/``facet_ids`` are the
+    convenience views preflight compares against the selection. An aggregator may drop an item;
+    it may never edit these, and preflight enforces that.
+    """
+
     span_id: str
-    role: Optional[str]
+    role: Optional[str] = None
     facet_ids: tuple[str, ...] = ()
+    relations: tuple[tuple[str, Optional[str]], ...] = ()
+
+    @classmethod
+    def from_parsed(cls, item) -> "AggregatedItem":
+        return cls(span_id=item.span_id, role=item.role,
+                   facet_ids=item.facet_ids, relations=item.relations)
 
 
 @dataclass(frozen=True)
@@ -53,6 +68,10 @@ class AggregatedEvidence:
     gaps: tuple[ParsedGap, ...] = ()
     bridges: tuple[ParsedBridge, ...] = ()
     dropped_for_budget: tuple[str, ...] = ()
+    # Bridges whose bound evidence did not survive the budget. A bridge is connective text
+    # *about* specific spans; keeping it after those spans are gone would leave an unsourced
+    # assertion in the output and a citation pointing at nothing.
+    dropped_bridges: tuple[str, ...] = ()
 
 
 def _source_key(span: dict) -> str:
@@ -79,13 +98,22 @@ def _require(registry: dict, span_id: str) -> dict:
 def stable_union_v1(sel: ParsedSelection, registry: dict) -> AggregatedEvidence:
     """Dedup by span id, present in stable source/offset order. Byte-identical content already
     shares a span id, so this also merges duplicates while occurrences are preserved on the
-    span records themselves."""
+    span records themselves.
+
+    Adjacent same-source spans are *not* fused into a synthetic span here. A merged span would
+    have no entry in the candidate registry, no recorded ``text_sha256`` and therefore nothing
+    for preflight to reconstruct -- it would defeat the integrity check it passes through. The
+    duplicated-header cost that fusing was meant to avoid is instead removed at render time,
+    where contiguous runs from one source share a single header (see ``renderer.render``).
+    Doing it there also keeps it uniform across all three aggregators, so it cannot become a
+    confound between them.
+    """
     seen: dict[str, ParsedItem] = {}
     for item in sel.items:
         _require(registry, item.span_id)
         seen.setdefault(item.span_id, item)
     ordered = sorted(seen.values(), key=lambda it: _order_key(registry[it.span_id]))
-    items = tuple(AggregatedItem(it.span_id, it.role, it.facet_ids) for it in ordered)
+    items = tuple(AggregatedItem.from_parsed(it) for it in ordered)
     return AggregatedEvidence(items=items, gaps=sel.gaps, bridges=sel.bridges)
 
 
@@ -129,27 +157,51 @@ def coverage_budget_v1(
     dropped: list[str] = []
 
     def would_fit(candidate: list[AggregatedItem]) -> bool:
-        return coster(candidate, registry) <= token_budget
+        # Cost the whole object: the gaps and bridges are rendered alongside the items, so a
+        # budget check that ignores them lets a TYPED or BRIDGE arm overshoot by exactly the
+        # part of its output that is not an item.
+        trial = AggregatedEvidence(
+            items=tuple(candidate), gaps=sel.gaps,
+            bridges=_bridges_supported_by(sel.bridges, {it.span_id for it in candidate}),
+        )
+        return coster(trial, registry) <= token_budget
 
     for item in items:
-        agg = AggregatedItem(item.span_id, item.role, item.facet_ids)
-        trial = kept + [agg]
+        agg = AggregatedItem.from_parsed(item)
         source = _source_key(registry[item.span_id])
         in_conflict = any(f in contradiction_facets for f in item.facet_ids)
         # Force-admit conflict spans (keep both sides) and up to the source-diversity minimum,
         # even against a tight budget, so neither a disagreement nor breadth is silently lost.
         force = in_conflict or (len(kept_sources) < min_sources and source not in kept_sources)
-        if would_fit(trial) or force:
+        if would_fit(kept + [agg]) or force:
             kept.append(agg)
             kept_sources.add(source)
         else:
             dropped.append(item.span_id)
 
     ordered = sorted(kept, key=lambda it: _order_key(registry[it.span_id]))
-    return AggregatedEvidence(
-        items=tuple(ordered), gaps=sel.gaps, bridges=sel.bridges,
-        dropped_for_budget=tuple(dropped),
+    kept_ids = {it.span_id for it in ordered}
+    bridges = _bridges_supported_by(sel.bridges, kept_ids)
+    dropped_bridges = tuple(
+        b.text for b in sel.bridges if b not in bridges
     )
+    return AggregatedEvidence(
+        items=tuple(ordered), gaps=sel.gaps, bridges=bridges,
+        dropped_for_budget=tuple(dropped), dropped_bridges=dropped_bridges,
+    )
+
+
+def _bridges_supported_by(
+    bridges: tuple[ParsedBridge, ...], kept_ids: set[str]
+) -> tuple[ParsedBridge, ...]:
+    """Keep only bridges whose every bound span survived.
+
+    A bridge names specific spans. Once any of them is dropped for budget, the bridge is an
+    assertion whose support is no longer in the output and whose citation resolves to nothing --
+    the renderer would have to label a span that is not there. Dropping the bridge is the honest
+    resolution; it is recorded in ``dropped_bridges`` rather than vanishing.
+    """
+    return tuple(b for b in bridges if set(b.evidence_span_ids) <= kept_ids)
 
 
 def global_rerank_v1(

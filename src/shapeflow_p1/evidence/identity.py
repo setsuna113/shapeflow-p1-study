@@ -29,6 +29,8 @@ __all__ = [
     "build_visible_message_span",
     "CandidateSet",
     "OutOfSetLabel",
+    "EVIDENCE",
+    "QUERY_ATTEMPT",
 ]
 
 
@@ -88,7 +90,29 @@ def build_evidence_span(
         "token_end": None,
         "text_sha256": text_hash,
         "kind": chunk.kind,
+        # Metadata the renderer surfaces so a fragment can be read without widening the byte
+        # range it addresses. context_refs are addressed and hashed like the span itself, so
+        # preflight can re-derive them; a free-text context field would be an unbound channel
+        # into the prompt that every integrity check would pass over.
         "heading_path": list(chunk.heading_path),
+        "heading_refs": [
+            {
+                "content_hash": content_hash,
+                "char_start": hs,
+                "char_end": he,
+                "text_sha256": sha256_hex(source_text[hs:he].encode("utf-8")),
+            }
+            for hs, he in chunk.heading_ranges
+        ],
+        "context_refs": [
+            {
+                "content_hash": content_hash,
+                "char_start": cs,
+                "char_end": ce,
+                "text_sha256": sha256_hex(source_text[cs:ce].encode("utf-8")),
+            }
+            for cs, ce in chunk.context_ranges
+        ],
         "token_len": chunk.token_len,
         "chunker_version": chunker_version,
     }
@@ -148,48 +172,95 @@ class OutOfSetLabel(KeyError):
     scheme as strict as full ids."""
 
 
+EVIDENCE = "evidence"
+QUERY_ATTEMPT = "query_attempt"
+_KINDS = (EVIDENCE, QUERY_ATTEMPT)
+
+
 @dataclass
 class CandidateSet:
     """Maps spans and query attempts to short prompt labels and back.
 
     Labels are allocated in the given (deterministic) order: evidence spans as ``E1..En`` and
-    query attempts as ``Q1..Qm``. The span dicts may be either namespace; the id field is read
-    accordingly.
+    query attempts as ``Q1..Qm``.
+
+    **Two tables, not one.** ``E`` and ``Q`` are different *kinds* and each resolves only
+    against its own table, so ``resolve`` takes the kind the caller expects. A single shared
+    table would let a selector put ``Q1`` where a span id belongs -- pointing "evidence" at a
+    search query -- or ``E1`` where a query attempt belongs, claiming a gap was probed by a
+    piece of evidence. Both parse cleanly under one table and both corrupt the very selection
+    semantics the study measures.
+
+    **The set knows its span namespace.** ``namespace`` is ``RAW_SOURCE`` or
+    ``VISIBLE_MESSAGE``. Building C_VISIBLE's set over ``VISIBLE_MESSAGE`` spans is what makes
+    "the selector may not read raw page bytes" structurally unreachable rather than a
+    convention someone has to remember.
     """
 
-    _label_to_id: dict[str, str]
-    _id_to_label: dict[str, str]
+    _evidence_label_to_id: dict[str, str]
+    _evidence_id_to_label: dict[str, str]
+    _query_label_to_id: dict[str, str]
+    _query_id_to_label: dict[str, str]
+    namespace: str = "RAW_SOURCE"
 
     @classmethod
     def build(
-        cls, span_ids: list[str], query_attempt_ids: Optional[list[str]] = None
+        cls,
+        span_ids: list[str],
+        query_attempt_ids: Optional[list[str]] = None,
+        *,
+        namespace: str = "RAW_SOURCE",
     ) -> "CandidateSet":
-        label_to_id: dict[str, str] = {}
-        id_to_label: dict[str, str] = {}
+        if namespace not in {"RAW_SOURCE", "VISIBLE_MESSAGE"}:
+            raise ValueError(f"unknown span namespace {namespace!r}")
+        e_l2i: dict[str, str] = {}
+        e_i2l: dict[str, str] = {}
         for i, sid in enumerate(span_ids, start=1):
             label = f"E{i}"
-            label_to_id[label] = sid
-            id_to_label[sid] = label
+            e_l2i[label] = sid
+            e_i2l[sid] = label
+        q_l2i: dict[str, str] = {}
+        q_i2l: dict[str, str] = {}
         for j, qid in enumerate(query_attempt_ids or [], start=1):
             label = f"Q{j}"
-            label_to_id[label] = qid
-            id_to_label[qid] = label
-        return cls(_label_to_id=label_to_id, _id_to_label=id_to_label)
+            q_l2i[label] = qid
+            q_i2l[qid] = label
+        return cls(
+            _evidence_label_to_id=e_l2i, _evidence_id_to_label=e_i2l,
+            _query_label_to_id=q_l2i, _query_id_to_label=q_i2l,
+            namespace=namespace,
+        )
+
+    def _table(self, kind: str) -> dict[str, str]:
+        if kind == EVIDENCE:
+            return self._evidence_label_to_id
+        if kind == QUERY_ATTEMPT:
+            return self._query_label_to_id
+        raise ValueError(f"unknown candidate kind {kind!r}; expected one of {_KINDS}")
 
     def label_for(self, span_id: str) -> str:
-        return self._id_to_label[span_id]
+        """The evidence label for a span id. Used by the renderer, which only renders spans."""
+        return self._evidence_id_to_label[span_id]
 
-    def resolve(self, label: str) -> str:
-        """Resolve a label the model emitted to its full id, or reject it as out-of-set."""
-        if label not in self._label_to_id:
-            raise OutOfSetLabel(label)
-        return self._label_to_id[label]
+    def label_for_query(self, query_attempt_id: str) -> str:
+        return self._query_id_to_label[query_attempt_id]
 
-    def resolve_all(self, labels: list[str]) -> list[str]:
-        return [self.resolve(x) for x in labels]
+    def resolve(self, label: str, *, kind: str) -> str:
+        """Resolve a label the model emitted, or reject it as out-of-set.
 
-    def __contains__(self, label: str) -> bool:
-        return label in self._label_to_id
+        ``kind`` is required: the caller always knows whether it is reading a span position or
+        a query-attempt position, and making it explicit is what keeps the two apart.
+        """
+        table = self._table(kind)
+        if label not in table:
+            raise OutOfSetLabel(f"{label} (expected a {kind} label)")
+        return table[label]
+
+    def resolve_all(self, labels: list[str], *, kind: str) -> list[str]:
+        return [self.resolve(x, kind=kind) for x in labels]
+
+    def contains(self, label: str, *, kind: str) -> bool:
+        return label in self._table(kind)
 
     def __len__(self) -> int:
-        return len(self._label_to_id)
+        return len(self._evidence_label_to_id) + len(self._query_label_to_id)
