@@ -347,6 +347,7 @@ def prepare(config: Path = _CFG,
     judge = DeepSeekJudge(
         client.deepseek_transport(op_class="TASK_AUTHOR", work_key="prepare"),
         settings.judge_model(), PROVIDER_KEY_PLACEHOLDER,
+        sampling=settings.authoring_sampling(),
     )
     result = asyncio.run(prepare_corpus(
         settings, judge=judge, authored_at_utc=_now(),

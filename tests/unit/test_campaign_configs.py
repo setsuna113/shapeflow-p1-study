@@ -209,6 +209,51 @@ def test_the_provider_config_is_built_from_the_campaign_config(settings):
     assert config.bind_host == "127.0.0.1"
     assert config.deepseek_usd_per_1m_input == 2.00
     assert config.model_aliases["qwen-selector-page"].value == "PAGE_P1_SELECTOR_LOCAL"
+    assert config.max_consecutive_failures == 5
+
+
+def test_the_money_reservation_covers_its_own_token_ceilings(settings):
+    """A standalone USD constant is a number sitting next to a worst case, not one."""
+    provider = settings.get("week1", "provider")
+    pricing = settings.admission_pricing()
+    derived = (
+        provider["deepseek_input_tokens_worst_case"] / 1e6 * pricing["usd_per_1m_input_tokens"]
+        + provider["deepseek_output_tokens_worst_case"] / 1e6
+        * pricing["usd_per_1m_output_tokens"]
+    )
+    assert settings.deepseek_usd_worst_case() >= derived
+
+
+def test_a_reservation_below_its_token_bound_is_refused_at_load(settings, tmp_path):
+    from shapeflow_p1.config import ConfigError
+
+    shrunk = dict(settings.configs["week1"])
+    shrunk["provider"] = dict(shrunk["provider"], deepseek_usd_worst_case=0.05)
+    settings.configs["week1"] = shrunk
+    with pytest.raises(ConfigError, match="upper bound"):
+        settings.deepseek_usd_worst_case()
+
+
+def test_admission_pricing_may_only_be_more_conservative(settings):
+    from shapeflow_p1.config import ConfigError
+
+    official = settings.get("judge", "pricing")
+    settings.configs["judge"] = dict(
+        settings.configs["judge"],
+        admission_pricing={"usd_per_1m_input_tokens":
+                           official["usd_per_1m_input_tokens"] / 2},
+    )
+    with pytest.raises(ConfigError, match="never less"):
+        settings.admission_pricing()
+
+
+def test_the_authoring_envelope_comes_from_the_frozen_config(settings):
+    envelope = settings.authoring_sampling()
+    block = settings.get("task_source", "authoring")
+    assert envelope.temperature == block["temperature"]
+    assert envelope.top_p == block["top_p"]
+    assert envelope.seed == block["seed"]
+    assert envelope.max_tokens == block["max_tokens"]
 
 
 def test_a_missing_key_is_an_error_not_a_default(settings):

@@ -112,6 +112,30 @@ class AuthoringError(RuntimeError):
     """The author could not produce a corpus that satisfies the frozen plan."""
 
 
+def _call_record(
+    label: str, prompt: str, response, *, round_index: int = 0
+) -> dict:
+    """One authoring call, with every dispatch it took to get an answer.
+
+    The prompt is stored in full, not hashed: ``author_prompt_sha256`` digests the *templates*,
+    so for any cluster that needed a correction the bytes that actually produced the corpus
+    exist nowhere else.
+    """
+    return {
+        "label": label,
+        "round": round_index,
+        "prompt": prompt,
+        "prompt_sha256": sha256_hex(prompt.encode("utf-8")),
+        "response_sha256": sha256_hex(canonical_json(response.data)),
+        "usage": dict(response.usage),
+        "request_id": response.request_id,
+        "requested_model": response.requested_model,
+        "returned_model": response.returned_model,
+        "system_fingerprint": response.system_fingerprint,
+        "attempts": [a.content() for a in response.attempts],
+    }
+
+
 def author_prompt_sha256() -> str:
     """Digest of every prompt byte the authoring depends on.
 
@@ -265,11 +289,18 @@ def _checker(schema: dict):
     return check
 
 
-async def author_clusters(judge: DeepSeekJudge, *, n: int) -> list[dict]:
+async def author_clusters(
+    judge: DeepSeekJudge, *, n: int, record: Optional[list] = None
+) -> list[dict]:
     """Ask for ``n`` mutually unrelated topic clusters, and refuse a short or duplicated set."""
+    prompt = _CLUSTER_PROMPT.format(n=n)
     response = await judge.judge(
-        AUTHOR_SYSTEM_PROMPT, _CLUSTER_PROMPT.format(n=n), validate=_checker(_CLUSTER_SCHEMA),
+        AUTHOR_SYSTEM_PROMPT, prompt, validate=_checker(_CLUSTER_SCHEMA),
     )
+    if record is not None:
+        # The cluster call shapes every task that follows it, and it used to leave no trace
+        # in the manifest at all.
+        record.append(_call_record("clusters", prompt, response))
     clusters = response.data["clusters"][:n]
     ids = [c["cluster_id"] for c in clusters]
     if len(set(ids)) != len(ids):
@@ -303,8 +334,8 @@ async def author_tasks(
     short would change the design's power without changing its pre-registration.
     """
     profiles = plan_profiles(total=total, clusters=clusters, min_counts=min_counts)
-    cluster_records = await author_clusters(judge, n=clusters)
     raw_responses: list[dict] = []
+    cluster_records = await author_clusters(judge, n=clusters, record=raw_responses)
     specs: list[TaskSpec] = []
     returned_model = ""
     system_fingerprint = ""
@@ -323,15 +354,22 @@ async def author_tasks(
         response = None
         correction = ""
         for attempt in range(attempts_per_cluster):
+            sent = prompt + correction
             try:
                 response = await judge.judge(
-                    AUTHOR_SYSTEM_PROMPT, prompt + correction,
+                    AUTHOR_SYSTEM_PROMPT, sent,
                     validate=_checker(_TASK_SCHEMA))
             except JudgeUnavailable as e:
                 raise AuthoringError(
                     f"cluster {cluster['cluster_id']!r} could not be authored: {e}. A partially "
                     "authored corpus is not a corpus; nothing is sealed."
                 ) from e
+            # Recorded before the draft is judged good or bad, and including the exact bytes
+            # sent. The correction text is part of the prompt that produced the corpus; with
+            # only the accepted response kept, a cluster that needed a retry had a prompt
+            # nobody could reconstruct.
+            raw_responses.append(_call_record(
+                cluster["cluster_id"], sent, response, round_index=attempt))
             short = [
                 t["profile_id"] for t in response.data["tasks"]
                 if not (min_question_chars <= len(" ".join(str(t["question"]).split()))
@@ -363,12 +401,6 @@ async def author_tasks(
             )
         returned_model = response.returned_model or returned_model
         system_fingerprint = response.system_fingerprint or system_fingerprint
-        raw_responses.append({
-            "cluster_id": cluster["cluster_id"],
-            "response_sha256": sha256_hex(canonical_json(response.data)),
-            "usage": response.usage,
-            "request_id": response.request_id,
-        })
 
         by_profile = {t["profile_id"]: t for t in response.data["tasks"]}
         for profile in wanted:
@@ -383,12 +415,25 @@ async def author_tasks(
     if len(specs) != total:
         raise AuthoringError(f"authored {len(specs)} tasks, expected {total}")
 
+    drift = sorted({
+        m for r in raw_responses for a in r["attempts"]
+        if (m := str(a.get("returned_model") or "")) and m != returned_model
+    })
+    if drift:
+        raise AuthoringError(
+            f"the corpus was authored by more than one model: {[returned_model, *drift]}. "
+            "Recording only the last one would describe a corpus that half of it did not "
+            "come from."
+        )
     fingerprint = AuthoringFingerprint(
         provider="deepseek",
         requested_model=requested_model,
-        returned_model=returned_model or requested_model,
+        # No `or requested_model` fallback: reporting the model we asked for as the model
+        # that answered is exactly the substitution the fingerprint exists to detect.
+        returned_model=returned_model,
         system_fingerprint=system_fingerprint,
         prompt_sha256=author_prompt_sha256(),
+        sampling=judge.sampling.content(),
         seed=seed,
         authored_at_utc=authored_at_utc,
     )
@@ -447,8 +492,18 @@ def authoring_manifest(
              "strata": list(p.strata)}
             for p in profiles
         ],
+        # Covers everything above it. The digest used to skip prompt_version, prompt_sha256
+        # and profiles, so the coverage plan the corpus was built against could change
+        # without changing the manifest's own hash.
         "manifest_sha256": sha256_hex(canonical_json({
+            "prompt_version": PROMPT_VERSION,
+            "prompt_sha256": author_prompt_sha256(),
             "fingerprint": fingerprint.content(),
             "responses": list(raw_responses),
+            "profiles": [
+                {"profile_id": p.profile_id, "cluster_index": p.cluster_index,
+                 "strata": list(p.strata)}
+                for p in profiles
+            ],
         })),
     }

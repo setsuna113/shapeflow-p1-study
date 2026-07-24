@@ -63,7 +63,12 @@ provider:
   tavily_credits_worst_case: 2.0
   deepseek_input_tokens_worst_case: 32000.0
   deepseek_output_tokens_worst_case: 8000.0
-  deepseek_usd_worst_case: 0.05
+  # Derived from the two token ceilings above at the admission prices in configs/judge.yaml
+  # (32000/1e6*2.00 + 8000/1e6*8.00), not chosen. Settings.deepseek_usd_worst_case recomputes
+  # it at load and refuses a value that does not cover its own token bound: the previous 0.05
+  # was under half of what those ceilings imply, so every authoring call was admitted against
+  # a number it could exceed and settlement then clamped the overspend out of sight.
+  deepseek_usd_worst_case: 0.128
   gpu_seconds_worst_case: 900.0
 
 # One alias per call site, all rewritten to the single served model before dispatch. This is the

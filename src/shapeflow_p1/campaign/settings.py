@@ -101,10 +101,64 @@ class Settings:
         # Passed as strings: ProviderConfig.from_mapping is what turns them into OpClass, and
         # an alias naming an op class that does not exist must fail there, once.
         block["model_aliases"] = dict(self.get("week1", "model_aliases"))
-        pricing = self.get("judge", "pricing")
-        block["deepseek_usd_per_1m_input"] = float(pricing["usd_per_1m_input_tokens"])
-        block["deepseek_usd_per_1m_output"] = float(pricing["usd_per_1m_output_tokens"])
+        pricing = self.admission_pricing()
+        block["deepseek_usd_per_1m_input"] = pricing["usd_per_1m_input_tokens"]
+        block["deepseek_usd_per_1m_output"] = pricing["usd_per_1m_output_tokens"]
+        block["deepseek_usd_worst_case"] = self.deepseek_usd_worst_case()
+        block.setdefault(
+            "max_consecutive_failures",
+            int(self.get("budget", "retry_policy", "max_consecutive_failures")),
+        )
         return ProviderConfig.from_mapping(block)
+
+    def admission_pricing(self) -> dict[str, float]:
+        """The prices admission control reserves against.
+
+        Defaults to the official snapshot. A separate ``admission_pricing`` block may only
+        raise them: reserving against a cheaper price than the vendor charges is not
+        conservatism, it is an under-estimate wearing the word "worst case".
+        """
+        official = self.get("judge", "pricing")
+        rates = {
+            "usd_per_1m_input_tokens": float(official["usd_per_1m_input_tokens"]),
+            "usd_per_1m_output_tokens": float(official["usd_per_1m_output_tokens"]),
+        }
+        override = self.configs["judge"].get("admission_pricing") or {}
+        for key, value in rates.items():
+            if key in override:
+                bound = float(override[key])
+                if bound < value:
+                    raise ConfigError(
+                        f"admission_pricing.{key} ({bound}) is below the official snapshot "
+                        f"({value}); admission may only be more conservative, never less"
+                    )
+                rates[key] = bound
+        return rates
+
+    def deepseek_usd_worst_case(self) -> float:
+        """The money reservation, derived from the token ceilings rather than declared.
+
+        A standalone USD constant is not a worst case -- it is a number that happens to sit
+        next to one. The configured 0.05 was under half of what its own token ceilings imply
+        at its own prices, so every authoring call was admitted against a bound it could
+        exceed, and settlement then clamped the overspend out of sight.
+        """
+        provider = self.get("week1", "provider")
+        pricing = self.admission_pricing()
+        derived = (
+            float(provider["deepseek_input_tokens_worst_case"]) / 1e6
+            * pricing["usd_per_1m_input_tokens"]
+            + float(provider["deepseek_output_tokens_worst_case"]) / 1e6
+            * pricing["usd_per_1m_output_tokens"]
+        )
+        declared = provider.get("deepseek_usd_worst_case")
+        if declared is not None and float(declared) < derived:
+            raise ConfigError(
+                f"provider.deepseek_usd_worst_case ({declared}) does not cover the "
+                f"{derived:.4f} USD its own token ceilings imply at the admission prices; "
+                "a reservation that is not an upper bound is not admission control"
+            )
+        return max(derived, float(declared or 0.0))
 
     def budget_caps(self) -> dict[str, float]:
         """The hash-locked caps, expressed as the resources the ledger accounts for.
@@ -125,6 +179,27 @@ class Settings:
             "remote_calls": float(api["max_remote_calls"]),
             "gpu_seconds": float(campaign["max_gpu_hours"]) * 3600.0,
         }
+
+    def authoring_sampling(self):
+        """The decoding policy the authoring calls must actually carry.
+
+        Read from the frozen config rather than defaulted in the client. Every one of these
+        keys existed in configs/task_source.yaml and none of them was ever read, so the
+        corpus fingerprint described a policy that never left the machine.
+        """
+        from ..evaluation.judge_client import SamplingEnvelope
+
+        block = self.get("task_source", "authoring")
+        return SamplingEnvelope(
+            temperature=float(block["temperature"]),
+            top_p=float(block["top_p"]),
+            seed=int(block["seed"]),
+            max_tokens=int(block["max_tokens"]),
+            enable_thinking=bool(block.get("enable_thinking", False)),
+            # DeepSeek has no thinking switch: reasoning is a property of the model id. The
+            # attempts record the reasoning tokens that actually came back instead.
+            send_thinking_switch=bool(block.get("send_thinking_switch", False)),
+        )
 
     def judge_model(self) -> str:
         """Resolve the judge model from the environment, and refuse a forbidden one.

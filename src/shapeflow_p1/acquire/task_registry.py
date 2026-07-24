@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from ..canonical import canonical_json
 from ..hashing import derive_id, sha256_hex
@@ -79,6 +79,9 @@ class AuthoringFingerprint:
     prompt_sha256: str
     seed: int
     authored_at_utc: str
+    #: The decoding policy that reached the model. Not the one the config declares -- those
+    #: were the same value only by coincidence, and for most of them not at all.
+    sampling: Mapping[str, Any] = field(default_factory=dict)
 
     def content(self) -> dict:
         return {
@@ -87,6 +90,7 @@ class AuthoringFingerprint:
             "returned_model": self.returned_model,
             "system_fingerprint": self.system_fingerprint,
             "prompt_sha256": self.prompt_sha256,
+            "sampling": dict(self.sampling),
             "seed": self.seed,
             "authored_at_utc": self.authored_at_utc,
         }

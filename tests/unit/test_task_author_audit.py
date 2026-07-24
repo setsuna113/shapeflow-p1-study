@@ -90,7 +90,12 @@ async def test_authoring_produces_the_planned_corpus(task_config):
     assert fingerprint.prompt_sha256 == author_prompt_sha256()
     assert all(s.corpus_tier == "FORMATIVE_MACHINE_AUTHORED" for s in specs)
     assert all(s.claim_scope == "FORMATIVE_ONLY" for s in specs)
-    assert len(responses) == 4
+    # One cluster call plus one per cluster: the call that decided the topics is part of how
+    # the corpus came to exist and belongs in the manifest too.
+    assert responses[0]["label"] == "clusters"
+    assert len(responses) == 5
+    assert all(r["prompt"] for r in responses), "the exact prompt bytes must be kept"
+    assert all(r["attempts"] for r in responses)
 
 
 async def test_a_skipped_profile_is_fatal_not_silently_dropped():

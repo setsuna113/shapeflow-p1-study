@@ -22,11 +22,16 @@ authoring:
   provider: deepseek
   model_env: DEEPSEEK_JUDGE_MODEL           # resolved once at launch, then frozen
   forbidden_author_model_substring: Qwen
+  # Every one of these now travels on the request. They sat here unread while the client
+  # sent a hardcoded temperature of 0.0 and nothing else, so the corpus fingerprint recorded
+  # a decoding policy that never reached the model.
   temperature: 0.4
   top_p: 1.0
   seed: 20260724
+  # A hard output cap. Without one, a draft that ran long was retried against the same
+  # uncapped body and its truncation was reported as an empty response.
   max_tokens: 4096
-  tasks_per_request: 4
+  enable_thinking: false
   prompt_version: task_author_v1
 
 # 64 sealed specs. The 48-task confirmatory holdout of plan §7.4's capacity target is NOT

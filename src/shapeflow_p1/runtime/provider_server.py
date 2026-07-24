@@ -206,13 +206,16 @@ class ProviderConfig:
     tavily_credits_worst_case: float = 2.0
     deepseek_input_tokens_worst_case: float = 32000.0
     deepseek_output_tokens_worst_case: float = 8000.0
-    deepseek_usd_worst_case: float = 0.05
+    deepseek_usd_worst_case: float = 0.128
     gpu_seconds_worst_case: float = 900.0
 
     # Pricing snapshot (source + retrieval date live in configs/judge.yaml and are hashed
     # into the protocol SHA). USD is derived here so the ledger holds money, not just tokens.
-    deepseek_usd_per_1m_input: float = 0.27
-    deepseek_usd_per_1m_output: float = 1.10
+    # These defaults mirror that snapshot rather than an older, cheaper one: when they
+    # diverged, every test priced a call at a quarter of what production charged for it, and
+    # the test named "usd is derived from reported usage" passed against the wrong rate.
+    deepseek_usd_per_1m_input: float = 2.00
+    deepseek_usd_per_1m_output: float = 8.00
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "ProviderConfig":
