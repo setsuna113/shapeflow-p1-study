@@ -106,6 +106,11 @@ chown sfrunner:sfrunner "$REPO/logs" "$REPO/reports"
 chmod 0775 "$REPO/logs" "$REPO/reports"
 mkdir -p /run/shapeflow && chown sfprovider:sfprovider /run/shapeflow && chmod 0750 /run/shapeflow
 
+# The repo is root-owned but the low-privilege roles must READ its git state (doctor's
+# git-clean integrity check). Without this, git refuses with "detected dubious ownership" and
+# the check degrades to SKIP. Read-only git usage only; no role can write the tree.
+git config --system --add safe.directory "$REPO" 2>/dev/null || true
+
 # --- gitleaks: the secret gate cannot be satisfied by assertion -----------------------------------
 if ! command -v gitleaks >/dev/null 2>&1; then
   say "installing gitleaks"
