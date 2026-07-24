@@ -1,0 +1,43 @@
+# Secret scanning config. Run by pre-commit, CI, and the launch gate.
+# A hit is fail-closed: the launch gate refuses to start the campaign.
+
+title = "shapeflow-p1-study secret scan"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "tavily-api-key"
+description = "Tavily API key"
+regex = '''tvly-[A-Za-z0-9_\-]{16,}'''
+tags = ["key", "tavily"]
+
+[[rules]]
+id = "deepseek-api-key"
+description = "DeepSeek / OpenAI-compatible secret key"
+regex = '''sk-[A-Za-z0-9_\-]{16,}'''
+tags = ["key", "deepseek"]
+
+[[rules]]
+id = "authorization-bearer"
+description = "Authorization bearer header captured in code, logs or fixtures"
+regex = '''(?i)authorization\s*[:=]\s*["']?bearer\s+[A-Za-z0-9._\-]{16,}'''
+tags = ["header"]
+
+[[rules]]
+id = "api-key-query-param"
+description = "Credential smuggled through a query string"
+regex = '''(?i)[?&](api_?key|access_?token|token)=[A-Za-z0-9._\-]{16,}'''
+tags = ["url"]
+
+[allowlist]
+description = "Placeholders and the redaction test corpus"
+# Deliberate fake secrets used to PROVE redaction works must not trip the scan.
+regexes = [
+  '''tvly-FAKEFAKEFAKEFAKEFAKE''',
+  '''sk-FAKEFAKEFAKEFAKEFAKE''',
+]
+paths = [
+  '''\.env\.example$''',
+  '''\.gitleaks\.toml$''',
+]

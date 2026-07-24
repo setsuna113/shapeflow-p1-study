@@ -1,0 +1,11 @@
+# Determinism: this study hashes file bytes (prompts, schemas, configs, freezes).
+# CRLF conversion on a Windows authoring host would change those hashes between
+# the authoring repo and the Linux experiment checkout. Force LF everywhere.
+* text=auto eol=lf
+
+# Never touch these.
+*.png binary
+*.pdf binary
+*.zst binary
+*.parquet binary
+*.sqlite binary

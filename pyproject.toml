@@ -1,0 +1,77 @@
+[project]
+name = "shapeflow-p1-study"
+version = "0.1.0"
+description = "Week-1 kill/keep study for ShapeFlow P1 nodes WEBPAGE_P1 and RESEARCHER_CLOSE"
+requires-python = "==3.12.*"
+
+# Direct dependencies are constrained here; uv.lock holds the exact resolution and
+# `uv sync --frozen` is what the launch gate enforces. Do not relax --frozen.
+dependencies = [
+  # CLI / config / serialization
+  "typer~=0.15.1",
+  "pydantic~=2.10.4",
+  "PyYAML~=6.0.2",
+  "orjson~=3.10.13",
+  "jsonschema~=4.23.0",
+  # HTTP / providers
+  "httpx~=0.28.1",
+  "tenacity~=9.0.0",
+  "tavily-python~=0.5.0",
+  "openai~=1.59.6",
+  # analysis
+  "numpy~=2.2.1",
+  "scipy~=1.15.0",
+  "pandas~=2.2.3",
+  "pyarrow~=18.1.0",
+  "statsmodels~=0.14.4",
+  "scikit-learn~=1.6.0",
+  "matplotlib~=3.10.0",
+  "seaborn~=0.13.2",
+  # telemetry
+  "psutil~=6.1.1",
+  "nvidia-ml-py~=12.560.30",
+  # evidence parsing
+  "beautifulsoup4~=4.12.3",
+  "markdown-it-py~=3.0.0",
+  # the pinned+patched vendor agent (resolved from .build/, see [tool.uv.sources])
+  "open_deep_research",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest~=8.3.4",
+  "pytest-asyncio~=0.25.1",
+  "hypothesis~=6.123.2",
+  "ruff~=0.8.6",
+]
+
+[project.scripts]
+shapeflow-p1 = "shapeflow_p1.cli:app"
+
+# The patched materialization is created by scripts/bootstrap_and_run.sh BEFORE
+# `uv sync --frozen` runs. Resolving ODR from here (never from PyPI or a global
+# site-packages) is what makes the P1 hooks the only ODR on the import path;
+# bootstrap asserts open_deep_research.__file__ is under this directory.
+[tool.uv.sources]
+open_deep_research = { path = ".build/open_deep_research-patched", editable = false }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shapeflow_p1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:shapeflow_p1.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+# S101 (assert) is fine in tests; invariant asserts in src are deliberate and reviewed.
+ignore = ["S101"]

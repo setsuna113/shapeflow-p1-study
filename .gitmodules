@@ -1,0 +1,3 @@
+[submodule "vendor/open_deep_research"]
+	path = vendor/open_deep_research
+	url = https://github.com/langchain-ai/open_deep_research

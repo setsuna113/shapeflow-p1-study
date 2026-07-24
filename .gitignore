@@ -1,0 +1,46 @@
+# --- secrets: never commit ---
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# --- experiment data & run state (never in git) ---
+data/
+runs/
+logs/
+object_store/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# --- patched vendor materialization (rebuilt by bootstrap) ---
+.build/
+
+# --- generated reports/exports (only redacted finals are copied out by hand) ---
+reports/*
+!reports/README.md
+exports/*
+!exports/.gitkeep
+manifests/*
+!manifests/.gitkeep
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- os / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
