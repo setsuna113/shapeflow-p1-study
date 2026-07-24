@@ -9,8 +9,14 @@
   "properties": {
     "task_id": { "type": "string", "minLength": 1 },
     "split": {
-      "enum": ["SCREEN", "POWER_PILOT", "HOLDOUT", "JUDGE_CALIBRATION", "LIVE_VALIDITY", "RESERVE"]
+      "description": "The FORMATIVE_ prefixes are load-bearing: this round's corpus is machine-authored and its splits may support screening and design choices only. A confirmatory study needs a new sealed registry, and its splits would carry different names for exactly that reason.",
+      "enum": [
+        "SCREEN", "POWER_PILOT", "HOLDOUT", "JUDGE_CALIBRATION", "LIVE_VALIDITY", "RESERVE",
+        "FORMATIVE_SCREEN", "FORMATIVE_POWER_PILOT"
+      ]
     },
+    "corpus_tier": { "enum": ["FORMATIVE_MACHINE_AUTHORED", "HUMAN_CURATED", "USER_PROVIDED"] },
+    "claim_scope": { "enum": ["FORMATIVE_ONLY", "CONFIRMATORY"] },
     "cluster_id": {
       "description": "Topic + source cluster. This, not the task, is the primary independent unit for inference: tasks sharing sources are correlated, and splitting them across SCREEN/HOLDOUT would leak.",
       "type": "string",
