@@ -1,0 +1,24 @@
+{
+  "approval_mode": "USER_EXPLICIT_AUTO_LAUNCH",
+  "approval_source_date": "2026-07-24",
+  "approved_at_utc": "2026-07-24T19:06:02Z",
+  "approved_commit": "55aedb8aa2acc4667e6b97430658a27ab169b944",
+  "binding": {
+    "acquisition_sha": "6eaf486375164ee15d32ccd290baa4eb39c8a8351f2f0a837b6b90017a07866f",
+    "approved_commit": "55aedb8aa2acc4667e6b97430658a27ab169b944",
+    "budget_sha": "d852b08e3b2b9be01e987d983cb4bd9c049de886109c78336dd76cf6f73eb7ed",
+    "decision_thresholds_sha": "22385ba1970058791cdb19954a04dfc2ff9609121c7ccac51381966a8493c84d",
+    "judge_sha": "227e05fe543cb69507b22199cd683721111db78357bbb622b4ec71e48dc1d49f",
+    "patched_tree_sha": "b222faae1def9603b83ab9aa32efe51619d0fce427f4d867f83222dfe43d5035",
+    "protocol_sha": "34e7e92026a17dee6b45f2f716a27ed7bacf4d06d5f9c92607c69b71501ce209",
+    "stack_manifest_sha": "db706ae1937d91acde39d0df3afd7444ad6ed3857d4b12ff48f386ae44d38e92",
+    "stack_sha": "e6036c6b55ec214fec30eb1658ef3f2909ba8b2814b482aaa0e795167e6209a6",
+    "task_source_sha": "c7aa79c1f34a530b0863295278e33f4c4de69d102e301cd9394309b1fd0949b0",
+    "variants_sha": "31a36778c4903201fe723c98a3a75a1a15524ec0622b755102a91fb36ddc8a66",
+    "vendor_commit": "",
+    "week1_sha": "bc5b31d9acd3d35fbbd3a5f4ebe54958e7b028c5db896940133729de03c532ba"
+  },
+  "binding_sha256": "8ec15667f285b0cd1e123c8cd84a582925aae637826dae1c454d47d54aa2d21a",
+  "claim_scope": "FORMATIVE_ONLY",
+  "note": "Protocol v0.1 auto-launch: the user's 2026-07-24 instruction to build and start running is the launch authorization. Every hard gate still fails closed. The corpus is FORMATIVE_MACHINE_AUTHORED and no result under this approval may be presented as confirmatory."
+}
