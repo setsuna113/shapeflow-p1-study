@@ -240,6 +240,9 @@ def build_h_checkpoint(
     for observation, tool_call in zip(observations, tool_calls):
         call_id = tool_call.get("id") or ""
         if is_deferred(observation):
+            # The tool call's id is assigned HERE, not inside tavily_search: a tool cannot see
+            # its own call id, and the zip order is where the mapping actually exists.
+            observation.tool_call_id = call_id
             search_sets.append((call_id, observation.visible_results()))
         else:
             non_search.append((call_id, sha256_hex(str(observation).encode("utf-8"))))

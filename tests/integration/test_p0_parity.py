@@ -97,6 +97,31 @@ def test_pristine_vendor_matches_patched_hooks_off(scenario):
     assert v == p, f"{scenario}: traces differ"
 
 
+@pytest.mark.parametrize("scenario", SCENARIOS)
+def test_patched_hooks_off_matches_explicit_p0_strategy(scenario):
+    """The deferred/checkpoint/reduce/refill path must introduce no difference of its own.
+
+    Gate A cannot see this: with hooks off, that code never executes. Here it does -- the tool
+    defers, the batch is checkpointed and reduced, and vendor's own closures are replayed --
+    and the result still has to be vendor's, down to the batch boundary.
+    """
+    hooks_off = _trace(PATCHED, scenario)
+    explicit_p0 = _trace(PATCHED, scenario, strategy="p0")
+    a, b = _comparable(hooks_off), _comparable(explicit_p0)
+    assert a["publish_batches"] == b["publish_batches"], (
+        f"{scenario}: the P1 code path changed what or how the batch was published"
+    )
+    assert a["exceptions"] == b["exceptions"], f"{scenario}: exception behaviour differs"
+    assert a["final_report_sha256"] == b["final_report_sha256"], f"{scenario}: output differs"
+    assert a["raw_notes_sha256"] == b["raw_notes_sha256"], f"{scenario}: raw_notes differ"
+    # Model requests are compared as a multiset: the P0 strategy issues vendor's summarization
+    # calls from its own gather, so the interleaving with the researcher's calls can differ
+    # while every request itself is identical. What must not differ is which calls were made.
+    assert sorted(map(str, a["model_requests"])) == sorted(map(str, b["model_requests"])), (
+        f"{scenario}: model requests differ"
+    )
+
+
 def test_the_two_trees_are_actually_different():
     """Guard against the gate passing because the patch was never applied."""
     from shapeflow_p1.treehash import tree_sha256

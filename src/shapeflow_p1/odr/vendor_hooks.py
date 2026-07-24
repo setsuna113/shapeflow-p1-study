@@ -23,6 +23,10 @@ from .adapter import DeferredPageBatch, build_h_checkpoint, is_deferred, reduce_
 from .checkpoints import SamplingEnvelope
 from .hooks import current_strategies
 
+
+class _UseVendorCompression(Exception):
+    """A close strategy declining, so vendor's own compression runs."""
+
 __all__ = [
     "RunBinding",
     "bind_run",
@@ -140,8 +144,18 @@ async def reduce_published_batch(
         sampling=run.sampling or SamplingEnvelope(model="", temperature=0.0, top_p=1.0,
                                                  max_tokens=0),
     )
+    # The P0 strategy replays vendor's own closures, so it needs the deferred objects rather
+    # than only the checkpoint's hashes. Handing them over here keeps the strategy protocol
+    # free of a vendor-specific parameter.
+    page = bundle.page
+    if hasattr(page, "_deferred"):
+        page._deferred = {
+            tool_calls[i]["id"]: observations[i]
+            for i in range(len(observations)) if is_deferred(observations[i])
+        }
+
     outcome = await reduce_tool_batch(
-        strategy=bundle.page,
+        strategy=page,
         task_ctx=run.task_ctx,
         checkpoint=checkpoint,
         observations=observations,
@@ -217,6 +231,13 @@ async def run_close_strategy(*, researcher_messages: Sequence[Any], close_reason
         _emit("CLOSE_CANCELLED", {"checkpoint": checkpoint.digest,
                                   "close_reason": close_reason})
         raise
+    except _UseVendorCompression:
+        # The explicit-P0 close strategy declines rather than re-implementing
+        # compress_research: that function has retry-on-token-limit, an in-place append and a
+        # specific raw_notes construction, and a second implementation would drift into
+        # looking like a P1 effect.
+        _emit("CLOSE_DEFERRED_TO_VENDOR", {"checkpoint": checkpoint.digest})
+        return None
     except Exception as e:  # noqa: BLE001
         _emit("CLOSE_FAILED", {"checkpoint": checkpoint.digest,
                                "close_reason": close_reason,

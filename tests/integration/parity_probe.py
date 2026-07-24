@@ -247,6 +247,23 @@ async def run(scenario_name: str, strategy: str | None) -> dict:
 
     from langchain_core.messages import HumanMessage
 
+    # Gate B binds an explicit P0 strategy so the deferred/checkpoint/reduce/refill path
+    # actually executes. Hooks-off never runs that code, so only this can show a bug inside it.
+    binding_cm = None
+    strategy_cm = None
+    if strategy == "p0":
+        from shapeflow_p1.odr.hooks import StrategyBundle, strategies_bound
+        from shapeflow_p1.odr.vendor_hooks import RunBinding, bind_run
+        from shapeflow_p1.p1.selectors import Candidate  # noqa: F401  (import sanity)
+        from shapeflow_p1.strategies.p0 import VendorCloseStrategy, VendorPageStrategy
+
+        page = VendorPageStrategy({})
+        strategy_cm = strategies_bound(
+            StrategyBundle(variant_id="P0", page=page, close=VendorCloseStrategy()))
+        binding_cm = bind_run(RunBinding(
+            task_id="parity", researcher_id="r0", attempt_id="a0",
+            task_ctx=None, component_trial=False))
+
     config = {"configurable": {
         "search_api": "tavily",
         "max_react_tool_calls": 1 if scenario_name == "max_react" else 5,
@@ -259,7 +276,13 @@ async def run(scenario_name: str, strategy: str | None) -> dict:
     }}
     exceptions: list[str] = []
     result: dict = {}
+    import contextlib
+    stack = contextlib.ExitStack()
+    if strategy_cm is not None:
+        stack.enter_context(strategy_cm)
+        stack.enter_context(binding_cm)
     try:
+      with stack:
         result = await graph.ainvoke(
             {"researcher_messages": [HumanMessage(content="research cats")],
              "research_topic": "cats", "tool_call_iterations": 0},
