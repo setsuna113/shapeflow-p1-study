@@ -119,8 +119,18 @@ def _build_fixture(settings: Settings) -> list[str]:
 
 async def main() -> int:
     settings = Settings.load(REPO, data_root=DIAG_ROOT)
+    # A lean ODR config: one react call, one researcher iteration. The formative screen uses the
+    # protocol's fuller config; the diagnostic only needs one search and one close to exercise
+    # the whole P1 path (defer -> transform -> publish -> close -> select -> report), and a real
+    # 14B model left at the protocol's limits runs the loop to its maximum, which is minutes of
+    # GPU per cell for no additional engineering signal. This override is legitimate precisely
+    # because the run is DIAGNOSTIC_NON_PROTOCOL.
+    lean = dict(settings.configs["week1"])
+    lean["odr"] = {**lean["odr"], "max_react_tool_calls": 1, "max_researcher_iterations": 1,
+                   "max_concurrent_research_units": 1}
+    settings.configs["week1"] = lean
     settings.ensure_paths("runner_root", "runs", "object_store")
-    task_ids = _build_fixture(settings)
+    task_ids = _build_fixture(settings)[:1]     # one task is enough to prove the path
 
     host = settings.get("week1", "provider", "bind_host")
     port = settings.get("week1", "provider", "bind_port")
