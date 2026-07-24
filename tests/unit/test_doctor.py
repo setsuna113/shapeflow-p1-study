@@ -9,7 +9,8 @@ from shapeflow_p1.doctor import (
     PASS,
     check_configs,
     check_schemas_closed,
-    check_secret_present,
+    check_credential_isolation,
+    check_provider_ready,
     run_pure_checks,
 )
 
@@ -29,23 +30,57 @@ def test_real_configs_load_and_hash():
     assert res.status == PASS, res.detail
 
 
-def test_secret_present_from_file_without_leaking(tmp_path, monkeypatch):
-    key_file = tmp_path / "k.key"
-    key_file.write_text("tvly-FAKEFAKEFAKEFAKEFAKE")
-    monkeypatch.setenv("TAVILY_API_KEY_FILE", str(key_file))
-    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
-    res = check_secret_present("tavily", env_var="TAVILY_API_KEY", file_env_var="TAVILY_API_KEY_FILE")
+def _proof(tmp_path, **overrides):
+    import json
+
+    body = {
+        "denied": {"sfrunner": True, "sfinfer": True, "sfsteward": True,
+                   "sfevaluator": True},
+        "provider_can_read": True,
+    }
+    body.update(overrides)
+    (tmp_path / "reports").mkdir(exist_ok=True)
+    (tmp_path / "reports" / "CREDENTIAL_ISOLATION.json").write_text(
+        json.dumps(body), encoding="utf-8")
+    return tmp_path
+
+
+def test_isolation_is_proven_by_failed_reads_not_by_a_successful_one(tmp_path):
+    """Doctor no longer opens a key file. The old check could only pass for the identity
+    that holds the credential, so `doctor --role runner` -- the one the gate runs -- failed
+    by construction, and it proved nobody else could read the secret by reading it."""
+    res = check_credential_isolation(_proof(tmp_path))
     assert res.status == PASS
-    # the detail reports presence + a fingerprint, never the value
-    assert "tvly-FAKEFAKEFAKEFAKEFAKE" not in res.detail
-    assert "fp" in res.detail
 
 
-def test_secret_absent_fails(monkeypatch):
-    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
-    monkeypatch.delenv("TAVILY_API_KEY_FILE", raising=False)
-    res = check_secret_present("tavily", env_var="TAVILY_API_KEY", file_env_var="TAVILY_API_KEY_FILE")
+def test_an_identity_that_could_read_a_credential_fails_the_check(tmp_path):
+    res = check_credential_isolation(
+        _proof(tmp_path, denied={"sfrunner": False, "sfinfer": True,
+                                 "sfsteward": True, "sfevaluator": True}))
     assert res.status == FAIL
+    assert "sfrunner" in res.detail
+
+
+def test_an_uncovered_identity_is_not_a_pass(tmp_path):
+    res = check_credential_isolation(
+        _proof(tmp_path, denied={"sfrunner": True, "sfinfer": True}))
+    assert res.status == FAIL
+    assert "sfsteward" in res.detail
+
+
+def test_a_missing_proof_fails_rather_than_skipping(tmp_path):
+    assert check_credential_isolation(tmp_path).status == FAIL
+
+
+def test_a_rejected_upstream_credential_is_a_doctor_failure():
+    """Present-and-wrong is what sent 262 requests and received 262 rejections."""
+    res = check_provider_ready(lambda: (401, "unauthorized"))
+    assert res.status == FAIL
+    assert "401" in res.detail
+
+
+def test_a_ready_provider_passes():
+    assert check_provider_ready(lambda: (200, "exa ok, deepseek ok")).status == PASS
 
 
 def test_run_pure_checks_report_structure(monkeypatch):
@@ -254,12 +289,15 @@ def test_verify_approval_rejects_a_caller_who_names_a_different_protocol(tmp_pat
     from typer.testing import CliRunner
 
     from shapeflow_p1.cli import app
-    from shapeflow_p1.protocol import compute_binding
+    from shapeflow_p1.protocol import compute_binding, read_head_commit
 
-    binding = compute_binding(REPO)
+    # Bound to the live HEAD, so the only thing left to disagree about is the SHA the
+    # caller names.
+    binding = compute_binding(REPO, approved_commit=read_head_commit(REPO))
     approval = tmp_path / "launch_approval.json"
     approval.write_text(json.dumps({
         "approval_mode": "USER_EXPLICIT_AUTO_LAUNCH",
+        "approved_commit": binding.approved_commit,
         "binding": binding.content(),
         "binding_sha256": binding.digest,
     }))

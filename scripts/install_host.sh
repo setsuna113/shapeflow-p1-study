@@ -166,23 +166,52 @@ fi
 install -m 0755 "$REPO/scripts/sfsupervise.sh" /usr/local/bin/sfsupervise
 
 # --- prove the boundary rather than asserting it -----------------------------------------------------
+# The result is written to reports/CREDENTIAL_ISOLATION.json, which is what `doctor` reads.
+# Doctor deliberately does not open a key file itself: that check could only pass for the one
+# identity holding the credential -- so `doctor --role runner`, the identity the launch gate
+# actually runs it as, failed by construction -- and it demonstrated that nobody else can read
+# the secret by reading it.
 say "proving credential isolation"
+DENIED_JSON=""
 for role in sfrunner sfinfer sfsteward sfevaluator; do
-  for key in tavily deepseek; do
+  denied=true
+  for key in tavily deepseek exa; do
+    [ -f "$CRED_DIR/$key.key" ] || continue
     if runuser -u "$role" -- cat "$CRED_DIR/$key.key" >/dev/null 2>&1; then
       echo "FATAL: $role can read $CRED_DIR/$key.key" >&2
-      exit 1
+      denied=false
     fi
   done
+  DENIED_JSON="$DENIED_JSON\"$role\": $denied,"
+  [ "$denied" = true ] || exit 1
 done
-runuser -u sfprovider -- cat "$CRED_DIR/tavily.key" >/dev/null \
-  || { echo "FATAL: sfprovider cannot read its own credential" >&2; exit 1; }
+PROVIDER_CAN_READ=true
+runuser -u sfprovider -- cat "$CRED_DIR/deepseek.key" >/dev/null \
+  || { echo "FATAL: sfprovider cannot read its own credential" >&2; PROVIDER_CAN_READ=false; }
+[ "$PROVIDER_CAN_READ" = true ] || exit 1
 runuser -u sfinfer -- "$VLLM_VENV/bin/python" -c 'import sys; sys.exit(0)' \
   || { echo "FATAL: sfinfer cannot execute the pinned interpreter" >&2; exit 1; }
-if runuser -u sfrunner -- ls "$DATA_ROOT/evaluator" >/dev/null 2>&1; then
-  echo "FATAL: sfrunner can list the evaluator tree" >&2
-  exit 1
-fi
+
+# The runner may not reach the answer key, and may not walk the steward's tree either: the
+# acquisition manifests there carry the audit occurrence graph, which is evaluator-only.
+for tree in evaluator steward; do
+  if runuser -u sfrunner -- ls "$DATA_ROOT/$tree" >/dev/null 2>&1; then
+    echo "FATAL: sfrunner can list the $tree tree" >&2
+    exit 1
+  fi
+done
+
+mkdir -p "$REPO/reports"
+cat > "$REPO/reports/CREDENTIAL_ISOLATION.json" <<JSON
+{
+  "generated_by": "scripts/install_host.sh",
+  "credential_dir": "$CRED_DIR",
+  "denied": { ${DENIED_JSON%,} },
+  "provider_can_read": $PROVIDER_CAN_READ,
+  "runner_cannot_list": ["evaluator", "steward"]
+}
+JSON
+chown sfrunner:sfrunner "$REPO/reports/CREDENTIAL_ISOLATION.json"
 
 echo
 echo "host installed."

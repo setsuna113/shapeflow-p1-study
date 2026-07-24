@@ -129,24 +129,116 @@ def compute_binding(repo: Path, *, approved_commit: str = "") -> ProtocolBinding
         acquisition_sha=acquisition,
         task_source_sha=task_source,
         judge_sha=judge,
-        vendor_commit=_read_vendor_commit(repo),
+        vendor_commit=read_vendor_pin(repo),
         patched_tree_sha=(repo / "patches" / "patched_tree.sha256").read_text().strip()
         if (repo / "patches" / "patched_tree.sha256").exists() else "",
         approved_commit=approved_commit,
     )
 
 
-def _read_vendor_commit(repo: Path) -> str:
+class VendorCommitUnobservable(ApprovalError):
+    """The vendor pin could not be read. Never a value, and never an empty string.
+
+    An unreadable pin used to become ``""``, which was then written into the approval and
+    compared against ``""`` -- so the one field that says which upstream this study forked
+    verified successfully while saying nothing. The approval on disk carries exactly that.
+    """
+
+
+def _git(repo: Path, *args: str) -> "subprocess.CompletedProcess":
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=30,
+    )
+
+
+def read_vendor_pin(repo: Path) -> str:
+    """The vendor commit this repository pins, read from the parent's gitlink.
+
+    Two reasons it comes from here rather than from ``git -C vendor/... rev-parse HEAD``:
+
+    The gitlink is what the repository *pins*; the submodule's own HEAD is whatever it
+    happens to be checked out at. Reading the latter means a submodule someone moved reports
+    itself as the pin, and drift becomes undetectable by construction.
+
+    And it is the same value under every identity. The submodule read went through git's
+    ownership check on a directory the low-privilege roles do not own, so it returned the
+    real commit for the owner and an empty string for everyone else -- which is why the
+    approval was minted with an empty vendor pin and still verified.
+    """
     import subprocess
 
     try:
-        out = subprocess.run(
-            ["git", "-C", str(repo / "vendor" / "open_deep_research"), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=30,
+        out = _git(repo, "ls-files", "-s", "--", "vendor/open_deep_research")
+    except (OSError, subprocess.SubprocessError) as e:
+        raise VendorCommitUnobservable(
+            f"cannot run git to read the vendor pin: {type(e).__name__}: {e}"
+        ) from e
+    if out.returncode != 0:
+        raise VendorCommitUnobservable(
+            f"git could not read the vendor gitlink: {out.stderr.strip()[:200]}"
         )
-        return out.stdout.strip() if out.returncode == 0 else ""
-    except (OSError, subprocess.SubprocessError):
-        return ""
+    fields = out.stdout.split()
+    if len(fields) < 2 or fields[0] != "160000":
+        raise VendorCommitUnobservable(
+            "vendor/open_deep_research is not a gitlink in this repository "
+            f"(git said {out.stdout.strip()[:120]!r})"
+        )
+    return fields[1]
+
+
+def read_head_commit(repo: Path) -> str:
+    """The commit that is checked out right now."""
+    import subprocess
+
+    try:
+        out = _git(repo, "rev-parse", "HEAD")
+    except (OSError, subprocess.SubprocessError) as e:
+        raise ApprovalError(
+            f"cannot run git to read HEAD: {type(e).__name__}: {e}") from e
+    if out.returncode != 0:
+        raise ApprovalError(f"git could not read HEAD: {out.stderr.strip()[:200]}")
+    return out.stdout.strip()
+
+
+def approvals_dir(repo: Path) -> Path:
+    return Path(repo) / "protocol" / "approvals"
+
+
+def approval_chain(repo: Path) -> list[dict]:
+    """Every approval ever recorded, oldest first.
+
+    A chain rather than a file. One mutable path can only ever show the current answer, so
+    the question "what was approved when this ran?" has no artifact behind it -- and the
+    refusal-to-overwrite that guarded it is one `rm` away from being no guard at all.
+    """
+    index = approvals_dir(repo) / "INDEX.json"
+    if not index.exists():
+        return []
+    try:
+        body = json.loads(index.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise ApprovalError(f"the approval index is unreadable: {e}") from e
+    return list(body.get("approvals") or [])
+
+
+def _write_atomic(path: Path, body: dict) -> None:
+    """Write through a temp file and rename, so a reader never sees half an approval."""
+    import os
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(body, indent=2, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def write_approval_file(
@@ -156,32 +248,32 @@ def write_approval_file(
     approved_commit: str = "",
     approval_path: Optional[Path] = None,
 ) -> ProtocolBinding:
-    """Materialize the approval for the configuration that is live right now.
+    """Record the approval for the configuration that is live right now.
 
     This does not *grant* an approval -- protocol v0.1 already fixed the mode, the budgets and
-    the thresholds, and this only records their hashes so a later edit is detectable. It refuses
-    to overwrite: replacing an approval in place would let a campaign look pre-registered for a
-    configuration it never ran under, which is the failure the file exists to prevent.
+    the thresholds, and this only records their hashes so a later edit is detectable.
+
+    It appends. A new configuration mints a new numbered file in ``protocol/approvals/`` and
+    a new entry in its index; nothing is ever rewritten in place, so the approval a past run
+    was checked against remains readable after the next one is recorded.
     """
     from .experiment.freeze import APPROVAL_MODE_AUTO
 
     repo = Path(repo)
     approval_path = approval_path or (repo / "protocol" / "launch_approval.json")
-    binding = compute_binding(repo, approved_commit=approved_commit)
+    binding = compute_binding(repo, approved_commit=approved_commit or read_head_commit(repo))
+    chain = approval_chain(repo)
+    if chain and chain[-1].get("binding_sha256") == binding.digest:
+        return binding              # already recorded for exactly this configuration
     if approval_path.exists():
         existing = json.loads(approval_path.read_text(encoding="utf-8"))
         if existing.get("binding_sha256") == binding.digest:
-            return binding          # already recorded for exactly this configuration
-        raise ApprovalError(
-            f"{approval_path} already approves a different configuration "
-            f"({existing.get('binding_sha256')!r} vs live {binding.digest!r}). A changed "
-            "configuration needs a new protocol version, not an overwritten approval."
-        )
+            return binding
     body = {
         "approval_mode": APPROVAL_MODE_AUTO,
         "approval_source_date": "2026-07-24",
         "approved_at_utc": approved_at_utc,
-        "approved_commit": approved_commit,
+        "approved_commit": binding.approved_commit,
         "binding": binding.content(),
         "binding_sha256": binding.digest,
         "claim_scope": "FORMATIVE_ONLY",
@@ -192,8 +284,25 @@ def write_approval_file(
             "presented as confirmatory."
         ),
     }
-    approval_path.parent.mkdir(parents=True, exist_ok=True)
-    approval_path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    sequence = len(chain) + 1
+    versioned = approvals_dir(repo) / f"{sequence:04d}-{binding.digest[:12]}.json"
+    body["sequence"] = sequence
+    _write_atomic(versioned, body)
+    _write_atomic(approvals_dir(repo) / "INDEX.json", {
+        "approvals": [
+            *chain,
+            {
+                "sequence": sequence,
+                "file": versioned.name,
+                "binding_sha256": binding.digest,
+                "approved_at_utc": approved_at_utc,
+                "approved_commit": body["approved_commit"],
+            },
+        ],
+    })
+    # The single path stays as the one the launch gate reads, and is now a copy of the
+    # newest link in the chain rather than the only record that it existed.
+    _write_atomic(approval_path, body)
     return binding
 
 
@@ -221,12 +330,16 @@ def verify_approval_file(repo: Path, approval_path: Optional[Path] = None) -> Pr
             f"(authorized: {sorted(APPROVAL_MODES)})"
         )
 
-    live = compute_binding(repo, approved_commit=approval.get("approved_commit", ""))
+    # Read from git, not copied out of the file being checked. Seeding the live binding
+    # from the approval and then excluding that field from the comparison made this a
+    # self-check: it could not fail, and a campaign could run thirteen commits past the
+    # tree its approval describes.
+    live = compute_binding(repo, approved_commit=read_head_commit(repo))
     pinned = approval.get("binding") or {}
     mismatches = [
         f"  {key}: approval pins {pinned.get(key)!r}, live is {value!r}"
         for key, value in live.content().items()
-        if key != "approved_commit" and pinned.get(key) != value
+        if pinned.get(key) != value
     ]
     if mismatches:
         raise ApprovalError(

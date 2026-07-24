@@ -79,6 +79,23 @@ def _assert_post_launch_flags(protocol_sha: Optional[str], resume: bool) -> None
         )
 
 
+def _require_approval() -> None:
+    """Every command that can spend verifies the approval itself.
+
+    Not in the launch script. A shell wrapper checks the approval once, at the top, for a
+    sequence of commands each of which can be run on its own -- and each of which spends
+    money or GPU hours when it is. `_assert_post_launch_flags` is not this check either: it
+    returns immediately until reports/LAUNCH_GATE_PASSED.json exists, and reports/ is
+    gitignored, so before the first launch it is a pass-through.
+    """
+    from .protocol import ApprovalError, verify_approval_file
+
+    try:
+        verify_approval_file(_REPO)
+    except ApprovalError as e:
+        _fail(f"refusing to run: the approval does not bind this configuration.\n{e}")
+
+
 def _provider_client(settings, role: str = "runner"):
     from .providers.provider_client import ProviderClient, load_role_token
 
@@ -342,6 +359,7 @@ def prepare(config: Path = _CFG,
 
     _assert_post_launch_flags(protocol_sha, resume)
     _require_role("steward")
+    _require_approval()
     settings = _settings()
     client = _provider_client(settings, "steward")
     judge = DeepSeekJudge(
@@ -369,6 +387,7 @@ def acquire(config: Path = _CFG,
 
     _assert_post_launch_flags(protocol_sha, resume)
     _require_role("steward")
+    _require_approval()
     settings = _settings()
     client = _provider_client(settings, "steward")
     params = tavily_params_from(settings)
@@ -476,6 +495,7 @@ def smoke(config: Path = _CFG,
 
     _assert_post_launch_flags(protocol_sha, resume)
     _require_role("runner")
+    _require_approval()
     settings = _settings()
     body = asyncio.run(run_canary(settings, repo=_REPO, task_limit=tasks))
     path = _REPO / "reports" / "GPU_SMOKE_REPORT.md"
@@ -503,6 +523,7 @@ def run_screen(config: Path = _CFG,
 
     _assert_post_launch_flags(protocol_sha, resume)
     _require_role("runner")
+    _require_approval()
     body = asyncio.run(run_screening(_settings(), repo=_REPO, max_cells=max_cells))
     typer.echo(json.dumps(body, indent=2, sort_keys=True))
     if not body.get("ok", False):
@@ -518,6 +539,7 @@ def run_week1(config: Path = _CFG,
 
     _assert_post_launch_flags(protocol_sha, resume)
     _require_role("runner")
+    _require_approval()
     body = asyncio.run(run_screening(_settings(), repo=_REPO, max_cells=None))
     typer.echo(json.dumps(body, indent=2, sort_keys=True))
     if not body.get("ok", False):

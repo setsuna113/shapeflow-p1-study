@@ -48,7 +48,10 @@ class GpuLease:
                 raise LeaseHeld(f"GPU {self._uuid} already leased") from e
             raise
         os.ftruncate(fd, 0)
-        os.write(fd, f"pid={os.getpid()} uuid={self._uuid}\n".encode())
+        # The uuid identifies the device; the flock is what excludes. A pid written into a
+        # frozen artifact is a value that changes every run and identifies a process nobody
+        # can look up later, so it is not recorded.
+        os.write(fd, f"uuid={self._uuid}\n".encode())
         os.fsync(fd)
         self._fd = fd
         return self

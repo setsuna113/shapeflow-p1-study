@@ -18,12 +18,13 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional, Sequence
 
 from .config import config_sha, load_config
 
-__all__ = ["CheckResult", "DoctorReport", "check_secret_present", "check_configs",
-           "check_schemas_closed", "check_identity", "run_pure_checks"]
+__all__ = ["CheckResult", "DoctorReport", "check_credential_isolation",
+           "check_provider_ready", "check_configs", "check_schemas_closed",
+           "check_identity", "run_pure_checks"]
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 
@@ -60,25 +61,62 @@ class DoctorReport:
         return json.dumps([c.__dict__ for c in self.checks], indent=2, sort_keys=True)
 
 
-def check_secret_present(label: str, *, env_var: str, file_env_var: str) -> CheckResult:
-    """PASS if a credential is reachable, without reading or printing its value beyond a short
-    non-invertible fingerprint. Prefers the *_FILE path (production) over the env var (dev)."""
-    path = os.environ.get(file_env_var)
-    value: Optional[str] = None
-    source = ""
-    if path and Path(path).exists():
-        try:
-            value = Path(path).read_text(encoding="utf-8").strip()
-            source = f"file:{file_env_var}"
-        except OSError:
-            return CheckResult(f"secret:{label}", FAIL, f"{file_env_var} set but unreadable")
-    elif os.environ.get(env_var):
-        value = os.environ[env_var].strip()
-        source = f"env:{env_var}"
-    if not value:
-        return CheckResult(f"secret:{label}", FAIL, "no credential via *_FILE or env var")
-    fp = hashlib.sha256(value.encode("utf-8")).hexdigest()[:6]
-    return CheckResult(f"secret:{label}", PASS, f"present via {source} (fp {fp})")
+def check_credential_isolation(repo: Path, *, roles: Sequence[str] = ()) -> CheckResult:
+    """Verify the installer's proof that only the provider identity can read a credential.
+
+    Doctor does not open a key file. It used to, which had two consequences: the check could
+    only pass for an identity that holds the credential -- so ``doctor --role runner``, the
+    one the launch gate actually runs, failed by construction -- and the diagnostic that is
+    supposed to prove nobody else can read the secret worked by reading it.
+
+    The proof is generated once by ``install_host.sh``, which attempts the read as every
+    non-provider role and requires each attempt to fail. Doctor checks that the proof exists,
+    covers every role, and records failures.
+    """
+    proof_path = repo / "reports" / "CREDENTIAL_ISOLATION.json"
+    if not proof_path.exists():
+        return CheckResult(
+            "credential_isolation", FAIL,
+            f"{proof_path.name} is absent; run install_host.sh to generate the proof")
+    try:
+        proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return CheckResult("credential_isolation", FAIL, f"proof unreadable: {e}")
+
+    attempts = proof.get("denied") or {}
+    wanted = list(roles) or ["sfrunner", "sfinfer", "sfsteward", "sfevaluator"]
+    missing = [r for r in wanted if r not in attempts]
+    if missing:
+        return CheckResult("credential_isolation", FAIL,
+                           f"the proof does not cover {missing}")
+    leaked = sorted(r for r in wanted if not attempts[r])
+    if leaked:
+        return CheckResult("credential_isolation", FAIL,
+                           f"these identities could read a credential: {leaked}")
+    if not proof.get("provider_can_read"):
+        return CheckResult("credential_isolation", FAIL,
+                           "the provider identity could not read its own credential")
+    return CheckResult("credential_isolation", PASS,
+                       f"{len(wanted)} identities refused, provider admitted")
+
+
+def check_provider_ready(probe: Callable[[], tuple[int, str]]) -> CheckResult:
+    """Ask the provider whether its upstreams accept its credentials, without holding any.
+
+    ``probe`` returns ``(status, detail)``. A 401/403 is the specific failure that let this
+    round send 262 search requests and receive 262 rejections: the credential was present and
+    wrong, which "a credential is reachable" cannot distinguish from working.
+    """
+    try:
+        status, detail = probe()
+    except Exception as e:  # noqa: BLE001 - an unreachable provider is a failed check
+        return CheckResult("provider_ready", FAIL, f"{type(e).__name__}: {e}")
+    if status in (401, 403):
+        return CheckResult("provider_ready", FAIL,
+                           f"upstream rejected the provider's credential ({status}): {detail}")
+    if status != 200:
+        return CheckResult("provider_ready", FAIL, f"provider not ready ({status}): {detail}")
+    return CheckResult("provider_ready", PASS, detail or "provider reports its upstreams ready")
 
 
 def check_configs(paths: dict[str, Path]) -> CheckResult:
@@ -170,22 +208,49 @@ def check_identity(expected_role: Optional[str] = None) -> CheckResult:
 
 
 def check_git_clean(repo: Path) -> CheckResult:
-    """A dirty tree must not launch a campaign."""
+    """A dirty tree must not launch a campaign.
+
+    Fails closed. Every way of not knowing -- git absent, git erroring, not a repository,
+    an ownership refusal -- used to report SKIP, and the most likely of those on the run
+    host said "not a git repo" about a repository that simply belonged to another user.
+    An unverifiable tree is not a clean one.
+    """
     if not shutil.which("git"):
-        return CheckResult("git_clean", SKIP, "git not available")
+        return CheckResult("git_clean", FAIL,
+                           "git is not available, so the tree cannot be verified clean")
     try:
         out = subprocess.run(
             ["git", "-C", str(repo), "status", "--porcelain"],
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as e:
-        return CheckResult("git_clean", SKIP, f"git status failed: {e}")
+        return CheckResult("git_clean", FAIL, f"git status failed: {e}")
     if out.returncode != 0:
-        return CheckResult("git_clean", SKIP, "not a git repo")
+        return CheckResult(
+            "git_clean", FAIL,
+            f"git refused to read {repo}: {out.stderr.strip()[:160] or 'not a git repository'}")
     dirty = [ln for ln in out.stdout.splitlines() if ln.strip()]
     if dirty:
         return CheckResult("git_clean", FAIL, f"{len(dirty)} uncommitted change(s)")
-    return CheckResult("git_clean", PASS, "working tree clean")
+
+    # A submodule sitting at a commit the parent does not pin is drift, and `status
+    # --porcelain` reports it the same way it reports an edited file. Naming it separately
+    # is the difference between "someone touched a file" and "we are running a different
+    # upstream than the approval says".
+    try:
+        sub = subprocess.run(
+            ["git", "-C", str(repo), "submodule", "status"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return CheckResult("git_clean", FAIL, f"git submodule status failed: {e}")
+    if sub.returncode != 0:
+        return CheckResult("git_clean", FAIL,
+                           f"git submodule status failed: {sub.stderr.strip()[:160]}")
+    drifted = [ln.strip() for ln in sub.stdout.splitlines() if ln[:1] in ("+", "-", "U")]
+    if drifted:
+        return CheckResult("git_clean", FAIL, f"submodule drift: {'; '.join(drifted)[:200]}")
+    return CheckResult("git_clean", PASS, "working tree clean, submodules at their pins")
 
 
 def check_stack_manifest(repo: Path, stack_config: Path) -> CheckResult:
@@ -257,7 +322,7 @@ def check_stack_manifest(repo: Path, stack_config: Path) -> CheckResult:
     return CheckResult(
         "stack_manifest", PASS,
         f"manifest {manifest.get('manifest_sha256', '')[:12]} matches the live stack"
-        + (f" (engine pid {engine_pid})" if engine_pid else " (engine not running)"),
+        + (" (engine running)" if engine_pid else " (engine not running)"),
     )
 
 
@@ -297,8 +362,7 @@ def run_pure_checks(
     report.add(check_configs(configs))
     report.add(check_schemas_closed(schema_dir))
     report.add(check_identity(role))
-    report.add(check_secret_present("tavily", env_var="TAVILY_API_KEY",
-                                    file_env_var="TAVILY_API_KEY_FILE"))
-    report.add(check_secret_present("deepseek", env_var="DEEPSEEK_API_KEY",
-                                    file_env_var="DEEPSEEK_API_KEY_FILE"))
+    # Not "can this process read a key" -- that check could only pass for the one identity
+    # that holds one, and it proved the opposite of what it claimed by reading it.
+    report.add(check_credential_isolation(repo))
     return report
