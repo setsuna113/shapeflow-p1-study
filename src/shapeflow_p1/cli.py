@@ -93,52 +93,90 @@ def verify_approval(
     approval: Path = typer.Option(..., "--approval", help="protocol/launch_approval.json"),
     config: Path = typer.Option(None, "--config", help="Campaign config (unused for hashing)"),
 ) -> None:
-    """Assert the approval pins the hashes of the live budget and decision configs.
+    """Assert the approval binds the whole live configuration, not just three of its hashes.
 
     The launch gate runs this BEFORE any paid step. Checking only that the file exists, and
     verifying its hashes afterwards, means an edited threshold or budget can already have spent
     Tavily credits and GPU hours by the time the mismatch surfaces.
+
+    The protocol SHA is read from the tracked protocol document, never from the environment: a
+    value the caller supplies and then compares against itself is a gate that cannot fail. If
+    ``SHAPEFLOW_PROTOCOL_SHA`` is set it is treated as an *additional* assertion by the caller
+    about which protocol they meant, and a disagreement is fatal.
     """
-    import json
     import os
 
-    from .config import load_config
-    from .experiment.freeze import ApprovalMismatch, verify_launch_approval
+    from .protocol import ApprovalError, verify_approval_file
 
-    # protocol_sha is deliberately NOT read from the approval file: comparing a value to itself
-    # is self-pinning -- it always passes and proves nothing. It is the SHA of the protocol
-    # document, supplied by the caller, and the campaign runner re-checks it.
-    protocol_sha = os.environ.get("SHAPEFLOW_PROTOCOL_SHA")
-    if not protocol_sha:
+    try:
+        binding = verify_approval_file(_REPO, approval)
+    except ApprovalError as e:
+        typer.echo(f"approval mismatch: {e}", err=True)
+        raise typer.Exit(code=1)
+
+    claimed = os.environ.get("SHAPEFLOW_PROTOCOL_SHA")
+    if claimed and claimed != binding.protocol_sha:
         typer.echo(
-            "SHAPEFLOW_PROTOCOL_SHA is not set. The approval's protocol_sha must be checked "
-            "against the protocol document, not against itself.",
+            f"SHAPEFLOW_PROTOCOL_SHA={claimed[:12]} does not match the protocol document "
+            f"({binding.protocol_sha[:12]}); the caller and the repository disagree about which "
+            "protocol is being run",
             err=True,
         )
         raise typer.Exit(code=1)
-    if not approval.exists():
-        typer.echo(f"approval file {approval} not found", err=True)
+    typer.echo(
+        f"approval ok (protocol={binding.protocol_sha[:12]} binding={binding.digest[:12]})"
+    )
+
+
+@app.command("freeze-approval")
+def freeze_approval(
+    approved_commit: str = typer.Option("", "--approved-commit"),
+    approval: Path = typer.Option(None, "--approval"),
+) -> None:
+    """Steward-only: record the approval for the configuration that is live right now.
+
+    This grants nothing. Protocol v0.1 already fixed the mode, the budgets and the thresholds;
+    this writes down their hashes so a later edit is detectable. It refuses to overwrite an
+    approval that describes a different configuration.
+    """
+    from datetime import datetime, timezone
+
+    from .doctor import check_identity
+    from .protocol import ApprovalError, write_approval_file
+
+    identity = check_identity("steward")
+    if identity.status == "FAIL":
+        typer.echo(f"  FAIL  {identity.name}: {identity.detail}", err=True)
         raise typer.Exit(code=1)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
-        data = json.loads(approval.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        typer.echo(f"approval file {approval} is not readable JSON: {e}", err=True)
-        raise typer.Exit(code=1)
-    # config_sha takes the config's parsed contents, not a Path -- passing the Path raised
-    # CanonicalizationError, so this "gate" could never have run at all.
-    _, live_budget = load_config(_CONFIGS["budget"])
-    _, live_thresholds = load_config(_CONFIGS["decision"])
-    try:
-        verify_launch_approval(
-            data,
-            protocol_sha=protocol_sha,
-            budget_sha=live_budget,
-            decision_thresholds_sha=live_thresholds,
+        binding = write_approval_file(
+            _REPO, approved_at_utc=now, approved_commit=approved_commit,
+            approval_path=approval,
         )
-    except ApprovalMismatch as e:
-        typer.echo(f"approval mismatch: {e}", err=True)
+    except ApprovalError as e:
+        typer.echo(f"cannot write approval: {e}", err=True)
         raise typer.Exit(code=1)
-    typer.echo(f"approval ok (mode={data['approval_mode']}, protocol={protocol_sha[:12]})")
+    typer.echo(f"approval recorded (binding={binding.digest[:12]})")
+
+
+@app.command("serve-provider")
+def serve_provider(
+    config: Path = typer.Option(None, "--config", help="Campaign config (configs/week1.yaml)"),
+) -> None:  # pragma: no cover - process entry point
+    """Run the provider. The only process that reads a credential, and never as root."""
+    from .campaign.settings import Settings
+    from .doctor import check_identity
+    from .runtime.provider_main import run
+
+    identity = check_identity("provider")
+    if identity.status == "FAIL":
+        typer.echo(f"  FAIL  {identity.name}: {identity.detail}", err=True)
+        raise typer.Exit(code=1)
+    if config is not None and not config.exists():
+        typer.echo(f"  FAIL  config: {config} not found", err=True)
+        raise typer.Exit(code=1)
+    run(Settings.load(_REPO))
 
 
 @app.command()

@@ -1,0 +1,142 @@
+# The Week-1 campaign configuration (plan §4.2, §14).
+#
+# Hash-locked like every other config: its config_sha enters protocol/launch_approval.json, so a
+# changed arm set, split size or canary definition invalidates the approval instead of quietly
+# altering what runs.
+#
+# Deliberately host-independent. Absolute paths live in SHAPEFLOW_DATA_ROOT (an environment
+# variable, not hashed) and only the relative layout is declared here -- otherwise the authoring
+# machine and the run host would compute different protocol SHAs for the same protocol.
+version: v0.1
+
+campaign:
+  id: week1_formative_v1
+  # What this round can and cannot support. It travels into every artifact, report, table and
+  # verdict. A machine-authored corpus cannot carry a confirmatory claim, and a future
+  # confirmatory study needs a new sealed registry, a new protocol SHA and a new approval.
+  corpus_tier: FORMATIVE_MACHINE_AUTHORED
+  claim_scope: FORMATIVE_ONLY
+  verdict_prefix: PROVISIONAL
+  # The honest holdout is NOT opened this round. The gate stays fail-closed; reaching it would
+  # require POLICY_FROZEN, which a formative screen does not reach.
+  open_holdout: false
+
+# Relative to $SHAPEFLOW_DATA_ROOT. The three trees have different owners on the run host:
+# steward writes the corpus, runner writes treatment outputs, evaluator holds the answer key and
+# is unreadable by the runner. Separation by uid, not by convention.
+paths:
+  steward_root: steward
+  runner_root: runner
+  evaluator_root: evaluator
+  provider_root: provider
+  tasks: steward/tasks
+  acquisition: steward/acquisition
+  snapshots: steward/snapshots
+  source_pools: steward/source_pools
+  frozen_corpus_for_runner: runner/frozen_corpus
+  runs: runner/runs
+  object_store: runner/object_store
+  checkpoints: runner/checkpoints
+  truth_packets: evaluator/truth_packets
+  visible_truth: evaluator/visible_truth
+  judgments: evaluator/judgments
+  provider_ledger: provider/provider_ledger.sqlite
+
+provider:
+  bind_host: 127.0.0.1
+  bind_port: 8787
+  unix_socket: /run/shapeflow/provider.sock
+  token_dir: /run/shapeflow/tokens
+  tavily_endpoint: https://api.tavily.com/search
+  deepseek_base_url: https://api.deepseek.com
+  vllm_base_url: http://127.0.0.1:8000/v1
+  # Resolved at freeze time from the live engine and written into the stack manifest; the value
+  # here is the one the frozen stack declares (configs/stack.yaml model.repo).
+  served_model: Qwen3-14B-AWQ
+  request_timeout_seconds: 120.0
+  inference_timeout_seconds: 900.0
+  # Worst-case reservations. Admission control only means something if the reserved amount is an
+  # upper bound on what the call can cost, so these are ceilings and not estimates.
+  tavily_credits_worst_case: 2.0
+  deepseek_input_tokens_worst_case: 32000.0
+  deepseek_output_tokens_worst_case: 8000.0
+  deepseek_usd_worst_case: 0.05
+  gpu_seconds_worst_case: 900.0
+
+# One alias per call site, all rewritten to the single served model before dispatch. This is the
+# only channel that survives from vendor ODR to the work ledger: ODR builds its own client and
+# cannot be made to set a header, so the op class has to be carried by something already in the
+# request. Rewriting the alias keeps P0's and P1's upstream requests byte-identical.
+model_aliases:
+  qwen-research: RESEARCHER_REACT
+  qwen-summarize: PAGE_P0_SUMMARY
+  qwen-compress: COMPRESSOR_P0
+  qwen-final: FINAL_WRITER
+  qwen-supervisor: SUPERVISOR_CONTINUE
+  qwen-selector-page: PAGE_P1_SELECTOR_LOCAL
+  qwen-selector-page-global: PAGE_P1_SELECTOR_GLOBAL
+  qwen-selector-close: COMPRESSOR_P1_SELECTOR
+  qwen-prose-page: PAGE_P1_SELECTOR_LOCAL
+  qwen-prose-close: COMPRESSOR_P1_SELECTOR
+
+# Vendor knobs both arms share. P0 and P1 must start from the same bytes under the same
+# truncation, so max_content_length is protocol, not a tuning parameter.
+odr:
+  search_api: tavily
+  max_react_tool_calls: 5
+  max_content_length: 50000
+  max_structured_output_retries: 3
+  research_model_max_tokens: 4096
+  summarization_model_max_tokens: 1024
+  compression_model_max_tokens: 4096
+  final_report_model_max_tokens: 8192
+  max_researcher_iterations: 3
+  max_concurrent_research_units: 1
+
+# The isolated causal layer is what this round runs. The operational layer is configured and has
+# its own unit, but a deployment claim needs it to run separately -- mixing the two would let a
+# batched result be read as a causal one.
+measurement:
+  layer: causal
+  selected_token_budget: 512
+  # Generation is capped by the completion limit and guided decoding, never by a schema's
+  # maxItems: maxItems bounds how many items may be *accepted*, not how many tokens the model
+  # may emit, and reporting it as a decode cap would overstate the saving.
+  selector_max_completion_tokens: 768
+  guided_decoding: true
+
+# The first real GPU run. It checks engineering correctness and P1 non-inertness only; it may
+# never gate on a quality outcome, because choosing whether to continue based on how good the
+# results look is outcome-dependent design.
+canary:
+  tasks: 4
+  arms:
+    - {arm_id: P0, page_variant: P0, close_variant: P0}
+    - {arm_id: H_ID, page_variant: H02, close_variant: P0}
+    - {arm_id: H_TYPED, page_variant: H03, close_variant: P0}
+    - {arm_id: C_VISIBLE, page_variant: P0, close_variant: C01}
+    - {arm_id: H_PLUS_C, page_variant: H02, close_variant: C01}
+    - {arm_id: CPU_LEXICAL, page_variant: H00-CPU, close_variant: P0}
+    - {arm_id: SHORT_PROSE, page_variant: H00-PROSE, close_variant: P0}
+
+# Forked-state component screening (plan §14.4): every boundary state always carries P0, and the
+# assigned P1/control variants fork from the same checkpoint hash so the contrast is within a
+# state rather than across two different worlds.
+screen:
+  split: FORMATIVE_SCREEN
+  max_h_states: 48
+  max_c_states: 48
+  variants_per_state: 5
+  second_seed_fraction: 0.25
+  seeds: [1, 2]
+  # A block enters the primary comparison only when every cell in it is terminal. A partial
+  # block is not a paired observation and is never spliced with another one.
+  require_complete_blocks: true
+
+runtime:
+  lease_seconds: 1800
+  heartbeat_seconds: 60
+  status_interval_seconds: 600
+  max_consecutive_failures: 5
+  gpu_lease_file: runner/gpu.lease
+  stop_sentinel: runner/STOP_REQUESTED

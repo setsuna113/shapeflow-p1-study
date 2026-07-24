@@ -1,0 +1,87 @@
+# The blind judge and the truth pipeline (plan §3.4, §13).
+#
+# DeepSeek is evaluator-only. It never runs treatment inference, is never a selector, never
+# writes a researcher/supervisor/final-report token, never rewrites a prompt, and never proposes
+# a treatment from an observed result. The provider enforces that by op class; this file fixes
+# what it *is* allowed to do and under which frozen prompt and schema.
+version: v0.1
+
+model:
+  # Resolved from the environment once at launch and written into the freeze manifest. Never
+  # hardcoded: a judge model that changed underneath a frozen stage would silently mix two
+  # raters. deepseek-reasoner is excluded because JSON mode is mandatory here and it does not
+  # support response_format json_object -- an unvalidatable judgment would be scored as if it
+  # had been validated.
+  env_var: DEEPSEEK_JUDGE_MODEL
+  expected: deepseek-chat
+  forbid: [deepseek-reasoner]
+  temperature: 0.0
+  top_p: 1.0
+  response_format: json_object
+
+retry:
+  max_retries: 3
+  # A response that ran out of length is treated as empty and retried rather than parsed: half a
+  # judgment parsed as a whole one is a wrong number, not a missing one.
+  treat_length_truncation_as_empty: true
+  fail_fast_statuses: [400, 401, 402, 403, 404, 422]
+
+# The one rule that protects every quality endpoint: a judgment that could not be obtained stays
+# missing. No zero, no mean, no "pass". It routes to the human queue instead, and the sample is
+# reported as JUDGE_UNAVAILABLE.
+failure_policy:
+  on_unavailable: FAIL_CLOSED
+  impute: false
+  drop_sample: false
+  route_to_human_queue: true
+
+blinding:
+  hide_arm: true
+  hide_variant: true
+  hide_path: true
+  randomize_ab_order: true
+  order_swap_replicate: true
+  # Two calls to one judge are one rater asked twice, not two raters. Treating them as
+  # independent would manufacture agreement out of nothing.
+  same_judge_calls_are_not_independent_raters: true
+
+prompts:
+  atomize_version: judge_atomize_v1
+  truth_version: judge_truth_v1
+  report_version: judge_report_v1
+  # Filled by `shapeflow-p1 freeze-stack` from the rendered prompt bytes; a change to any prompt
+  # mints a new protocol SHA rather than silently re-judging under different instructions.
+  atomize_prompt_sha256: "@STEWARD_FREEZES@"
+  truth_prompt_sha256: "@STEWARD_FREEZES@"
+  report_prompt_sha256: "@STEWARD_FREEZES@"
+
+truth_packet:
+  # An atom enters accepted truth only if it binds to at least one exact source span. A fact the
+  # model asserted without a span is dropped; a contradiction needs a span on each side; a gap
+  # binds to a real query attempt rather than the model's opinion.
+  require_exact_span_binding: true
+  require_both_sides_of_contradiction: true
+  gaps_bind_to_query_attempt: true
+  authoring_method: MACHINE_CANDIDATE_PENDING_HUMAN_AUDIT
+  verifier_status: PENDING
+
+human_audit:
+  # Unattended results stay provisional until this is discharged. The queue is generated
+  # honestly; the run never marks an audit complete that no human performed.
+  random_sample_fraction: 0.20
+  include_all_critical_misses: true
+  include_all_judge_disagreements: true
+  include_near_margin_cases: true
+  near_margin_epsilon: 0.02
+  non_critical_accuracy_gate: 0.95
+  critical_accuracy_gate: 1.00
+
+# Pricing snapshot, with its source and retrieval date, so the cost ledger holds money rather
+# than only tokens. Recorded rather than looked up at runtime: a price that moved mid-campaign
+# would otherwise rewrite what earlier calls appear to have cost.
+pricing:
+  source: https://api-docs.deepseek.com/quick_start/pricing
+  retrieved_utc: "2026-07-24"
+  currency: USD
+  usd_per_1m_input_tokens: 0.27
+  usd_per_1m_output_tokens: 1.10

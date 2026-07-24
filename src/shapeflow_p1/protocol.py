@@ -30,6 +30,7 @@ __all__ = [
     "protocol_sha",
     "compute_binding",
     "verify_approval_file",
+    "write_approval_file",
 ]
 
 PROTOCOL_DOCUMENT = "protocol/SHAPEFLOW_P1_WEEK1_CODING_PLAN_v0.1_2026-07-24.md"
@@ -66,6 +67,14 @@ class ProtocolBinding:
     variants_sha: str
     stack_sha: str
     stack_manifest_sha: str
+    # The campaign, acquisition, corpus and judge configs decide the arm set, the size and
+    # composition of the frozen world, how many tasks exist and which model scores them. A
+    # result depends on all four, so an approval that did not pin them would still verify while
+    # describing a different experiment.
+    week1_sha: str
+    acquisition_sha: str
+    task_source_sha: str
+    judge_sha: str
     vendor_commit: str
     patched_tree_sha: str
     approved_commit: str
@@ -78,6 +87,10 @@ class ProtocolBinding:
             "variants_sha": self.variants_sha,
             "stack_sha": self.stack_sha,
             "stack_manifest_sha": self.stack_manifest_sha,
+            "week1_sha": self.week1_sha,
+            "acquisition_sha": self.acquisition_sha,
+            "task_source_sha": self.task_source_sha,
+            "judge_sha": self.judge_sha,
             "vendor_commit": self.vendor_commit,
             "patched_tree_sha": self.patched_tree_sha,
             "approved_commit": self.approved_commit,
@@ -100,6 +113,10 @@ def compute_binding(repo: Path, *, approved_commit: str = "") -> ProtocolBinding
     _, budget = load_config(configs / "budget_v1.yaml")
     _, variants = load_config(configs / "variants.yaml")
     _, stack = load_config(configs / "stack.yaml")
+    _, week1 = load_config(configs / "week1.yaml")
+    _, acquisition = load_config(configs / "acquisition.yaml")
+    _, task_source = load_config(configs / "task_source.yaml")
+    _, judge = load_config(configs / "judge.yaml")
     manifest = repo / "protocol" / "stack_manifest.json"
     return ProtocolBinding(
         protocol_sha=protocol_sha(repo),
@@ -108,6 +125,10 @@ def compute_binding(repo: Path, *, approved_commit: str = "") -> ProtocolBinding
         variants_sha=variants,
         stack_sha=stack,
         stack_manifest_sha=_sha_of(manifest),
+        week1_sha=week1,
+        acquisition_sha=acquisition,
+        task_source_sha=task_source,
+        judge_sha=judge,
         vendor_commit=_read_vendor_commit(repo),
         patched_tree_sha=(repo / "patches" / "patched_tree.sha256").read_text().strip()
         if (repo / "patches" / "patched_tree.sha256").exists() else "",
@@ -126,6 +147,54 @@ def _read_vendor_commit(repo: Path) -> str:
         return out.stdout.strip() if out.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         return ""
+
+
+def write_approval_file(
+    repo: Path,
+    *,
+    approved_at_utc: str,
+    approved_commit: str = "",
+    approval_path: Optional[Path] = None,
+) -> ProtocolBinding:
+    """Materialize the approval for the configuration that is live right now.
+
+    This does not *grant* an approval -- protocol v0.1 already fixed the mode, the budgets and
+    the thresholds, and this only records their hashes so a later edit is detectable. It refuses
+    to overwrite: replacing an approval in place would let a campaign look pre-registered for a
+    configuration it never ran under, which is the failure the file exists to prevent.
+    """
+    from .experiment.freeze import APPROVAL_MODE_AUTO
+
+    repo = Path(repo)
+    approval_path = approval_path or (repo / "protocol" / "launch_approval.json")
+    binding = compute_binding(repo, approved_commit=approved_commit)
+    if approval_path.exists():
+        existing = json.loads(approval_path.read_text(encoding="utf-8"))
+        if existing.get("binding_sha256") == binding.digest:
+            return binding          # already recorded for exactly this configuration
+        raise ApprovalError(
+            f"{approval_path} already approves a different configuration "
+            f"({existing.get('binding_sha256')!r} vs live {binding.digest!r}). A changed "
+            "configuration needs a new protocol version, not an overwritten approval."
+        )
+    body = {
+        "approval_mode": APPROVAL_MODE_AUTO,
+        "approval_source_date": "2026-07-24",
+        "approved_at_utc": approved_at_utc,
+        "approved_commit": approved_commit,
+        "binding": binding.content(),
+        "binding_sha256": binding.digest,
+        "claim_scope": "FORMATIVE_ONLY",
+        "note": (
+            "Protocol v0.1 auto-launch: the user's 2026-07-24 instruction to build and start "
+            "running is the launch authorization. Every hard gate still fails closed. The "
+            "corpus is FORMATIVE_MACHINE_AUTHORED and no result under this approval may be "
+            "presented as confirmatory."
+        ),
+    }
+    approval_path.parent.mkdir(parents=True, exist_ok=True)
+    approval_path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return binding
 
 
 def verify_approval_file(repo: Path, approval_path: Optional[Path] = None) -> ProtocolBinding:

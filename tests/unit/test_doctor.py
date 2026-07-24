@@ -143,19 +143,48 @@ def test_a_present_manifest_is_not_evidence_until_the_verifier_exists(tmp_path, 
     assert "NOT_IMPLEMENTED" in res.detail
 
 
-def test_verify_approval_requires_an_external_protocol_sha():
-    """Comparing the approval's protocol_sha to itself always passes and proves nothing."""
+def test_verify_approval_reads_the_protocol_sha_from_the_tracked_document():
+    """Comparing the approval's protocol_sha to itself always passes and proves nothing.
+
+    The SHA is now a fact about a file in the repository, so a caller-supplied value cannot make
+    the gate pass. An absent approval is still fatal, and a caller who *claims* a protocol SHA
+    that disagrees with the document is fatal too -- that is a disagreement about which
+    experiment is being run, not a formatting difference.
+    """
     from typer.testing import CliRunner
 
     from shapeflow_p1.cli import app
 
     runner = CliRunner()
     result = runner.invoke(
-        app, ["verify-approval", "--approval", "protocol/launch_approval.json"],
+        app, ["verify-approval", "--approval", "protocol/does_not_exist.json"],
         env={"SHAPEFLOW_PROTOCOL_SHA": ""},
     )
     assert result.exit_code == 1
-    assert "SHAPEFLOW_PROTOCOL_SHA" in result.output
+    assert "nothing authorises" in result.output
+
+
+def test_verify_approval_rejects_a_caller_who_names_a_different_protocol(tmp_path):
+    import json
+
+    from typer.testing import CliRunner
+
+    from shapeflow_p1.cli import app
+    from shapeflow_p1.protocol import compute_binding
+
+    binding = compute_binding(REPO)
+    approval = tmp_path / "launch_approval.json"
+    approval.write_text(json.dumps({
+        "approval_mode": "USER_EXPLICIT_AUTO_LAUNCH",
+        "binding": binding.content(),
+        "binding_sha256": binding.digest,
+    }))
+    result = CliRunner().invoke(
+        app, ["verify-approval", "--approval", str(approval)],
+        env={"SHAPEFLOW_PROTOCOL_SHA": "0" * 64},
+    )
+    assert result.exit_code == 1
+    assert "disagree about which" in result.output
 
 
 def test_verify_approval_hashes_config_contents_not_the_path(monkeypatch):

@@ -1,0 +1,73 @@
+# Tavily acquisition parameters (plan §6.2). Explicit, never auto_parameters.
+#
+# The same query must address the same slice of the web on every acquisition, so every retrieval
+# parameter is pinned here and hashed into the query's snapshot id. `auto_parameters` would let
+# the provider choose them for us, which means two acquisitions of the same query could freeze
+# two different worlds and nothing downstream could tell.
+version: v0.1
+
+tavily:
+  search_depth: advanced
+  include_raw_content: markdown
+  include_answer: false
+  include_usage: true
+  max_results_per_query: 8
+  timeout_seconds: 60
+  topic: general
+
+# Per plan §6.2 every task's queries must cover these roles. The count is what bounds the
+# Tavily spend: 48 acquired tasks x at most 8 queries stays inside the 500-request cap with
+# headroom for reserve substitutions, so the registry is never trimmed after the fact.
+queries_per_task:
+  original_question: 1
+  per_required_facet: 1
+  conflict_probe: 1
+  negative_or_gap_probe: 1
+  table_list_numeric_probe: 1
+  max_total: 8
+
+# Which splits are acquired now. RESERVE specs are sealed with the rest but their world is only
+# fetched if a task is actually substituted in -- acquiring 16 worlds that may never be used
+# would spend the cap on nothing.
+acquire_splits:
+  - FORMATIVE_SCREEN
+  - FORMATIVE_POWER_PILOT
+
+freeze:
+  normalization_version: v1
+  # Everything the audit trail needs to reconstruct what was seen. Keeping only `content` would
+  # lose the provenance that citation lineage is built from.
+  record_fields:
+    - request_id
+    - query_id
+    - query_text
+    - request_parameters
+    - response_time
+    - usage
+    - failed_results
+    - rank
+    - title
+    - url
+    - content
+    - score
+    - raw_content
+    - published_date
+    - fetched_at_utc
+    - raw_response_sha256
+
+# Treatment runs never touch the network. A replay miss is fatal by construction: there is no
+# code path from the replay backend to a live search, so a checkpoint fork cannot diverge from
+# the world it was frozen in.
+replay:
+  fail_closed_on_miss: true
+  allow_live_fallback: false
+
+# Deterministic retrieval over the task-local pool during end-to-end runs. Query text may
+# legitimately differ between arms -- that divergence is part of the effect being measured --
+# but the corpus and the ranking are fixed, so the same query is always byte-identical.
+frozen_corpus:
+  ranker: bm25_v1
+  k1: 1.5
+  b: 0.75
+  top_k: 5
+  tie_break: occurrence_id
