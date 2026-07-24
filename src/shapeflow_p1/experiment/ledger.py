@@ -235,28 +235,94 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
     settled_amount   REAL,
     work_key         TEXT,
     external_call_id TEXT,
+    attempt_id       TEXT,
     created_at       REAL NOT NULL,
     updated_at       REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_reservations_state ON budget_reservations(state);
+CREATE INDEX IF NOT EXISTS ix_reservations_call ON budget_reservations(external_call_id);
+CREATE INDEX IF NOT EXISTS ix_reservations_attempt ON budget_reservations(attempt_id);
 
+-- A *logical* external call: one row per thing we meant to buy, keyed by its coordinates.
+-- It carries no request or response of its own -- those belong to the physical attempts
+-- below, because a retry is a second dispatch and a second possible charge, not an edit
+-- of the first one.
 CREATE TABLE IF NOT EXISTS external_calls (
-    call_id             TEXT PRIMARY KEY,
-    provider            TEXT NOT NULL,
-    op_class            TEXT NOT NULL,
+    call_id              TEXT PRIMARY KEY,
+    provider             TEXT NOT NULL,
+    op_class             TEXT NOT NULL,
+    call_key             TEXT NOT NULL,
+    work_key             TEXT,
+    state                TEXT NOT NULL,        -- OPEN | COMMITTED | FAILED_FINAL | FAILED_UNKNOWN
+    attempt_count        INTEGER NOT NULL DEFAULT 0,
+    committed_attempt_id TEXT,
+    created_at           REAL NOT NULL,
+    updated_at           REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_external_calls_state ON external_calls(state);
+
+-- Append-only. Every real dispatch gets its own row and its own id; nothing here is ever
+-- rewritten to describe a later attempt, so a call that was sent three times shows three
+-- request refs, three outcomes and three settlements rather than one surviving guess.
+CREATE TABLE IF NOT EXISTS external_call_attempts (
+    attempt_id          TEXT PRIMARY KEY,
+    call_id             TEXT NOT NULL REFERENCES external_calls(call_id),
+    attempt_ordinal     INTEGER NOT NULL,
     state               TEXT NOT NULL,
-    work_key            TEXT,
-    attempt_ordinal     INTEGER NOT NULL DEFAULT 0,
     request_object_ref  TEXT,
     response_object_ref TEXT,
     provider_request_id TEXT,
-    model               TEXT,
+    requested_model     TEXT,
+    returned_model      TEXT,
+    system_fingerprint  TEXT,
     usage_json          TEXT,
     error_class         TEXT,
-    created_at          REAL NOT NULL,
-    updated_at          REAL NOT NULL
+    opened_at           REAL NOT NULL,
+    dispatched_at       REAL,
+    settled_at          REAL,
+    UNIQUE(call_id, attempt_ordinal)
+);
+-- The money-side analogue of ux_one_commit: a logical call may be paid for once.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_one_external_commit
+    ON external_call_attempts(call_id) WHERE state='COMMITTED';
+CREATE INDEX IF NOT EXISTS ix_external_attempts_call ON external_call_attempts(call_id);
+CREATE INDEX IF NOT EXISTS ix_external_attempts_state ON external_call_attempts(state);
+
+CREATE TABLE IF NOT EXISTS external_call_transitions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id     TEXT NOT NULL,
+    attempt_id  TEXT,
+    from_state  TEXT,
+    to_state    TEXT NOT NULL,
+    at          REAL NOT NULL,
+    reason      TEXT
+);
+
+-- One row per authoring/acquisition round. A round that failed keeps its spend on the
+-- books and is marked here, so a later round is a new attempt rather than a silent
+-- continuation of a corpus nobody can reconstruct.
+CREATE TABLE IF NOT EXISTS corpus_attempts (
+    attempt_id     TEXT PRIMARY KEY,
+    corpus_version TEXT NOT NULL,
+    state          TEXT NOT NULL,
+    reason         TEXT,
+    protocol_sha   TEXT,
+    started_at     REAL NOT NULL,
+    closed_at      REAL,
+    note           TEXT
+);
+
+CREATE TABLE IF NOT EXISTS schema_versions (
+    component  TEXT PRIMARY KEY,
+    version    INTEGER NOT NULL,
+    applied_at REAL NOT NULL
 );
 """
+
+#: Bumped when the physical layout of the external-call tables changes. ``CREATE TABLE IF
+#: NOT EXISTS`` silently keeps an old shape, so the migration below is what actually moves
+#: a database forward -- and it moves rows, never deletes them.
+EXTERNAL_CALL_SCHEMA_VERSION = 2
 
 
 class Ledger:
@@ -278,7 +344,9 @@ class Ledger:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA busy_timeout=30000;")
         with self._lock:
+            _migrate_before_schema(self._conn)
             self._conn.executescript(_SCHEMA)
+            _migrate_after_schema(self._conn, self._now())
 
     def close(self) -> None:
         with self._lock:
@@ -306,6 +374,17 @@ class Ledger:
                 raise
             else:
                 cur.execute("COMMIT;")
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Cursor]:
+        """A write transaction callers outside this module can join.
+
+        Budget movement and the call-state change that explains it have to commit or roll
+        back together; otherwise a crash between them leaves money spent against a call
+        the ledger still calls unsent, and restart reconciliation then charges it again.
+        """
+        with self._tx() as cur:
+            yield cur
 
     def _log_transition(
         self, cur, work_key, attempt_id, from_state, to_state, reason
@@ -702,6 +781,41 @@ class Ledger:
                 (self._now(), severity, kind, detail, work_key),
             )
 
+    # --- corpus attempts --------------------------------------------------------------
+
+    def record_corpus_attempt(
+        self,
+        *,
+        attempt_id: str,
+        corpus_version: str,
+        state: str,
+        reason: str = "",
+        protocol_sha: str = "",
+        note: str = "",
+        closed: bool = True,
+    ) -> None:
+        """Append one round of corpus authoring/acquisition and how it ended.
+
+        Append-only by construction: an attempt id that already exists is left alone
+        rather than rewritten, so a failed round cannot be relabelled as a later success.
+        """
+        with self._tx() as cur:
+            cur.execute(
+                "INSERT OR IGNORE INTO corpus_attempts(attempt_id, corpus_version, state,"
+                " reason, protocol_sha, started_at, closed_at, note) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    attempt_id, corpus_version, state, reason, protocol_sha,
+                    self._now(), self._now() if closed else None, note,
+                ),
+            )
+
+    def corpus_attempts(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM corpus_attempts ORDER BY started_at"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def integrity_check(self) -> bool:
         with self._lock:
             row = self._conn.execute("PRAGMA integrity_check;").fetchone()
@@ -718,6 +832,108 @@ class Ledger:
 
     def now(self) -> float:
         return self._now()
+
+
+# --- schema migration -------------------------------------------------------------------
+#
+# There is no drop and no rewrite anywhere below. A database that already recorded real
+# spend is carried forward row by row: the v1 external-call rows become one attempt each,
+# and the budget tables are never touched except to add the link column that lets a
+# reservation name the dispatch it paid for.
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+#: v1 kept the physical state on the call row. Splitting them, the physical state moves to
+#: the attempt and the call gets a logical one. Anything that did not commit is ABANDONED
+#: rather than OPEN: those rows belong to a round that is being frozen, and reopening them
+#: would let a later run silently continue a corpus attempt that already failed.
+_V1_TO_LOGICAL = {
+    "COMMITTED": "COMMITTED",
+}
+
+_TERMINAL_V1 = frozenset({"COMMITTED", "FAILED_FINAL", "FAILED_UNKNOWN"})
+
+
+def _migrate_before_schema(conn: sqlite3.Connection) -> None:
+    """Reshape what the schema script cannot: ``CREATE TABLE IF NOT EXISTS`` leaves an
+    existing table alone, and an index over a column that table does not have yet fails."""
+    reservation_cols = _columns(conn, "budget_reservations")
+    if reservation_cols and "attempt_id" not in reservation_cols:
+        conn.execute("ALTER TABLE budget_reservations ADD COLUMN attempt_id TEXT")
+    call_cols = _columns(conn, "external_calls")
+    if call_cols and "call_key" not in call_cols:
+        # v1: one mutable row per logical call. Renamed, never dropped.
+        conn.execute("ALTER TABLE external_calls RENAME TO external_calls_v1")
+
+
+def _migrate_after_schema(conn: sqlite3.Connection, now: float) -> None:
+    row = conn.execute(
+        "SELECT version FROM schema_versions WHERE component='external_calls'"
+    ).fetchone()
+    if row is not None and row["version"] >= EXTERNAL_CALL_SCHEMA_VERSION:
+        return
+    if _columns(conn, "external_calls_v1"):
+        _copy_v1_external_calls(conn, now)
+    conn.execute(
+        "INSERT INTO schema_versions(component, version, applied_at) VALUES"
+        " ('external_calls',?,?) ON CONFLICT(component) DO UPDATE SET"
+        " version=excluded.version, applied_at=excluded.applied_at",
+        (EXTERNAL_CALL_SCHEMA_VERSION, now),
+    )
+
+
+def _copy_v1_external_calls(conn: sqlite3.Connection, now: float) -> None:
+    for old in conn.execute("SELECT * FROM external_calls_v1").fetchall():
+        call_id = old["call_id"]
+        physical = old["state"]
+        logical = _V1_TO_LOGICAL.get(physical, "ABANDONED")
+        ordinal = int(old["attempt_ordinal"] or 0)
+        attempt_id = derive_id(
+            "external_call_attempt", {"call_id": call_id, "ordinal": ordinal}
+        )
+        dispatched = old["updated_at"] if physical not in ("INTENT", "BUDGET_RESERVED") else None
+        settled = old["updated_at"] if physical in _TERMINAL_V1 else None
+        conn.execute(
+            "INSERT OR IGNORE INTO external_calls(call_id, provider, op_class, call_key,"
+            " work_key, state, attempt_count, committed_attempt_id, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                call_id, old["provider"], old["op_class"],
+                # v1 never stored the call key; recording that plainly beats inventing one.
+                "<v1-unrecorded>", old["work_key"], logical, 1,
+                attempt_id if logical == "COMMITTED" else None,
+                old["created_at"], old["updated_at"],
+            ),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO external_call_attempts(attempt_id, call_id,"
+            " attempt_ordinal, state, request_object_ref, response_object_ref,"
+            " provider_request_id, requested_model, returned_model, system_fingerprint,"
+            " usage_json, error_class, opened_at, dispatched_at, settled_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                attempt_id, call_id, ordinal, physical,
+                old["request_object_ref"], old["response_object_ref"],
+                old["provider_request_id"],
+                None, old["model"], None,
+                old["usage_json"], old["error_class"],
+                old["created_at"], dispatched, settled,
+            ),
+        )
+        conn.execute(
+            "UPDATE budget_reservations SET attempt_id=? WHERE external_call_id=?"
+            " AND attempt_id IS NULL",
+            (attempt_id, call_id),
+        )
+    conn.execute(
+        "INSERT INTO external_call_transitions(call_id, attempt_id, from_state, to_state,"
+        " at, reason) SELECT call_id, attempt_id, NULL, state, ?, 'migrated_from_v1'"
+        " FROM external_call_attempts",
+        (now,),
+    )
 
 
 def _require_attempt(cur, attempt_id: str) -> sqlite3.Row:

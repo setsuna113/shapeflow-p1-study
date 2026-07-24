@@ -112,7 +112,8 @@ def provider(tmp_path):
 
 def _artifact_texts(store: ObjectStore, ledger: Ledger) -> list[str]:
     rows = ledger.raw_connection.execute(
-        "SELECT request_object_ref, response_object_ref FROM external_calls").fetchall()
+        "SELECT request_object_ref, response_object_ref FROM external_call_attempts"
+    ).fetchall()
     texts = []
     for row in rows:
         for ref in (row["request_object_ref"], row["response_object_ref"]):

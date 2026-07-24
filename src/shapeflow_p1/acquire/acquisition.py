@@ -19,7 +19,11 @@ from typing import Sequence
 
 from ..experiment.budget import Budget, BudgetExceeded
 from ..experiment.ledger import Ledger
-from ..providers.external_call_ledger import ExternalCallLedger
+from ..providers.external_call_ledger import (
+    CallAlreadyCommitted,
+    CallNotReplayable,
+    ExternalCallLedger,
+)
 from .snapshot_store import SnapshotStore
 from .source_pool import QueryResponse, SourcePool, build_source_pool
 from .tavily_client import TavilyCaptureClient, TavilyHTTPError
@@ -59,8 +63,18 @@ async def acquire_task(
             work_key=task_id,
         )
         try:
+            attempt = call_ledger.begin_attempt(call_id)
+        except CallAlreadyCommitted:
+            # This exact query was already frozen. Re-fetching would spend the cap twice and
+            # produce a second, different world under one task id.
+            ok += 1
+            continue
+        except CallNotReplayable:
+            failed += 1
+            continue
+        try:
             group = call_ledger.reserve(
-                call_id, {"tavily_requests": 1.0, "tavily_credits": credits_per_query},
+                attempt, {"tavily_requests": 1.0, "tavily_credits": credits_per_query},
                 work_key=task_id,
             )
         except BudgetExceeded:
@@ -68,26 +82,28 @@ async def acquire_task(
             break  # admission refused -> do not dispatch, stop cleanly
 
         # The request body carries the key; the FSM stores only its redacted form.
-        call_ledger.mark_sent(call_id, request_text=f"tavily search: {query}")
+        call_ledger.mark_sent(attempt, request_text=f"tavily search: {query}")
         try:
             captured = await client.search(task_id, query)
         except TavilyHTTPError as e:
             # A response came back as an error; settle at zero extra (request already counted).
-            call_ledger.fail_after_response(call_id, group, {"tavily_requests": 1.0}, error_class=f"http_{e.status}")
+            call_ledger.fail_after_response(
+                attempt, group, {"tavily_requests": 1.0}, error_class=f"http_{e.status}")
             failed += 1
             continue
         except Exception as e:  # timeout after send: unknown outcome, keep worst case
-            call_ledger.fail_unknown(call_id, group, error_class=type(e).__name__)
+            call_ledger.fail_unknown(attempt, group, error_class=type(e).__name__)
             failed += 1
             continue
 
         call_ledger.store_response(
-            call_id, response_text=str(captured.raw_response_sha256),
+            attempt, response_text=str(captured.raw_response_sha256),
             provider_request_id=captured.request_id,
         )
-        call_ledger.validate(call_id)
+        call_ledger.validate(attempt)
         actual_credits = float(captured.usage.get("credits", credits_per_query) or credits_per_query)
-        call_ledger.commit(call_id, group, {"tavily_requests": 1.0, "tavily_credits": actual_credits})
+        call_ledger.commit(
+            attempt, group, {"tavily_requests": 1.0, "tavily_credits": actual_credits})
         responses.append(captured.response)
         ok += 1
 

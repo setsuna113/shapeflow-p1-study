@@ -159,7 +159,7 @@ def test_the_real_key_reaches_the_upstream_and_nothing_else(tmp_path):
     dumped = json.dumps(service.events)
     assert FAKE_TAVILY not in dumped
     rows = ledger.raw_connection.execute(
-        "SELECT request_object_ref, response_object_ref FROM external_calls").fetchall()
+        "SELECT request_object_ref, response_object_ref FROM external_call_attempts").fetchall()
     store = ObjectStore(tmp_path / "objects")
     for row in rows:
         for ref in (row["request_object_ref"], row["response_object_ref"]):
@@ -216,7 +216,7 @@ def test_timeout_after_send_keeps_the_worst_case_and_is_not_a_free_retry(tmp_pat
     # The call DID go out, so the worst case stays spent.
     assert budget.available("tavily_credits") == pytest.approx(before - 2.0)
     state = ledger.raw_connection.execute(
-        "SELECT state FROM external_calls").fetchone()["state"]
+        "SELECT state FROM external_call_attempts").fetchone()["state"]
     assert state == "FAILED_UNKNOWN"
 
 
@@ -230,17 +230,46 @@ def test_an_error_response_settles_at_actual_rather_than_releasing(tmp_path):
     assert budget.available("tavily_requests") == pytest.approx(before - 1.0)
 
 
-def test_repeating_a_committed_acquisition_query_is_refused(tmp_path):
+def test_repeating_a_committed_acquisition_query_is_served_from_the_ledger(tmp_path):
+    """The second ask is answered with the frozen response, not with a second purchase."""
     upstream = FakeUpstream([
         (200, {"request_id": "r1", "results": [], "usage": {"credits": 1.0}}),
         (200, {"request_id": "r2", "results": [], "usage": {"credits": 1.0}}),
     ])
-    service, *_ = _service(tmp_path, upstream=upstream)
-    service.tavily_search(_tavily_body())
+    service, _ledger, budget, _r = _service(tmp_path, upstream=upstream)
+    first_status, first = service.tavily_search(_tavily_body())
+    spent = budget.available("tavily_credits")
+
+    second_status, second = service.tavily_search(_tavily_body())
+    assert (second_status, second) == (first_status, first)
+    assert len(upstream.calls) == 1, "the frozen world was re-fetched and charged twice"
+    assert budget.available("tavily_credits") == pytest.approx(spent), "a replay cost money"
+
+
+def test_a_rejected_credential_stops_the_loop_instead_of_burning_the_cap(tmp_path):
+    """262 consecutive 401s is what happens when nothing fails closed here."""
+    upstream = FakeUpstream([(401, {"error": "unauthorized"})] * 5)
+    service, ledger, budget, _r = _service(tmp_path, upstream=upstream)
     with pytest.raises(ProviderError) as excinfo:
         service.tavily_search(_tavily_body())
-    assert excinfo.value.status == 409
-    assert len(upstream.calls) == 1, "the frozen world was re-fetched and charged twice"
+    assert excinfo.value.status == 503
+    incident = ledger.raw_connection.execute(
+        "SELECT kind FROM incidents WHERE kind='provider_unauthorized'").fetchone()
+    assert incident is not None
+
+
+def test_a_run_of_failures_opens_the_breaker(tmp_path):
+    upstream = FakeUpstream([(500, {"error": "boom"})] * 10)
+    service, ledger, _b, _r = _service(tmp_path, upstream=upstream)
+    statuses = []
+    for i in range(5):
+        body = _tavily_body()
+        body["query"] = f"q{i}"          # distinct logical calls, all failing
+        try:
+            statuses.append(service.tavily_search(body)[0])
+        except ProviderError as e:
+            statuses.append(e.status)
+    assert statuses[-1] == 503, f"the breaker never opened: {statuses}"
 
 
 def test_deepseek_usd_is_derived_from_reported_usage(tmp_path):
@@ -249,11 +278,18 @@ def test_deepseek_usd_is_derived_from_reported_usage(tmp_path):
         "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000},
     })])
-    service, _ledger, budget, _r = _service(tmp_path, upstream=upstream)
+    service, ledger, budget, _r = _service(tmp_path, upstream=upstream)
     before = budget.available("deepseek_usd")
     service.deepseek_chat(_deepseek_body(), role="evaluator")
-    # 0.27 + 1.10 per million in and out, capped by the worst-case reservation.
-    assert budget.available("deepseek_usd") == pytest.approx(before - 0.05)
+    # A million tokens each way at the configured prices costs far more than the 0.05
+    # worst case. The real amount is charged; clamping it to the reservation would make an
+    # under-reserved call look exactly affordable.
+    charged = before - budget.available("deepseek_usd")
+    expected = ProviderConfig().deepseek_usd_per_1m_input + \
+        ProviderConfig().deepseek_usd_per_1m_output
+    assert charged == pytest.approx(expected)
+    assert ledger.raw_connection.execute(
+        "SELECT kind FROM incidents WHERE kind='budget_under_reserved'").fetchone() is not None
 
 
 # --- schemas and op classes -----------------------------------------------------------------
@@ -372,8 +408,9 @@ def test_restart_closes_out_a_call_that_was_in_flight(tmp_path):
 
     # Reach SENT and stop there, exactly as a SIGKILL would.
     call_id = service._calls.open_call(provider="tavily", op_class="search", call_key="k1")
-    service._calls.reserve(call_id, {"tavily_requests": 1.0, "tavily_credits": 2.0})
-    service._calls.mark_sent(call_id, request_text="{}")
+    attempt = service._calls.begin_attempt(call_id)
+    service._calls.reserve(attempt, {"tavily_requests": 1.0, "tavily_credits": 2.0})
+    service._calls.mark_sent(attempt, request_text="{}")
     before = budget.available("tavily_credits")
 
     fresh = ProviderService(
@@ -385,7 +422,7 @@ def test_restart_closes_out_a_call_that_was_in_flight(tmp_path):
     counts = fresh.reconcile_on_start()
     assert counts["failed_unknown"] == 1
     assert ledger.raw_connection.execute(
-        "SELECT state FROM external_calls WHERE call_id=?", (call_id,)
+        "SELECT state FROM external_call_attempts WHERE call_id=?", (call_id,)
     ).fetchone()["state"] == "FAILED_UNKNOWN"
     assert budget.available("tavily_credits") == pytest.approx(before)
 
@@ -394,7 +431,8 @@ def test_restart_releases_a_call_that_never_went_out(tmp_path):
     upstream = FakeUpstream()
     service, ledger, budget, redactor = _service(tmp_path, upstream=upstream)
     call_id = service._calls.open_call(provider="tavily", op_class="search", call_key="k2")
-    service._calls.reserve(call_id, {"tavily_requests": 1.0, "tavily_credits": 2.0})
+    attempt = service._calls.begin_attempt(call_id)
+    service._calls.reserve(attempt, {"tavily_requests": 1.0, "tavily_credits": 2.0})
     reserved = budget.available("tavily_credits")
 
     fresh = ProviderService(

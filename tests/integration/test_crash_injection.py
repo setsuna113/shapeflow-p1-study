@@ -118,8 +118,9 @@ def test_crash_after_reserve_before_send_releases_in_full(tmp_path):
     """A reservation that provably never went out is returned whole, not settled."""
     service, ledger, budget = _provider(tmp_path, lambda *a: (_ for _ in ()).throw(Boom()))
     call_id = service._calls.open_call(provider="tavily", op_class="search", call_key="k")
-    group = service._calls.reserve(call_id, {"tavily_requests": 1.0, "tavily_credits": 2.0})
-    service._calls.fail_before_send(call_id, group, error_class="pre_send")
+    attempt = service._calls.begin_attempt(call_id)
+    group = service._calls.reserve(attempt, {"tavily_requests": 1.0, "tavily_credits": 2.0})
+    service._calls.fail_before_send(attempt, group, error_class="pre_send")
 
     cap, reserved, settled = _totals(ledger)["tavily_credits"]
     assert (reserved, settled) == (0.0, 0.0)

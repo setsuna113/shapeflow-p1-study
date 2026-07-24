@@ -52,7 +52,11 @@ from ..experiment.budget import Budget, BudgetExceeded
 from ..experiment.ledger import Ledger
 from ..hashing import derive_id, sha256_hex
 from ..object_store import ObjectStore
-from ..providers.external_call_ledger import ExternalCallLedger
+from ..providers.external_call_ledger import (
+    CallAlreadyCommitted,
+    CallNotReplayable,
+    ExternalCallLedger,
+)
 from ..providers.retry import classify_status
 from ..secrets import SecretRedactor
 from .request_tags import REMOTE_ALLOWED_OPS, OpClass
@@ -194,6 +198,8 @@ class ProviderConfig:
 
     request_timeout_seconds: float = 120.0
     inference_timeout_seconds: float = 900.0
+    # Protocol §3.5 retry_policy.max_consecutive_failures. Zero disables the breaker.
+    max_consecutive_failures: int = 5
 
     # Worst-case reservations. Admission control is only meaningful if the reserved amount is
     # an upper bound on what the call can cost, so these are ceilings, not estimates.
@@ -377,6 +383,10 @@ class ProviderService:
         self._allowed_uids = dict(allowed_uids or {})
         self._cells: dict[str, CellRegistration] = {}
         self._nonce_counter = 0
+        self._store = store
+        # Consecutive upstream failures per provider. Protocol §3.5 caps these; 262
+        # consecutive 401s is what happens when nothing does.
+        self._consecutive_failures: dict[str, int] = {}
         self._lock = threading.RLock()
         self._events: list[dict] = []
         self._ready = False
@@ -396,38 +406,99 @@ class ProviderService:
         ``BUDGET_RESERVED`` provably never went out, so their reservation is released in full.
         """
         counts = {"failed_unknown": 0, "released": 0}
-        conn = self._ledger.raw_connection
-        with self._ledger.lock:
-            rows = conn.execute(
-                "SELECT call_id, state FROM external_calls WHERE state IN"
-                " ('INTENT','BUDGET_RESERVED','SENT','RESPONSE_STORED','VALIDATED')"
-            ).fetchall()
-        for row in rows:
-            group = self._group_for(row["call_id"])
-            if row["state"] in ("SENT", "RESPONSE_STORED", "VALIDATED"):
-                self._calls.fail_unknown(row["call_id"], group, error_class="provider_restart")
+        for attempt in self._calls.live_attempts():
+            group = self._group_for(attempt.attempt_id)
+            if self._calls.attempt_was_sent(attempt.attempt_id):
+                self._calls.fail_unknown(attempt, group, error_class="provider_restart")
                 counts["failed_unknown"] += 1
             else:
-                self._calls.fail_before_send(row["call_id"], group, error_class="provider_restart")
+                self._calls.fail_before_send(attempt, group, error_class="provider_restart")
                 counts["released"] += 1
+        # Keep inference call ids monotonic across restarts. A counter that restarts at 1
+        # would let a post-restart request collide with a pre-restart call id and silently
+        # attach itself to that call's history.
+        with self._ledger.lock:
+            row = self._ledger.raw_connection.execute(
+                "SELECT COUNT(*) c FROM external_calls WHERE provider='vllm'"
+            ).fetchone()
+        with self._lock:
+            self._nonce_counter = int(row["c"] or 0)
         self._ready = True
         return counts
 
-    def _group_for(self, call_id: str):
-        """Rebuild a reservation handle for a call whose in-memory handle is gone."""
+    def _group_for(self, attempt_id: str):
+        """Rebuild a reservation handle for an attempt whose in-memory handle is gone."""
         from ..experiment.budget import ReservationGroup
 
         conn = self._ledger.raw_connection
         with self._ledger.lock:
             rows = conn.execute(
-                "SELECT resource, amount FROM budget_reservations WHERE external_call_id=?"
+                "SELECT resource, amount FROM budget_reservations WHERE attempt_id=?"
                 " AND state='RESERVED'",
-                (call_id,),
+                (attempt_id,),
             ).fetchall()
         if not rows:
             return None
         return ReservationGroup(
-            group_id=call_id, amounts={r["resource"]: r["amount"] for r in rows})
+            group_id=attempt_id, amounts={r["resource"]: r["amount"] for r in rows})
+
+    # --- replay and the failure breaker ------------------------------------------------
+
+    def _replayed(self, call_id: str) -> Optional[tuple[int, dict]]:
+        """Answer a committed call from its frozen response instead of buying it again.
+
+        Returns ``None`` when the call has not been committed. When it has, the stored
+        bytes are returned verbatim: this is the only honest way to serve a replay, since
+        re-dispatching would produce a second charge and, for acquisition, a second and
+        different frozen world under the same identity.
+        """
+        ref = self._calls.committed_response_ref(call_id)
+        if ref is None:
+            return None
+        try:
+            payload = json.loads(self._store.get_bytes(ref).decode("utf-8"))
+        except Exception as e:  # noqa: BLE001 - a committed call with no readable body
+            raise ProviderError(
+                409,
+                f"call {call_id} is committed but its frozen response is unreadable "
+                f"({type(e).__name__}); refusing to pay for it a second time",
+            ) from e
+        self._emit("REPLAYED_FROM_LEDGER", {"call_id": call_id})
+        return 200, payload
+
+    def _note_upstream_success(self, provider: str) -> None:
+        with self._lock:
+            self._consecutive_failures[provider] = 0
+
+    def _note_upstream_failure(self, provider: str, status: int) -> None:
+        """Trip the breaker after a run of failures, before the cap is burned.
+
+        A credential the upstream rejects fails identically every time, so retrying is not
+        recovery -- it is spending the request cap to learn the same fact repeatedly.
+        """
+        with self._lock:
+            count = self._consecutive_failures.get(provider, 0) + 1
+            self._consecutive_failures[provider] = count
+            limit = self._cfg.max_consecutive_failures
+        if status in (401, 403):
+            self._ledger.record_incident(
+                severity="FATAL", kind="provider_unauthorized",
+                detail=f"{provider} rejected the credential with HTTP {status}",
+            )
+            raise ProviderError(
+                503,
+                f"{provider} rejected the credential (HTTP {status}); refusing further "
+                "calls until it is replaced",
+            )
+        if limit and count >= limit:
+            self._ledger.record_incident(
+                severity="FATAL", kind="provider_consecutive_failures",
+                detail=f"{provider} failed {count} times in a row (limit {limit})",
+            )
+            raise ProviderError(
+                503,
+                f"{provider} failed {count} times in a row; the circuit breaker is open",
+            )
 
     @property
     def events(self) -> list[dict]:
@@ -522,12 +593,13 @@ class ProviderService:
         call_id = self._calls.open_call(
             provider="tavily", op_class="search", call_key=call_key, work_key=task_id or None,
         )
-        state = self._calls.get_state(call_id)
-        if state == "COMMITTED":
-            raise ProviderError(
-                409, "this exact acquisition query already committed; a second charge would "
-                     "double-count the same frozen world",
-            )
+        replay = self._replayed(call_id)
+        if replay is not None:
+            return replay
+        try:
+            attempt = self._calls.begin_attempt(call_id)
+        except CallNotReplayable as e:
+            raise ProviderError(409, str(e)) from e
 
         amounts = {
             "tavily_requests": 1.0,
@@ -535,42 +607,44 @@ class ProviderService:
             "remote_calls": 1.0,
         }
         try:
-            group = self._calls.reserve(call_id, amounts, work_key=task_id or None)
+            group = self._calls.reserve(attempt, amounts, work_key=task_id or None)
         except BudgetExceeded as e:
             raise ProviderError(429, f"budget refused: {e.resource} exhausted") from e
 
         outbound = dict(body)
         outbound["api_key"] = self._tavily_key
-        self._calls.mark_sent(call_id, request_text=json.dumps(
+        self._calls.mark_sent(attempt, request_text=json.dumps(
             {**body, "api_key": PROVIDER_KEY_PLACEHOLDER}, sort_keys=True))
         try:
             status, payload, elapsed = self._upstream(
                 self._cfg.tavily_endpoint, {}, outbound, self._cfg.request_timeout_seconds,
             )
         except Exception as e:  # noqa: BLE001 - sent, then silence
-            self._calls.fail_unknown(call_id, group, error_class=type(e).__name__)
+            self._calls.fail_unknown(attempt, group, error_class=type(e).__name__)
             self._emit("TAVILY_FAILED_UNKNOWN", {"call_id": call_id, "error": type(e).__name__})
             raise ProviderError(
                 504, f"tavily upstream failed after send: {type(e).__name__}") from e
 
         if status != 200:
             self._calls.fail_after_response(
-                call_id, group, {"tavily_requests": 1.0, "remote_calls": 1.0},
+                attempt, group, {"tavily_requests": 1.0, "remote_calls": 1.0},
                 error_class=f"http_{status}")
             self._emit("TAVILY_HTTP_ERROR", {"call_id": call_id, "status": status})
+            self._note_upstream_failure("tavily", status)
             return status, {"error": f"tavily returned {status}",
                             "retry": classify_status(status).value}
 
+        self._note_upstream_success("tavily")
         credits = _float_or(payload.get("usage", {}), "credits",
                             default=self._cfg.tavily_credits_worst_case)
         self._calls.store_response(
-            call_id, response_text=json.dumps(payload, sort_keys=True)[:200000],
+            attempt, response_text=json.dumps(payload, sort_keys=True)[:200000],
             provider_request_id=str(payload.get("request_id", "")),
         )
-        self._calls.validate(call_id)
-        self._calls.commit(call_id, group, {
+        self._calls.validate(attempt)
+        self._calls.commit(attempt, group, {
             "tavily_requests": 1.0,
-            "tavily_credits": min(credits, self._cfg.tavily_credits_worst_case),
+            "tavily_credits": credits,
             "remote_calls": 1.0,
         })
         self._emit("TAVILY_COMMITTED", {"call_id": call_id, "credits": credits,
@@ -609,6 +683,17 @@ class ProviderService:
             provider="deepseek", op_class=op_class, call_key=call_key,
             work_key=work_key or None,
         )
+        # A judge retry re-sends a byte-identical body, so it lands on this same logical
+        # call. Serving the frozen response is what stops the retry loop from buying the
+        # same completion again -- and again -- while only the last one leaves a trace.
+        replay = self._replayed(call_id)
+        if replay is not None:
+            return replay
+        try:
+            attempt = self._calls.begin_attempt(call_id)
+        except CallNotReplayable as e:
+            raise ProviderError(409, str(e)) from e
+
         amounts = {
             "deepseek_requests": 1.0,
             "deepseek_input_tokens": self._cfg.deepseek_input_tokens_worst_case,
@@ -617,21 +702,21 @@ class ProviderService:
             "remote_calls": 1.0,
         }
         try:
-            group = self._calls.reserve(call_id, amounts, work_key=work_key or None)
+            group = self._calls.reserve(attempt, amounts, work_key=work_key or None)
         except BudgetExceeded as e:
             raise ProviderError(429, f"budget refused: {e.resource} exhausted") from e
 
         outbound = {k: v for k, v in body.items() if k != "api_key"}
         headers = {"Authorization": f"Bearer {self._deepseek_key}",
                    "Content-Type": "application/json"}
-        self._calls.mark_sent(call_id, request_text=json.dumps(
+        self._calls.mark_sent(attempt, request_text=json.dumps(
             {**outbound, "authorization": PROVIDER_KEY_PLACEHOLDER}, sort_keys=True))
         url = self._cfg.deepseek_base_url.rstrip("/") + "/chat/completions"
         try:
             status, payload, elapsed = self._upstream(
                 url, headers, outbound, self._cfg.request_timeout_seconds)
         except Exception as e:  # noqa: BLE001
-            self._calls.fail_unknown(call_id, group, error_class=type(e).__name__)
+            self._calls.fail_unknown(attempt, group, error_class=type(e).__name__)
             self._emit("DEEPSEEK_FAILED_UNKNOWN", {"call_id": call_id, "error": type(e).__name__})
             raise ProviderError(
                 504, f"deepseek upstream failed after send: {type(e).__name__}") from e
@@ -639,19 +724,24 @@ class ProviderService:
         usage = payload.get("usage", {}) or {}
         actuals = self._deepseek_actuals(usage)
         if status != 200:
-            self._calls.fail_after_response(call_id, group, actuals, error_class=f"http_{status}")
+            self._calls.fail_after_response(
+                attempt, group, actuals, error_class=f"http_{status}")
             self._emit("DEEPSEEK_HTTP_ERROR", {"call_id": call_id, "status": status})
+            self._note_upstream_failure("deepseek", status)
             return status, {"error": f"deepseek returned {status}",
                             "retry": classify_status(status).value}
 
+        self._note_upstream_success("deepseek")
         self._calls.store_response(
-            call_id, response_text=json.dumps(payload, sort_keys=True)[:200000],
+            attempt, response_text=json.dumps(payload, sort_keys=True)[:200000],
             provider_request_id=str(payload.get("id", "")),
-            model=str(payload.get("model", "")),
+            requested_model=str(outbound.get("model", "")),
+            returned_model=str(payload.get("model", "")),
+            system_fingerprint=str(payload.get("system_fingerprint", "")),
             usage_json=json.dumps(usage, sort_keys=True),
         )
-        self._calls.validate(call_id)
-        self._calls.commit(call_id, group, actuals)
+        self._calls.validate(attempt)
+        self._calls.commit(attempt, group, actuals)
         self._emit("DEEPSEEK_COMMITTED", {
             "call_id": call_id, "requested_model": str(outbound.get("model", "")),
             "returned_model": str(payload.get("model", "")),
@@ -706,9 +796,10 @@ class ProviderService:
             provider="vllm", op_class=op.value, call_key=call_key,
             work_key=(cell.work_key if cell else None),
         )
+        attempt = self._calls.begin_attempt(call_id)
         try:
             group = self._calls.reserve(
-                call_id, {"gpu_seconds": self._cfg.gpu_seconds_worst_case},
+                attempt, {"gpu_seconds": self._cfg.gpu_seconds_worst_case},
                 work_key=(cell.work_key if cell else None),
             )
         except BudgetExceeded as e:
@@ -728,7 +819,7 @@ class ProviderService:
             outbound["chat_template_kwargs"] = kwargs
         prompt_sha = sha256_hex(json.dumps(outbound.get("messages", []), sort_keys=True)
                                 .encode("utf-8"))
-        self._calls.mark_sent(call_id, request_text=json.dumps(
+        self._calls.mark_sent(attempt, request_text=json.dumps(
             {"model": outbound.get("model"), "prompt_sha256": prompt_sha,
              "max_tokens": outbound.get("max_tokens"),
              "temperature": outbound.get("temperature")}, sort_keys=True))
@@ -740,7 +831,7 @@ class ProviderService:
                 url, {"Content-Type": "application/json"}, outbound,
                 self._cfg.inference_timeout_seconds)
         except Exception as e:  # noqa: BLE001
-            self._calls.fail_unknown(call_id, group, error_class=type(e).__name__)
+            self._calls.fail_unknown(attempt, group, error_class=type(e).__name__)
             self._emit("INFERENCE_FAILED_UNKNOWN", {
                 "call_id": call_id, "op_class": op.value, "error": type(e).__name__,
                 "cell": cell_token})
@@ -751,17 +842,18 @@ class ProviderService:
         actual_gpu = min(max(0.0, response_end_ts - dispatch_ts), self._cfg.gpu_seconds_worst_case)
         if status != 200:
             self._calls.fail_after_response(
-                call_id, group, {"gpu_seconds": actual_gpu}, error_class=f"http_{status}")
+                attempt, group, {"gpu_seconds": actual_gpu}, error_class=f"http_{status}")
             self._emit("INFERENCE_HTTP_ERROR", {"call_id": call_id, "status": status})
             return status, {"error": f"vllm returned {status}"}
 
         self._calls.store_response(
-            call_id, response_text=json.dumps({"usage": usage}, sort_keys=True),
-            model=str(payload.get("model", "")),
+            attempt, response_text=json.dumps({"usage": usage}, sort_keys=True),
+            requested_model=requested_model,
+            returned_model=str(payload.get("model", "")),
             usage_json=json.dumps(usage, sort_keys=True),
         )
-        self._calls.validate(call_id)
-        self._calls.commit(call_id, group, {"gpu_seconds": actual_gpu})
+        self._calls.validate(attempt)
+        self._calls.commit(attempt, group, {"gpu_seconds": actual_gpu})
         self._emit("INFERENCE_COMMITTED", {
             "call_id": call_id,
             "op_class": op.value,
