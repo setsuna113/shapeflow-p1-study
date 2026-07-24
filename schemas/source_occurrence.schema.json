@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shapeflow-p1/schemas/source_occurrence.schema.json",
+  "title": "SourceOccurrence",
+  "description": "One URL, at one rank, in one specific query's result set. Deliberately independent of content: a page reachable from three queries is three occurrences over one CanonicalSnapshot. Collapsing them would erase the citation lineage every quality metric is computed against.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "occurrence_id",
+    "task_id",
+    "query_snapshot_id",
+    "url",
+    "rank",
+    "content_hash",
+    "visibility"
+  ],
+  "properties": {
+    "occurrence_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "task_id": { "type": "string", "minLength": 1 },
+    "query_snapshot_id": {
+      "description": "The exact request (query text AND every retrieval parameter) this result came back from.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "url": { "type": "string", "minLength": 1 },
+    "title": { "type": ["string", "null"] },
+    "rank": {
+      "description": "1-based position within its own query's result list.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "score": { "type": ["number", "null"] },
+    "published_date": { "type": ["string", "null"] },
+    "content_hash": {
+      "description": "Snapshot this occurrence points at. Null when the provider returned no raw_content: such a result is NOT WEBPAGE_P1-eligible and stays on the vendor result['content'] path.",
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "snippet_content": {
+      "description": "The provider's short 'content' field. This is what vendor ODR falls back to when raw_content is absent, so both arms must receive it identically.",
+      "type": ["string", "null"]
+    },
+    "visibility": {
+      "description": "Which view this occurrence belongs to. VENDOR_VISIBLE reproduces the URL-deduped first-occurrence view that vendor tavily_search actually builds, and is the ONLY view a primary selector may read. AUDIT_ONLY occurrences (later duplicates of an already-seen URL) exist for provenance and evaluation; exposing their rank/diversity metadata to P1 would hand the treatment arm information P0 never had.",
+      "enum": ["VENDOR_VISIBLE", "AUDIT_ONLY"]
+    },
+    "duplicate_of_occurrence_id": {
+      "description": "For AUDIT_ONLY rows: the VENDOR_VISIBLE occurrence that won URL dedup.",
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "vendor_visible_order": {
+      "description": "0-based position in the vendor's first-occurrence ordering. Null for AUDIT_ONLY rows. Fixes the order in which sources are presented so P0 and P1 see the same sequence.",
+      "type": ["integer", "null"],
+      "minimum": 0
+    }
+  }
+}

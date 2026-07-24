@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shapeflow-p1/schemas/task.schema.json",
+  "title": "TaskSpec",
+  "description": "A research task and its sealed acquisition plan. Split into two blocks on purpose: 'treatment_visible' is everything an arm is allowed to see, and 'acquisition_spec' is steward-only. The acquisition spec contains authored facets and conflict/negative probes -- handing those to a selector would give P1 a decomposition of the question that P0 never received, which would make any measured advantage an artifact of the harness rather than of the P1 mechanism.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["task_id", "split", "treatment_visible", "acquisition_spec", "strata", "cluster_id"],
+  "properties": {
+    "task_id": { "type": "string", "minLength": 1 },
+    "split": {
+      "enum": ["SCREEN", "POWER_PILOT", "HOLDOUT", "JUDGE_CALIBRATION", "LIVE_VALIDITY", "RESERVE"]
+    },
+    "cluster_id": {
+      "description": "Topic + source cluster. This, not the task, is the primary independent unit for inference: tasks sharing sources are correlated, and splitting them across SCREEN/HOLDOUT would leak.",
+      "type": "string",
+      "minLength": 1
+    },
+    "treatment_visible": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["original_question"],
+      "properties": {
+        "original_question": { "type": "string", "minLength": 1 },
+        "deployment_pins": {
+          "description": "Permitted only if these exact bytes also appear in the P0 task prompt. Otherwise this is extra planning information for one arm.",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "acquisition_spec": {
+      "description": "STEWARD-ONLY. Sealed before any source fetch and never re-derived afterwards -- refining it post-acquisition would let the corpus be shaped to favour an arm.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authored_facets", "fixed_queries", "authoring_method", "content_sha256"],
+      "properties": {
+        "authored_facets": { "type": "array", "items": { "type": "string" } },
+        "fixed_queries": {
+          "description": "Frozen at registry seal. Queries may NOT be added in response to a P0 or P1 output.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "conflict_probe": { "type": ["string", "null"] },
+        "negative_or_gap_probe": { "type": ["string", "null"] },
+        "table_list_numeric_probe": { "type": ["string", "null"] },
+        "authoring_method": {
+          "description": "MACHINE_DECOMPOSED tasks are marked so the report can state which corpus was machine-authored; a machine-authored pool may not be presented as a confirmatory benchmark.",
+          "enum": ["HUMAN_AUTHORED", "USER_PROVIDED", "MACHINE_DECOMPOSED"]
+        },
+        "authoring_model_prompt_fingerprint": { "type": ["string", "null"] },
+        "content_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "strata": {
+      "description": "Pre-treatment labels used for balanced assignment and for reporting where P1 works and fails. Assigned before any outcome is observed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_volume", "facet_count"],
+      "properties": {
+        "evidence_volume": { "enum": ["low", "medium", "high"] },
+        "facet_count": { "enum": ["1-2", "3-4", "5+"] },
+        "single_source_fact": { "type": "boolean" },
+        "multi_source_synthesis": { "type": "boolean" },
+        "source_conflict": { "type": "boolean" },
+        "negative_evidence": { "type": "boolean" },
+        "citation_dense": { "type": "boolean" },
+        "table_list_heavy": { "type": "boolean" },
+        "high_redundancy": { "type": "boolean" },
+        "raw_content_missing_expected": { "type": "boolean" }
+      }
+    }
+  }
+}

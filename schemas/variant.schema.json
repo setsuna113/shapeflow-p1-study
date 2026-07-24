@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shapeflow-p1/schemas/variant.schema.json",
+  "title": "Variant",
+  "description": "One point in the P1 design space, hashed so that 'which design won' has an exact answer. The controls are not optional: SHORT_PROSE separates the pointer mechanism from simply decoding fewer tokens, and CPU_LEXICAL separates LLM selection from deterministic lexical selection. Without both, a win cannot be attributed to the P1 idea rather than to output length.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["variant_id", "node", "chunker", "scope", "contract", "aggregation", "close_mode", "budgets", "variant_sha256"],
+  "properties": {
+    "variant_id": {
+      "description": "Registry label, e.g. H03, C02, C05-FUSED-EXT, P0.",
+      "type": "string",
+      "minLength": 1
+    },
+    "node": {
+      "description": "C_VISIBLE is the compressor-only experiment. C_REGISTRY additionally changes evidence visibility and may never be reported as compressor-only. C_FUSED_EXT changes the stopping policy as well as the reducer and carries its own arm and comparator.",
+      "enum": ["P0", "WEBPAGE_P1", "C_VISIBLE", "C_REGISTRY", "C_FUSED_EXT"]
+    },
+    "chunker": {
+      "enum": ["vendor", "fixed_token_v1", "paragraph_sentence_v1", "markdown_structure_v1", "manifest", "visible_view"]
+    },
+    "scope": {
+      "description": "hierarchical runs a per-page shortlist then a cross-source reducer; its second LLM pass is accounted separately and must never be hidden inside the aggregator.",
+      "enum": ["vendor", "per_page", "per_tool_call", "per_researcher", "hierarchical"]
+    },
+    "contract": {
+      "enum": ["VENDOR_PROSE", "P1_ID", "P1_TYPED", "P1_BRIDGE", "SHORT_PROSE", "CPU_LEXICAL"]
+    },
+    "aggregation": {
+      "enum": ["vendor", "stable_union_v1", "coverage_budget_v1", "global_rerank_v1", "mmr_stable_union", "token_matched"]
+    },
+    "close_mode": {
+      "description": "prefix_preserving keeps the shared prompt prefix intact to exercise real prefix-cache reuse. fused_with_fallback belongs to C_FUSED_EXT only and always retains a dedicated-selector fallback for the two exit paths that do not call the fused tool.",
+      "enum": ["vendor", "none", "separate", "dedicated_selector", "prefix_preserving", "fused_with_fallback"]
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selected_token_budget"],
+      "properties": {
+        "selected_token_budget": {
+          "description": "The binding budget is the token count the deterministic renderer finally materializes downstream, NOT a cap on the number of IDs. Capping IDs instead would let a coarse chunker carry far more text for the same nominal budget, making the chunker comparison unfair.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_selected_ids": {
+          "description": "Structural guard only.",
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "bridge_token_cap_total": { "type": ["integer", "null"], "minimum": 0 },
+        "bridge_token_cap_each": { "type": ["integer", "null"], "minimum": 0 },
+        "chunk_target_tokens": { "type": ["integer", "null"], "minimum": 1 },
+        "chunk_overlap_tokens": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "prompt_bundle_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "variant_sha256": {
+      "description": "Digest of this record's canonical form, excluding this field. Identifies the design in freezes, figures and the final verdict.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "is_control": {
+      "description": "True for P0, SHORT_PROSE and CPU_LEXICAL arms. Controls answer 'why did it win', and are excluded from champion promotion.",
+      "type": "boolean"
+    },
+    "notes": { "type": ["string", "null"] }
+  }
+}

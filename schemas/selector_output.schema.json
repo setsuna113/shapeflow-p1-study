@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shapeflow-p1/schemas/selector_output.schema.json",
+  "title": "SelectorOutput",
+  "description": "What a P1 selector is allowed to emit. Identifiers here are SHORT PROMPT LABELS (E1, E2, Q1), not 64-hex digests: span identifiers are rendered into the selector prompt, and selector tokens are the quantity this study measures, so paying ~16-32 tokens per candidate ID would inflate the P1 arm's cost with an artifact of our own ID scheme. The adapter resolves each label against the exact candidate set offered in that call and rejects anything outside it, so the cheap form loses no validation strength. Labels are unique within one call only; the resolved span_id/visible_span_id is the global identity.",
+  "oneOf": [
+    { "$ref": "#/$defs/P1_ID" },
+    { "$ref": "#/$defs/P1_TYPED" },
+    { "$ref": "#/$defs/P1_BRIDGE" }
+  ],
+  "$defs": {
+    "label": {
+      "type": "string",
+      "pattern": "^[EQ][0-9]{1,4}$"
+    },
+    "role": {
+      "description": "How the selected span bears on the question. 'contradict' is what lets the aggregator keep both sides of a disagreement instead of silently presenting one.",
+      "enum": ["support", "contradict", "background"]
+    },
+    "P1_ID": {
+      "title": "P1-ID",
+      "description": "Pure pointer selection. No free text is representable at all, which is the point: it isolates the pointer mechanism from any decode-length effect.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "selected_ids"],
+      "properties": {
+        "contract": { "const": "P1_ID" },
+        "selected_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/label" }
+        }
+      }
+    },
+    "P1_TYPED": {
+      "title": "P1-TYPED",
+      "description": "Pointers plus mechanically checkable structure. Every field is verifiable against the candidate set; none of it is prose.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "selections"],
+      "properties": {
+        "contract": { "const": "P1_TYPED" },
+        "selections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["span_id", "role"],
+            "properties": {
+              "span_id": { "$ref": "#/$defs/label" },
+              "role": { "$ref": "#/$defs/role" },
+              "facet_ids": {
+                "description": "Selector-declared facet labels. These are treatment OUTPUT, not gold: they are checked for internal consistency (every declared facet is covered or explicitly gapped) and never against the TruthPacket at preflight time.",
+                "type": "array",
+                "items": { "type": "string", "maxLength": 64 }
+              }
+            }
+          }
+        },
+        "gaps": {
+          "description": "Facets the selector believes are unmet, each grounded in real failed lookups rather than asserted.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["facet_id", "query_attempt_ids"],
+            "properties": {
+              "facet_id": { "type": "string", "maxLength": 64 },
+              "query_attempt_ids": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "$ref": "#/$defs/label" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "P1_BRIDGE": {
+      "title": "P1-BRIDGE",
+      "description": "P1-TYPED plus strictly bounded connective text. Bridge tokens are charged in full to the selector's decode cost. An unbounded bridge is just P0 wearing a schema, so the caps below are enforced at preflight and a violation kills the variant rather than truncating it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "selections"],
+      "properties": {
+        "contract": { "const": "P1_BRIDGE" },
+        "selections": { "$ref": "#/$defs/P1_TYPED/properties/selections" },
+        "gaps": { "$ref": "#/$defs/P1_TYPED/properties/gaps" },
+        "bridges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "evidence_ids"],
+            "properties": {
+              "text": {
+                "description": "Per-bridge character ceiling is a coarse guard; the binding token cap comes from configs/variants.yaml and is checked at preflight. Bridge text may not introduce an entity or number absent from its bound spans.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 600
+              },
+              "evidence_ids": {
+                "description": "At least one binding: a bridge with no evidence is an unsourced assertion.",
+                "type": "array",
+                "minItems": 1,
+                "items": { "$ref": "#/$defs/label" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

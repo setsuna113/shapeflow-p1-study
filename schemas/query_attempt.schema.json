@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shapeflow-p1/schemas/query_attempt.schema.json",
+  "title": "QueryAttempt",
+  "description": "A retrieval that was actually made, including the ones that found nothing. This exists so 'no evidence was found for X' can be expressed as a reference to a real failed lookup instead of being fabricated as a source span. P1-TYPED and P1-BRIDGE can cite an attempt_id to mark a gap; P1-ID has no way to express that at all, and measuring the cost of that missing expressiveness is one of the study's questions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["attempt_id", "task_id", "query_text", "status", "result_occurrence_ids"],
+  "properties": {
+    "attempt_id": { "type": "string", "minLength": 1 },
+    "task_id": { "type": "string", "minLength": 1 },
+    "researcher_id": { "type": ["string", "null"] },
+    "query_text": { "type": "string" },
+    "result_occurrence_ids": {
+      "description": "Empty for EMPTY/FAILED/TIMEOUT. Non-empty for SUCCESS.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+    },
+    "status": {
+      "description": "EMPTY (query ran, returned nothing) is evidence about the world. FAILED/TIMEOUT are evidence about the infrastructure and must not be reported as 'nothing exists' -- conflating them is a critical_harm.",
+      "enum": ["SUCCESS", "EMPTY", "FAILED", "TIMEOUT"]
+    },
+    "gap_facets": {
+      "description": "EVALUATOR-ONLY when populated from TruthPacket facets. A selector may declare its own gap labels in its structured output, but those are treatment output, never gold, and must not be written back here.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "attempted_at_utc": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shapeflow-p1/schemas/snapshot.schema.json",
+  "title": "CanonicalSnapshot",
+  "description": "Frozen retrieved content, addressed by the digest of its exact bytes. The bytes themselves live in the content-addressed object store; this record is the identity and provenance. Two URLs serving identical bytes share one snapshot -- the distinct citation lineage is carried by SourceOccurrence, not here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "content_hash",
+    "raw_content_format",
+    "byte_len",
+    "object_ref",
+    "normalization_version",
+    "fetched_at_utc"
+  ],
+  "properties": {
+    "content_hash": {
+      "description": "content_id over the exact retrieved bytes. Primary key.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "raw_content_format": {
+      "description": "What Tavily actually returned. 'markdown'/'text' are cleaned parses, NOT browser HTML bytes -- which is why the node is named WEBPAGE_P1 and not HTML_P1. 'dom_html' may only be produced by the separate secondary DOM study that fetches and freezes its own HTTP response.",
+      "enum": ["markdown", "text", "dom_html"]
+    },
+    "byte_len": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "object_ref": {
+      "description": "Key of the zstd blob in the content-addressed object store.",
+      "type": "string",
+      "minLength": 1
+    },
+    "normalization_version": {
+      "description": "Version of the normalization applied before hashing. Changing it changes every content_hash and is therefore a protocol change.",
+      "type": "string",
+      "minLength": 1
+    },
+    "fetched_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "http_status": {
+      "description": "Present only for the secondary DOM study, which performs its own fetch. Tavily does not expose the upstream status.",
+      "type": ["integer", "null"]
+    },
+    "mime_type": {
+      "type": ["string", "null"]
+    },
+    "redirect_chain": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
