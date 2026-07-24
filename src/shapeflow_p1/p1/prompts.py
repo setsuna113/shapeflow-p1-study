@@ -11,7 +11,10 @@ from __future__ import annotations
 
 from ..hashing import sha256_hex
 
-__all__ = ["PROMPT_BUNDLE_VERSION", "render_selector_prompt", "prompt_bundle_hash"]
+__all__ = [
+    "PROMPT_BUNDLE_VERSION", "render_selector_prompt", "render_short_prose_prompt",
+    "prompt_bundle_hash",
+]
 
 PROMPT_BUNDLE_VERSION = "selector_prompts_v1"
 
@@ -97,6 +100,36 @@ def prompt_bundle_hash() -> str:
 
     return sha256_hex(
         canonical_json(
-            {"version": PROMPT_BUNDLE_VERSION, "template": _TEMPLATE, "instructions": _INSTRUCTIONS}
+            {"version": PROMPT_BUNDLE_VERSION, "template": _TEMPLATE,
+             "instructions": _INSTRUCTIONS, "short_prose": _SHORT_PROSE_TEMPLATE}
         )
+    )
+
+
+_SHORT_PROSE_TEMPLATE = """You are writing a short evidence summary, not a report.
+
+QUESTION / RESEARCH TOPIC:
+{topic}
+
+SOURCE MATERIAL:
+{candidates}
+
+HARD LIMIT: your entire answer must fit in {budget} tokens.
+
+Write only what the material supports. Do not speculate, do not add figures or names that are
+not present above, and do not exceed the limit.
+"""
+
+
+def render_short_prose_prompt(
+    *, topic: str, candidates: list, budget: int
+) -> str:
+    """The SHORT_PROSE control's prompt.
+
+    Held to the same rendered-token budget as the P1 arm it controls for. That is the whole
+    point: it separates "pointing at evidence helps" from "producing less text helps", and if it
+    were allowed a different budget the comparison would answer neither question.
+    """
+    return _SHORT_PROSE_TEMPLATE.format(
+        topic=topic, candidates=_render_candidates(candidates), budget=budget
     )
