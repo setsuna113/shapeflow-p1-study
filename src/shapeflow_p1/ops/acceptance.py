@@ -201,16 +201,59 @@ def run_preflight(settings: Settings, *, repo: Path,
                        "question only" if not leaked
                        else f"{len(leaked)} task view(s) carry more than the question"))
 
-    # The evaluator's tree must not be readable from here.
-    evaluator = settings.path("evaluator_root")
-    readable = evaluator.exists() and _readable(evaluator)
-    checks.append(Gate("evaluator_isolation",
-                       PASS if not readable else FAIL,
-                       "unreadable from this identity" if not readable
-                       else f"{evaluator} is readable by the process running preflight"))
+    # Neither the answer key nor the steward's audit graph may be reachable from here.
+    ok, detail = tree_isolation(repo, settings, ("evaluator_root", "steward_root"))
+    checks.append(Gate("tree_isolation", PASS if ok else FAIL, detail))
 
     return {"ok": _ok(checks), "checks": [c.as_dict() for c in checks],
             "protocol_sha": live_sha}
+
+
+def tree_isolation(repo: Path, settings: Settings, names: tuple[str, ...]) -> tuple[bool, str]:
+    """Whether the runner is shut out of the trees it must not read.
+
+    The authority is the installer's cross-uid proof, because that is the only thing that
+    can answer the question. A same-process ``os.listdir`` says what *this* identity can
+    reach, which for the steward reading its own tree is "everything" and for a host where
+    the directory does not exist yet is "nothing" -- and the old check read that second
+    answer as success, so it passed for exactly as long as there was nothing to protect.
+
+    The in-process probe is still used, but only in the direction where it is evidence: if
+    this identity *can* read one of these trees, that is a failure regardless of what any
+    proof says.
+    """
+    proof_path = repo / "reports" / "CREDENTIAL_ISOLATION.json"
+    problems: list[str] = []
+    for name in names:
+        path = settings.path(name)
+        if not path.exists():
+            problems.append(f"{path} does not exist, so nothing has been shown unreachable")
+        elif _readable(path) and _role() == "runner":
+            problems.append(f"{path} is readable by the runner identity")
+    if not proof_path.exists():
+        problems.append(
+            f"{proof_path.name} is absent: cross-uid isolation cannot be shown from inside "
+            "one process, and this one was never proved")
+    else:
+        try:
+            proved = set(json.loads(proof_path.read_text(encoding="utf-8"))
+                         .get("runner_cannot_list") or [])
+        except (OSError, json.JSONDecodeError) as e:
+            problems.append(f"the isolation proof is unreadable: {e}")
+            proved = set()
+        for name in names:
+            tree = name.replace("_root", "")
+            if tree not in proved:
+                problems.append(f"the proof does not cover the {tree} tree")
+    if problems:
+        return False, "; ".join(problems)
+    return True, f"runner shut out of {', '.join(n.replace('_root', '') for n in names)}"
+
+
+def _role() -> str:
+    import os
+
+    return os.environ.get("USER") or os.environ.get("USERNAME") or ""
 
 
 def _readable(path: Path) -> bool:

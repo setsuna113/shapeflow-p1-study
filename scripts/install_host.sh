@@ -86,12 +86,18 @@ say "data root"
 mkdir -p "$DATA_ROOT"/{provider,steward,runner,evaluator}
 chown root:root "$DATA_ROOT"; chmod 0755 "$DATA_ROOT"
 chown -R sfprovider:sfprovider "$DATA_ROOT/provider"; chmod 0700 "$DATA_ROOT/provider"
-# The steward writes the corpus; the runner must read the frozen corpus it publishes.
-chown -R sfsteward:sfrunner "$DATA_ROOT/steward"; chmod 0750 "$DATA_ROOT/steward"
+# The steward writes the corpus. The runner reads only what the steward *publishes* into
+# runner/frozen_corpus -- never the steward tree itself, whose acquisition manifests carry
+# the audit occurrence graph (ranks, scores, duplicate links) that is evaluator-only.
+# This used to be sfsteward:sfrunner 0750, which gave the identity under measurement r-x on
+# the directory holding the material its outputs were about to be scored against.
+chown -R sfsteward:sfsteward "$DATA_ROOT/steward"; chmod 0700 "$DATA_ROOT/steward"
 mkdir -p "$DATA_ROOT/runner/frozen_corpus"
 chown -R sfrunner:sfrunner "$DATA_ROOT/runner"; chmod 0755 "$DATA_ROOT/runner"
-# The evaluator holds the answer key. Nothing else may enter this tree.
-chown -R sfevaluator:sfevaluator "$DATA_ROOT/evaluator"; chmod 0700 "$DATA_ROOT/evaluator"
+# The evaluator holds the answer key. Plan §7.3: the steward *builds* truth and the
+# evaluator *reads* it, so the steward owns this tree and the evaluator group reads it.
+# What matters is the third bit: the runner is not in either, and never sees a TruthPacket.
+chown -R sfsteward:sfevaluator "$DATA_ROOT/evaluator"; chmod 0750 "$DATA_ROOT/evaluator"
 
 # The steward publishes the runner-readable corpus into the runner's tree.
 setfacl_missing=0

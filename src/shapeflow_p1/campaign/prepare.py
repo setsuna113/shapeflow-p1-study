@@ -106,6 +106,28 @@ def _runner_record(task: TaskSpec, split: str) -> dict:
     }
 
 
+def _evaluator_record(task: TaskSpec, split: str) -> dict:
+    """What the evaluator needs to build truth, and where it is allowed to live.
+
+    The authored facets and the acquisition spec are the answer key's raw material. They
+    were reachable from the steward tree, which the runner could traverse -- so the identity
+    under measurement could read the facets its output was about to be scored against. This
+    view puts them where only the evaluator can read them.
+    """
+    return {
+        "task_id": task.task_id,
+        "split": split,
+        "cluster_id": task.topic_cluster,
+        "original_question": task.question,
+        "authored_facets": list(task.required_facets),
+        "fixed_queries": list(task.fixed_queries),
+        "conflict_probe": task.conflict_probe,
+        "negative_or_gap_probe": task.negative_probe,
+        "acquisition_spec_sha256": task.acquisition_spec_sha256,
+        "strata": list(task.strata),
+    }
+
+
 def _validator(repo: Path, schema_name: str):
     from jsonschema import Draft202012Validator
 
@@ -121,8 +143,10 @@ def write_task_views(settings: Settings, registry: TaskRegistry) -> tuple[int, i
     """
     steward_dir = settings.path("tasks")
     runner_dir = settings.path("frozen_corpus_for_runner") / "tasks"
+    evaluator_dir = settings.path("evaluator_root") / "tasks"
     steward_dir.mkdir(parents=True, exist_ok=True)
     runner_dir.mkdir(parents=True, exist_ok=True)
+    evaluator_dir.mkdir(parents=True, exist_ok=True)
 
     task_schema = _validator(settings.repo, "task.schema.json")
     runner_schema = _validator(settings.repo, "runner_task.schema.json")
@@ -146,6 +170,13 @@ def write_task_views(settings: Settings, registry: TaskRegistry) -> tuple[int, i
                              encoding="utf-8")
             os.chmod(rpath, 0o444)
             written_runner += 1
+
+        epath = evaluator_dir / f"{task.task_id}.json"
+        if not epath.exists():
+            epath.write_text(
+                json.dumps(_evaluator_record(task, split), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8")
+            os.chmod(epath, 0o440)
     return written_steward, written_runner
 
 

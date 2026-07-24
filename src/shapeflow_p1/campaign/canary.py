@@ -165,12 +165,11 @@ def _verify(settings, manifest, states, outputs, *, repo) -> list[dict]:
     checks.append(_check("p1_bytes_differ_from_p0", compared > 0 and differing > 0,
                          f"{differing}/{compared} P1 cells differ from P0 on the same task"))
 
-    # 7. Truth is not reachable from the treatment identity.
-    evaluator = settings.path("evaluator_root")
-    reachable = evaluator.exists() and _listable(evaluator)
-    checks.append(_check("truth_invisible_to_treatment", not reachable,
-                         "evaluator tree unreadable" if not reachable
-                         else f"{evaluator} is readable by the runner"))
+    # 7. Neither the answer key nor the steward's audit graph is reachable from here.
+    from ..ops.acceptance import tree_isolation
+
+    isolated, detail = tree_isolation(repo, settings, ("evaluator_root", "steward_root"))
+    checks.append(_check("truth_invisible_to_treatment", isolated, detail))
 
     # 8. Replay never missed into a live search.
     misses = [k for k, v in committed.items()
