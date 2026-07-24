@@ -229,3 +229,29 @@ async def test_a_stop_request_halts_admission_without_losing_finished_cells(
     outcomes = await runner.run_cells(manifest, phase_id="run-screen", split="FORMATIVE_SCREEN",
                                       questions=questions)
     assert len(outcomes) == len(manifest.cells)
+
+
+async def test_a_block_that_spans_two_engine_epochs_is_never_frozen(harness, settings,
+                                                                    tmp_path):
+    """Complete is not the same as one observation. A block half-run before an engine
+    restart and half after compares two arms served by two engines, and freeze_blocks used
+    to accept it because every cell said COMMITTED."""
+    tasks = available_tasks(settings, "FORMATIVE_SCREEN")[:1]
+    runner = harness.runner()
+    manifest = runner.build_schedule(task_ids=tasks, arms=ARMS, split="FORMATIVE_SCREEN")
+    await runner.run_cells(manifest, phase_id="run-screen", split="FORMATIVE_SCREEN",
+                           questions=questions_for(settings, tasks))
+
+    block = manifest.blocks[0]
+    key = runner.work_key_for(block.cells[0], phase_id="run-screen",
+                              split="FORMATIVE_SCREEN")
+    with runner.ledger.transaction() as cur:
+        cur.execute("UPDATE cell_epochs SET engine_epoch='a-different-engine'"
+                    " WHERE work_key=?", (key,))
+
+    frozen = runner.freeze_blocks(manifest, phase_id="run-screen", split="FORMATIVE_SCREEN",
+                                  directory=tmp_path / "blocks")
+    assert not any(r["block_id"] == block.block_id for r in frozen)
+    incident = runner.ledger.raw_connection.execute(
+        "SELECT kind FROM incidents WHERE kind='block_spans_engine_epochs'").fetchone()
+    assert incident is not None

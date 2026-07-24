@@ -56,7 +56,12 @@ class FusedCloseStrategy:
             self.last_work = self._fallback.last_work
             return handoff
 
-        self.last_path = "FUSED"
+        # NOT the fused path. C05-FUSED-EXT needs a P1-only tool
+        # (ResearchCompleteWithSelection) because vendor's ResearchComplete has an empty
+        # schema, and that tool does not exist yet. Both branches run the fallback, so this
+        # arm currently differs from dedicated_selector by a label and nothing else. It is
+        # excluded from the screen block rather than reported as a tested null.
+        self.last_path = "FALLBACK_FUSED_NOT_IMPLEMENTED"
         handoff = await self._fallback.close_researcher(
             task_ctx=task_ctx, checkpoint=checkpoint)
         self.last_work = self._fallback.last_work

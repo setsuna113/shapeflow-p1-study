@@ -69,6 +69,23 @@ class CellOutcome:
     counts: dict = field(default_factory=dict)
 
 
+def _engine_epoch(settings: Settings) -> str:
+    """The identity of the engine a cell ran against.
+
+    A block half-run before an engine restart and half after is two engines' output in one
+    paired comparison. There was no such field at all, and `freeze_blocks` froze any block
+    whose cells were all COMMITTED regardless of when or under what they ran.
+    """
+    manifest = settings.repo / "protocol" / "stack_manifest.json"
+    if not manifest.exists():
+        return "unfrozen-stack"
+    try:
+        body = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "unreadable-stack-manifest"
+    return str(body.get("manifest_sha256") or "unfrozen-stack")[:16]
+
+
 class CampaignRunner:
     """Drives one phase's worth of cells to terminal states, resumably."""
 
@@ -82,6 +99,7 @@ class CampaignRunner:
         model_call_factory: Optional[Callable] = None,
         register_cell: Optional[Callable] = None,
         graph: object = None,
+        engine_epoch: Optional[str] = None,
     ) -> None:
         self.settings = settings
         self.ledger = ledger
@@ -92,6 +110,9 @@ class CampaignRunner:
         self._model_call_factory = model_call_factory
         self._register_cell = register_cell
         self._graph = graph
+        # Which engine served this run. Defaults to the frozen stack manifest's digest, so a
+        # restart of the same pinned stack keeps one epoch and a changed stack does not.
+        self.engine_epoch = engine_epoch or _engine_epoch(settings)
         self.outcomes: list[CellOutcome] = []
 
     # --- schedule ---------------------------------------------------------------------
@@ -148,7 +169,7 @@ class CampaignRunner:
 
     # --- work items -------------------------------------------------------------------
 
-    def work_key_for(self, cell, *, phase_id: str, split: str) -> str:
+    def _work_key_for(self, cell, *, phase_id: str, split: str) -> str:
         return self.ledger.ensure_work_item(
             protocol_sha=self.settings.shas["week1"],
             split=split,
@@ -158,11 +179,20 @@ class CampaignRunner:
             variant_id=f"{cell.arm.page_variant}+{cell.arm.close_variant}",
             replicate_id=cell.replicate_id,
             checkpoint_hash=cell.block_id,
+            # The engine identity is part of what a cell is. Without it a block half-run
+            # before a restart and half after looks like one block to the ledger, and the
+            # paired comparison silently spans two engines.
+            engine_epoch=self.engine_epoch,
             stage_version=STAGE_VERSION,
             # A cell dispatches model calls, so a lease that expires mid-flight must not be
             # blindly re-run: the ledger freezes a side-effecting item at FAILED_UNKNOWN.
             side_effecting=True,
         )
+
+    def work_key_for(self, cell, *, phase_id: str, split: str) -> str:
+        key = self._work_key_for(cell, phase_id=phase_id, split=split)
+        self.ledger.record_engine_epoch(key, self.engine_epoch)
+        return key
 
     def cell_states(self, manifest: ScheduleManifest, *, phase_id: str, split: str) -> dict:
         """Terminal state per cell, with the artifact re-verified for committed ones."""
@@ -356,18 +386,23 @@ class CampaignRunner:
                            fell_back=bool(counts.get("page_fallbacks")), counts=counts)
 
     def _store_checkpoint(self, checkpoint) -> str:
-        """Content-address every boundary checkpoint the run produced.
+        """Persist every boundary checkpoint the run produced, in full.
 
         Kept for every arm, not just P1: the forked-state component analysis needs each arm's
         boundary states, and a checkpoint that only exists for the arm that happened to use it
         cannot anchor a comparison.
+
+        In full, because this used to write `{"kind": ..., "digest": ...}` -- two fields, no
+        state, and no reader anywhere -- so nothing could fork from a boundary and the
+        component trial re-ran the entire graph per arm instead.
         """
-        body = canonical_json({"kind": type(checkpoint).__name__,
-                               "digest": checkpoint.digest})
-        ref = self.store.put_bytes(body)
+        from ..odr.checkpoints import CheckpointStore, to_document
+
+        digest = CheckpointStore(self.settings.path("checkpoints")).put(checkpoint)
+        ref = self.store.put_bytes(canonical_json(to_document(checkpoint)))
         self.ledger.register_artifact(ref.key, kind="checkpoint", raw_size=ref.raw_size,
                                       stored_size=ref.stored_size)
-        return checkpoint.digest
+        return digest
 
     # --- freezing ---------------------------------------------------------------------
 
@@ -387,12 +422,35 @@ class CampaignRunner:
             record = freeze_record(block, states=states, outputs=outputs)
             if not record["complete"]:
                 continue
+            epochs = self._block_epochs(block, phase_id=phase_id, split=split)
+            if len(epochs) > 1:
+                # Complete, and still not one observation: these cells were served by two
+                # different engines. Plan §16.3 makes the whole pre-registered block the
+                # recovery unit precisely so this is never spliced into a paired result.
+                self.ledger.record_incident(
+                    severity="ERROR", kind="block_spans_engine_epochs",
+                    detail=f"{block.block_id} ran under {sorted(epochs)}")
+                record["complete"] = False
+                record["invalid_reason"] = "SPANS_ENGINE_EPOCHS"
+                continue
             path = directory / f"{block.block_id}.json"
             if not path.exists():
                 path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n",
                                 encoding="utf-8")
             frozen.append(record)
         return frozen
+
+    def _block_epochs(self, block, *, phase_id: str, split: str) -> set:
+        """Which engine epochs this block's committed cells were actually run under."""
+        epochs: set = set()
+        for cell in block.cells:
+            row = self.ledger.raw_connection.execute(
+                "SELECT engine_epoch FROM cell_epochs WHERE work_key=?",
+                (self.work_key_for(cell, phase_id=phase_id, split=split),),
+            ).fetchone()
+            if row is not None and row["engine_epoch"]:
+                epochs.add(row["engine_epoch"])
+        return epochs
 
     def status(self, manifest: Optional[ScheduleManifest] = None, *, phase_id: str = "",
                split: str = "") -> dict:

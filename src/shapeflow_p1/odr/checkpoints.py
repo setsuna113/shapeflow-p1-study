@@ -40,6 +40,9 @@ from ..canonical import canonical_json
 from ..hashing import derive_id, sha256_hex
 
 __all__ = [
+    "CheckpointStore",
+    "to_document",
+    "from_document",
     "SamplingEnvelope",
     "FrozenToolCall",
     "FrozenMessage",
@@ -244,6 +247,153 @@ class CCheckpoint:
     @property
     def digest(self) -> str:
         return derive_id("c_checkpoint", self.content())
+
+
+# --- persistence ---------------------------------------------------------------------------
+#
+# A checkpoint that exists only in the process that produced it is not a checkpoint. The
+# runner used to store `{"kind": ..., "digest": ...}` -- two fields, no state, no reader --
+# so nothing could ever fork from a boundary, and the "forked-state component trial" ran the
+# whole seven-arm graph again per arm instead.
+
+
+def to_document(checkpoint) -> dict:
+    """The on-disk form: the full state, plus its kind and its digest."""
+    kind = "H" if isinstance(checkpoint, HCheckpoint) else "C"
+    return {"kind": kind, "digest": checkpoint.digest, **checkpoint.content()}
+
+
+def _message_from(body: dict) -> FrozenMessage:
+    return FrozenMessage(
+        role=body["role"],
+        content=body["content"],
+        tool_calls=tuple(
+            FrozenToolCall(id=tc["id"], name=tc["name"], args_canonical=tc["args"])
+            for tc in body.get("tool_calls") or ()
+        ),
+        name=body.get("name"),
+        tool_call_id=body.get("tool_call_id"),
+        message_id=body.get("message_id"),
+        additional_kwargs_canonical=body.get("additional_kwargs", "{}"),
+        response_metadata_canonical=body.get("response_metadata", "{}"),
+        usage_metadata_canonical=body.get("usage_metadata", "{}"),
+        artifact_canonical=body.get("artifact"),
+        invalid_tool_calls_canonical=body.get("invalid_tool_calls", "[]"),
+        status=body.get("status"),
+    )
+
+
+def _sampling_from(body: dict) -> SamplingEnvelope:
+    return SamplingEnvelope(
+        model=body["model"], temperature=body["temperature"], top_p=body["top_p"],
+        max_tokens=body["max_tokens"], n=body.get("n", 1), seed=body.get("seed"),
+    )
+
+
+def from_document(body: dict):
+    """Rebuild a checkpoint from its document, and refuse one whose digest disagrees.
+
+    The digest check is the point: a boundary every variant forks from has to be the same
+    boundary, and "the file was there" is not that.
+    """
+    kind = body.get("kind")
+    if kind == "H":
+        checkpoint = HCheckpoint(
+            task_id=body["task_id"],
+            researcher_id=body["researcher_id"],
+            assistant_turn_index=body["assistant_turn_index"],
+            assistant_message=_message_from(body["assistant_message"]),
+            sibling_tool_calls=tuple(
+                FrozenToolCall(id=tc["id"], name=tc["name"], args_canonical=tc["args"])
+                for tc in body["sibling_tool_calls"]
+            ),
+            search_result_sets=tuple(
+                (tcid, tuple(
+                    VendorVisibleResult(
+                        vendor_visible_order=r["order"], url=r["url"], title=r["title"],
+                        snippet=r["snippet"], raw_content_id=r["raw_content_id"],
+                    ) for r in results
+                ))
+                for tcid, results in body["search_result_sets"]
+            ),
+            non_search_outputs=tuple(
+                (pair[0], pair[1]) for pair in body["non_search_outputs"]
+            ),
+            researcher_state_hash=body["researcher_state_hash"],
+            sampling=_sampling_from(body["sampling"]),
+        )
+    elif kind == "C":
+        checkpoint = CCheckpoint(
+            task_id=body["task_id"],
+            researcher_id=body["researcher_id"],
+            researcher_messages=tuple(
+                _message_from(m) for m in body["researcher_messages"]),
+            evidence_manifest=EvidenceManifest(
+                span_ids=tuple(body["evidence_manifest"]["span_ids"])),
+            query_attempt_ids=tuple(body["query_attempt_ids"]),
+            close_reason=body["close_reason"],
+            sampling=_sampling_from(body["sampling"]),
+        )
+    else:
+        raise ValueError(f"unknown checkpoint kind {kind!r}")
+    recorded = body.get("digest")
+    if recorded and recorded != checkpoint.digest:
+        raise ValueError(
+            f"checkpoint document records digest {recorded!r} but rebuilds to "
+            f"{checkpoint.digest!r}; the boundary is not the one it claims to be"
+        )
+    return checkpoint
+
+
+class CheckpointStore:
+    """Content-addressed checkpoints, keyed by digest.
+
+    One file per boundary under ``paths.checkpoints``, so a fork can be run in a later
+    process -- which is what makes a component trial a fork rather than a re-run.
+    """
+
+    def __init__(self, root) -> None:
+        from pathlib import Path
+
+        self.root = Path(root)
+
+    def _path(self, digest: str):
+        return self.root / digest[:2] / f"{digest}.json"
+
+    def put(self, checkpoint) -> str:
+        import json
+        import os
+        import tempfile
+
+        body = to_document(checkpoint)
+        path = self._path(body["digest"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            return body["digest"]
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(canonical_json(body))
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            from pathlib import Path as _P
+
+            _P(tmp).unlink(missing_ok=True)
+            raise
+        return body["digest"]
+
+    def get(self, digest: str):
+        import json
+
+        path = self._path(digest)
+        if not path.exists():
+            raise FileNotFoundError(f"no checkpoint {digest} under {self.root}")
+        return from_document(json.loads(path.read_text(encoding="utf-8")))
+
+    def digests(self) -> list[str]:
+        return sorted(p.stem for p in self.root.rglob("*.json"))
 
 
 def fork_key(

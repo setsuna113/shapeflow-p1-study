@@ -312,6 +312,14 @@ CREATE TABLE IF NOT EXISTS corpus_attempts (
     note           TEXT
 );
 
+-- Which engine served each cell. It is in the work key too, but the key is a digest;
+-- reading it back is what lets a freeze refuse a block that spans two engines.
+CREATE TABLE IF NOT EXISTS cell_epochs (
+    work_key     TEXT PRIMARY KEY,
+    engine_epoch TEXT NOT NULL,
+    recorded_at  REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS schema_versions (
     component  TEXT PRIMARY KEY,
     version    INTEGER NOT NULL,
@@ -427,9 +435,15 @@ class Ledger:
         replicate_id: str,
         checkpoint_hash: str,
         stage_version: str,
+        engine_epoch: str = "",
     ) -> str:
         """Derive the logical identity. Deliberately excludes run_id and any timestamp so
-        the same logical work resolves to the same key across restarts."""
+        the same logical work resolves to the same key across restarts.
+
+        ``engine_epoch`` is included: a cell run before an engine restart and one run after
+        it are not the same observation, and a paired block completed across the boundary
+        compares two arms served by two engines.
+        """
         return derive_id(
             "work_item",
             {
@@ -441,6 +455,7 @@ class Ledger:
                 "variant_id": variant_id,
                 "replicate_id": replicate_id,
                 "checkpoint_hash": checkpoint_hash,
+                "engine_epoch": engine_epoch,
                 "stage_version": stage_version,
             },
         )
@@ -457,6 +472,7 @@ class Ledger:
         replicate_id: str = "0",
         checkpoint_hash: str = "-",
         stage_version: str = "v1",
+        engine_epoch: str = "",
         side_effecting: bool = False,
         max_retries: Optional[int] = None,
     ) -> str:
@@ -472,6 +488,7 @@ class Ledger:
             replicate_id=replicate_id,
             checkpoint_hash=checkpoint_hash,
             stage_version=stage_version,
+            engine_epoch=engine_epoch,
         )
         with self._tx() as cur:
             now = self._now()
@@ -807,6 +824,14 @@ class Ledger:
                     attempt_id, corpus_version, state, reason, protocol_sha,
                     self._now(), self._now() if closed else None, note,
                 ),
+            )
+
+    def record_engine_epoch(self, work_key: str, engine_epoch: str) -> None:
+        with self._tx() as cur:
+            cur.execute(
+                "INSERT OR IGNORE INTO cell_epochs(work_key, engine_epoch, recorded_at)"
+                " VALUES (?,?,?)",
+                (work_key, engine_epoch, self._now()),
             )
 
     def corpus_attempts(self) -> list[dict]:

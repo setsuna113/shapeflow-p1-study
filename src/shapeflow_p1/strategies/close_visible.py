@@ -89,6 +89,9 @@ class CloseSelectionStrategy:
         spans = spans_from_visible_view(
             view.view_bytes, view_hash=view.view_hash, messages=view.message_segments,
             tokenizer=self._tokenizer, max_tokens=cfg.chunk_max_tokens,
+            # Read, not ignored. Every C arm used to chunk identically whatever its variant
+            # declared, so the chunker axis did not exist at this node at all.
+            chunker=cfg.chunker,
         )
         namespace = "VISIBLE_MESSAGE"
         snapshot_texts: dict[str, str] = {}

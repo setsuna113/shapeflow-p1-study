@@ -46,8 +46,11 @@ CHUNKERS: dict[str, Callable] = {
     "markdown_structure_v1": lambda text, tok, **kw: markdown_structure_v1(text, tokenizer=tok, **kw),
 }
 
-AGGREGATORS = {"stable_union_v1", "coverage_budget_v1", "global_rerank_v1", "mmr_stable_union",
-               "token_matched"}
+#: Only names with an implementation behind them. `mmr_stable_union` was an alias for
+#: stable_union_v1 with no MMR anywhere, and `token_matched` was in this set with no branch
+#: in _aggregate, so it would have raised had anything reached it. A registry that lists a
+#: variant it cannot run reports a null result for a thing it never tried.
+AGGREGATORS = {"stable_union_v1", "coverage_budget_v1", "global_rerank_v1"}
 
 
 @dataclass
@@ -93,7 +96,7 @@ class SelectionOutcome:
 
 
 def _aggregate(name: str, selection, registry, *, token_budget: int, coster):
-    if name in ("stable_union_v1", "mmr_stable_union"):
+    if name == "stable_union_v1":
         return stable_union_v1(selection, registry)
     if name == "coverage_budget_v1":
         return coverage_budget_v1(selection, registry, token_budget=token_budget,
@@ -196,8 +199,16 @@ def spans_from_page(text: str, *, content_hash: str, occurrence_id: str, chunker
     ]
 
 
+#: Chunkers the close node can use over the compressor-visible view. `manifest` and
+#: `visible_view` were declared as chunker names in configs/variants.yaml and read by
+#: nothing: the close path never looked at cfg.chunker, so every C arm chunked identically
+#: and the chunker axis did not exist at that node.
+CLOSE_CHUNKERS = {"paragraph_sentence_v1", "fixed_token_v1", "markdown_structure_v1"}
+
+
 def spans_from_visible_view(view_bytes: bytes, *, view_hash: str, messages: Sequence[dict],
-                            tokenizer: Tokenizer, max_tokens: int = 320) -> list[dict]:
+                            tokenizer: Tokenizer, max_tokens: int = 320,
+                            chunker: str = "paragraph_sentence_v1") -> list[dict]:
     """Chunk the exact compressor-visible bytes into VISIBLE_MESSAGE spans.
 
     ``messages`` gives each message's ``(message_id, role, byte_start, byte_end, kind)`` inside
@@ -212,7 +223,10 @@ def spans_from_visible_view(view_bytes: bytes, *, view_hash: str, messages: Sequ
             text = segment.decode("utf-8")
         except UnicodeDecodeError:
             continue
-        for chunk in paragraph_sentence_v1(text, tokenizer=tokenizer, max_tokens=max_tokens):
+        if chunker not in CLOSE_CHUNKERS:
+            raise ValueError(
+                f"unknown close chunker {chunker!r} (have {sorted(CLOSE_CHUNKERS)})")
+        for chunk in CHUNKERS[chunker](text, tokenizer, max_tokens=max_tokens):
             start = msg["byte_start"] + len(text[:chunk.char_start].encode("utf-8"))
             end = msg["byte_start"] + len(text[:chunk.char_end].encode("utf-8"))
             spans.append(build_visible_message_span(

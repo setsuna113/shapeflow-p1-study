@@ -128,10 +128,13 @@ def test_a_page_only_arm_leaves_the_close_node_at_p0():
     assert type(close).__name__ == "VendorCloseStrategy"
 
 
-def test_the_fused_extension_falls_back_on_the_exits_it_cannot_reach():
-    """Two of three exits never call the fused tool.
+def test_the_fused_extension_is_not_implemented_and_says_so():
+    """Two of three exits never call the fused tool, and the third does not either.
 
-    Measuring the arm only on the closes that did would be conditioning on the outcome.
+    C05-FUSED-EXT needs a P1-only tool because vendor's ResearchComplete has an empty
+    schema, and that tool does not exist. Both branches run the fallback, so the arm differs
+    from dedicated_selector by a label. The label now says which, because "FUSED" on a path
+    that never fused is how an untested arm gets reported as a tested null.
     """
     from shapeflow_p1.strategies.fused import FusedCloseStrategy
 
@@ -154,7 +157,7 @@ def test_the_fused_extension_falls_back_on_the_exits_it_cannot_reach():
 
     assert asyncio.run(run("MAX_REACT_EXCEEDED")) == "DEDICATED_FALLBACK"
     assert asyncio.run(run("NO_TOOL_CALL")) == "DEDICATED_FALLBACK"
-    assert asyncio.run(run("RESEARCH_COMPLETE")) == "FUSED"
+    assert asyncio.run(run("RESEARCH_COMPLETE")) == "FALLBACK_FUSED_NOT_IMPLEMENTED"
 
 
 def _h_checkpoint() -> HCheckpoint:

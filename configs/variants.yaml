@@ -17,8 +17,8 @@ variants:
   - {variant_id: P0,            node: P0,          chunker: vendor,               scope: vendor,        contract: VENDOR_PROSE, aggregation: vendor,           close_mode: vendor,             is_control: true}
 
   # WEBPAGE_P1 family
-  - {variant_id: H00-CPU,       node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: CPU_LEXICAL,  aggregation: mmr_stable_union, close_mode: none,               is_control: true}
-  - {variant_id: H00-PROSE,     node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: SHORT_PROSE,  aggregation: token_matched,    close_mode: separate,           is_control: true}
+  - {variant_id: H00-CPU,       node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: CPU_LEXICAL,  aggregation: stable_union_v1, close_mode: none,               is_control: true}
+  - {variant_id: H00-PROSE,     node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: SHORT_PROSE,  aggregation: stable_union_v1,  close_mode: separate,           is_control: true}
   - {variant_id: H01,           node: WEBPAGE_P1,  chunker: fixed_token_v1,        scope: per_page,      contract: P1_ID,        aggregation: stable_union_v1,  close_mode: separate}
   - {variant_id: H02,           node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: P1_ID,        aggregation: stable_union_v1,  close_mode: separate}
   - {variant_id: H03,           node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: P1_TYPED,     aggregation: coverage_budget_v1, close_mode: separate}
@@ -26,13 +26,13 @@ variants:
   - {variant_id: H05,           node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: hierarchical,  contract: P1_BRIDGE,    aggregation: coverage_budget_v1, close_mode: separate}
 
   # RESEARCHER_CLOSE / C_VISIBLE family (compressor-only: sees only what P0's compressor saw)
-  - {variant_id: C00-CPU,       node: C_VISIBLE,   chunker: visible_view,          scope: per_researcher, contract: CPU_LEXICAL, aggregation: mmr_stable_union, close_mode: none,               is_control: true}
-  - {variant_id: C00-PROSE,     node: C_VISIBLE,   chunker: visible_view,          scope: per_researcher, contract: SHORT_PROSE, aggregation: token_matched,    close_mode: separate,           is_control: true}
-  - {variant_id: C01,           node: C_VISIBLE,   chunker: manifest,              scope: per_researcher, contract: P1_ID,       aggregation: stable_union_v1,  close_mode: dedicated_selector}
-  - {variant_id: C02,           node: C_VISIBLE,   chunker: manifest,              scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: dedicated_selector}
-  - {variant_id: C03,           node: C_VISIBLE,   chunker: manifest,              scope: per_researcher, contract: P1_BRIDGE,   aggregation: coverage_budget_v1, close_mode: dedicated_selector}
-  - {variant_id: C04,           node: C_VISIBLE,   chunker: manifest,              scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: prefix_preserving}
+  - {variant_id: C00-CPU,       node: C_VISIBLE,   chunker: paragraph_sentence_v1, scope: per_researcher, contract: CPU_LEXICAL, aggregation: stable_union_v1, close_mode: none,               is_control: true}
+  - {variant_id: C00-PROSE,     node: C_VISIBLE,   chunker: paragraph_sentence_v1, scope: per_researcher, contract: SHORT_PROSE, aggregation: stable_union_v1,  close_mode: separate,           is_control: true}
+  - {variant_id: C01,           node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: P1_ID,       aggregation: stable_union_v1,  close_mode: dedicated_selector}
+  - {variant_id: C02,           node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: dedicated_selector}
+  - {variant_id: C03,           node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: P1_BRIDGE,   aggregation: coverage_budget_v1, close_mode: dedicated_selector}
+  - {variant_id: C04,           node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: prefix_preserving}
 
   # Extensions reported separately (never as compressor-only)
-  - {variant_id: C05-FUSED-EXT, node: C_FUSED_EXT, chunker: visible_view,          scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: fused_with_fallback}
-  - {variant_id: C06-REG,       node: C_REGISTRY,  chunker: manifest,              scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: dedicated_selector}
+  - {variant_id: C05-FUSED-EXT, node: C_FUSED_EXT, chunker: paragraph_sentence_v1, scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: fused_with_fallback}
+  - {variant_id: C06-REG,       node: C_REGISTRY,  chunker: markdown_structure_v1, scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: dedicated_selector}

@@ -351,3 +351,86 @@ def test_close_reason_divergence_fails_parity():
     v = RunTrace(close_reasons=("RESEARCH_COMPLETE",))
     p = RunTrace(close_reasons=("MAX_REACT_EXCEEDED",))
     assert not compare_traces(v, p, require_output_equality=False).ok
+
+
+# --- a checkpoint has to survive the process that made it ------------------------------------
+
+
+def _sampling():
+    from shapeflow_p1.odr.checkpoints import SamplingEnvelope
+
+    return SamplingEnvelope(model="Qwen3-14B-AWQ", temperature=0.3, top_p=1.0,
+                            max_tokens=4096, seed=11)
+
+
+def _c_checkpoint():
+    from shapeflow_p1.odr.checkpoints import (
+        CCheckpoint,
+        EvidenceManifest,
+        FrozenMessage,
+        FrozenToolCall,
+    )
+
+    return CCheckpoint(
+        task_id="T1", researcher_id="R1",
+        researcher_messages=(
+            FrozenMessage(role="system", content="you research"),
+            FrozenMessage(
+                role="ai", content=[{"type": "text", "text": "calling"}],
+                tool_calls=(FrozenToolCall(id="c1", name="tavily_search",
+                                           args_canonical='{"query":"q"}'),),
+                additional_kwargs_canonical='{"refusal":null}',
+                response_metadata_canonical='{"finish_reason":"tool_calls"}',
+                usage_metadata_canonical='{"input_tokens":10}',
+                message_id="m-2"),
+            FrozenMessage(role="tool", content="page text", tool_call_id="c1",
+                          name="tavily_search", artifact_canonical='{"n":1}',
+                          status="success"),
+        ),
+        evidence_manifest=EvidenceManifest(span_ids=("s1", "s2")),
+        query_attempt_ids=("qa1",), close_reason="RESEARCH_COMPLETE",
+        sampling=_sampling(),
+    )
+
+
+def test_a_checkpoint_round_trips_byte_for_byte(tmp_path):
+    """The forked-state design says every variant starts from byte-identical input. That is
+    a claim about a document that can be read back, not about an object in memory."""
+    from shapeflow_p1.canonical import canonical_json
+    from shapeflow_p1.odr.checkpoints import CheckpointStore, to_document
+
+    original = _c_checkpoint()
+    store = CheckpointStore(tmp_path / "checkpoints")
+    digest = store.put(original)
+
+    restored = store.get(digest)
+    assert restored == original
+    assert canonical_json(to_document(restored)) == canonical_json(to_document(original))
+    assert restored.researcher_messages[1].additional_kwargs_canonical == '{"refusal":null}'
+    assert restored.researcher_messages[2].status == "success"
+
+
+def test_a_checkpoint_document_that_does_not_rebuild_to_its_digest_is_refused(tmp_path):
+    import json
+
+    import pytest
+
+    from shapeflow_p1.odr.checkpoints import CheckpointStore, from_document, to_document
+
+    body = to_document(_c_checkpoint())
+    body["close_reason"] = "NO_TOOL_CALL"          # the state changed; the digest did not
+    with pytest.raises(ValueError, match="not the one it claims"):
+        from_document(body)
+
+
+def test_the_stored_document_validates_against_the_schema(tmp_path):
+    import json
+    from pathlib import Path
+
+    from jsonschema import Draft202012Validator
+
+    from shapeflow_p1.odr.checkpoints import to_document
+
+    repo = Path(__file__).resolve().parents[2]
+    schema = json.loads((repo / "schemas" / "checkpoint.schema.json").read_text())
+    Draft202012Validator(schema).validate(to_document(_c_checkpoint()))
