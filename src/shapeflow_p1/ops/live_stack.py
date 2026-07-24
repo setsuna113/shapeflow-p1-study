@@ -221,18 +221,6 @@ print(json.dumps(out, sort_keys=True))
 """
 
 
-_BACKEND_PATTERNS = (
-    "Using Flash Attention backend",
-    "Using FlashInfer backend",
-    "Using XFormers backend",
-    "Using FlashMLA backend",
-    "Using Triton",
-    "Using PallasAttention",
-    "attention backend",
-    "AttentionBackend",
-)
-
-
 def attention_backend_from_log(log_path: Path) -> str:
     """Read the attention backend the engine actually chose, from its own startup log.
 
@@ -244,6 +232,11 @@ def attention_backend_from_log(log_path: Path) -> str:
     Returns the normalized backend *name* (``FLASH_ATTN``, ``FLASHINFER``, ...), not the raw log
     line: the line carries a pid and a timestamp that change on every restart, and a manifest
     field that moved every restart could never match.
+
+    Reads the **last** matching line, not the first. The supervisor appends to one log across
+    restarts, so the file accumulates a "Using X attention backend" line per launch; the backend
+    that matters is the one the engine running *now* chose. Returning the first line would pin the
+    answer to the oldest launch, which is exactly the drift the doctor check exists to catch.
     """
     import re
 
@@ -252,10 +245,13 @@ def attention_backend_from_log(log_path: Path) -> str:
     except OSError:
         return ""
     named = re.compile(r"Using\s+([A-Z][A-Z0-9_]+)\s+attention backend", re.IGNORECASE)
+    found = ""
     for line in text.splitlines():
         match = named.search(line)
         if match:
-            return match.group(1).upper()
+            found = match.group(1).upper()
+    if found:
+        return found
     # Fall back to a recognised token if the exact phrasing differs across vLLM versions.
     tokens = ("FLASH_ATTN", "FLASHINFER", "XFORMERS", "FLASHMLA", "TRITON_ATTN", "TORCH_SDPA")
     for line in text.splitlines():

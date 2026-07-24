@@ -176,3 +176,21 @@ def test_the_attention_backend_comes_from_the_engines_own_log(tmp_path):
     # that change every restart, and a frozen field that moved every restart could never match.
     assert attention_backend_from_log(log) == "FLASH_ATTN"
     assert attention_backend_from_log(tmp_path / "missing.log") == ""
+
+
+def test_the_attention_backend_is_the_current_engine_not_the_first_launch(tmp_path):
+    """The supervisor appends to one log across restarts, so a stale first line must not win.
+
+    Reading the first "Using X" line would pin the answer to the oldest launch and make the
+    doctor check vacuous -- it would always agree with the freeze. The backend that matters is
+    the one the engine running now chose, i.e. the last such line.
+    """
+    log = tmp_path / "vllm.log"
+    log.write_text(
+        "(EngineCore pid=1) INFO 07-24 10:00 [cuda.py:480] Using FLASHINFER attention backend "
+        "out of potential backends: [...]\n"
+        "... the engine ran, exited, and the supervisor restarted it ...\n"
+        "(EngineCore pid=2) INFO 07-24 12:00 [cuda.py:480] Using FLASH_ATTN attention backend "
+        "out of potential backends: [...]\n"
+    )
+    assert attention_backend_from_log(log) == "FLASH_ATTN"

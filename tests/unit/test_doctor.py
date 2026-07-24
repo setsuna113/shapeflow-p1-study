@@ -154,6 +154,79 @@ def test_a_present_manifest_is_not_evidence_until_the_verifier_exists(tmp_path, 
     assert "artifact_merkle_root" in res.detail or "stack.yaml changed" in res.detail
 
 
+def test_engine_log_defaults_under_the_repo_and_is_overridable(tmp_path, monkeypatch):
+    """A log path inside our own repo is safe to default; a missing one is not observable."""
+    from shapeflow_p1.doctor import _engine_log
+
+    monkeypatch.delenv("SHAPEFLOW_ENGINE_LOG", raising=False)
+    assert _engine_log(tmp_path) is None                       # default absent -> None
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "vllm-causal.log").write_text("x")
+    assert _engine_log(tmp_path) == tmp_path / "logs" / "vllm-causal.log"
+
+    other = tmp_path / "elsewhere.log"
+    other.write_text("y")
+    monkeypatch.setenv("SHAPEFLOW_ENGINE_LOG", str(other))
+    assert _engine_log(tmp_path) == other                      # override wins
+    monkeypatch.setenv("SHAPEFLOW_ENGINE_LOG", str(tmp_path / "nope.log"))
+    assert _engine_log(tmp_path) is None                       # named but missing -> None
+
+
+def test_stack_check_reads_the_backend_from_the_engine_log(tmp_path, monkeypatch):
+    """observe() cannot see the attention backend; the check reads it from the engine's own log,
+
+    the same source the freeze used. So an engine restarted onto a different backend is caught,
+    and the gate is not vacuous.
+    """
+    import shutil
+
+    from shapeflow_p1 import doctor as doc
+    from shapeflow_p1.config import load_config
+    from shapeflow_p1.ops import live_stack as ls
+    from shapeflow_p1.ops.live_stack import _OBSERVED_KEY, StackObservation, freeze_stack
+
+    fake_repo = tmp_path / "repo"
+    (fake_repo / "protocol").mkdir(parents=True)
+    (fake_repo / "configs").mkdir()
+    shutil.copy(REPO / "configs" / "stack.yaml", fake_repo / "configs" / "stack.yaml")
+    stack_yaml = fake_repo / "configs" / "stack.yaml"
+    declared, _ = load_config(stack_yaml)
+
+    # A full observation that resolves every steward-frozen field, the backend included.
+    values: dict[str, str] = {}
+    for section, block in declared.items():
+        if not isinstance(block, dict):
+            continue
+        for key, value in block.items():
+            if isinstance(value, str) and value.startswith("@"):
+                obskey = _OBSERVED_KEY.get(key, key)
+                values[obskey] = "FLASH_ATTN" if obskey == "attention_backend" else f"{len(values):064x}"
+    freeze_stack(fake_repo, declared, StackObservation(values=dict(values)),
+                 frozen_at_utc="2026-07-24T00:00:00Z")
+
+    # observe() (patched at its source, since check_stack_manifest imports it fresh) returns
+    # everything EXCEPT the backend, which the real observe genuinely cannot see.
+    seen = {k: v for k, v in values.items() if k != "attention_backend"}
+    monkeypatch.setattr(ls, "observe", lambda **kw: StackObservation(values=dict(seen)))
+    monkeypatch.delenv("SHAPEFLOW_ENGINE_PID", raising=False)
+
+    # No readable log -> the backend is unobservable and the check fails closed on that field.
+    monkeypatch.setenv("SHAPEFLOW_ENGINE_LOG", str(fake_repo / "absent.log"))
+    miss = doc.check_stack_manifest(fake_repo, stack_yaml)
+    assert miss.status == FAIL and "attention_backend" in miss.detail
+
+    # A log naming the frozen backend -> the check passes.
+    log = fake_repo / "engine.log"
+    log.write_text("(EngineCore pid=7) INFO Using FLASH_ATTN attention backend out of [...]\n")
+    monkeypatch.setenv("SHAPEFLOW_ENGINE_LOG", str(log))
+    assert doc.check_stack_manifest(fake_repo, stack_yaml).status == PASS
+
+    # A log showing a different backend -> caught as drift, not laundered into a pass.
+    log.write_text("(EngineCore pid=8) INFO Using FLASHINFER attention backend out of [...]\n")
+    drift = doc.check_stack_manifest(fake_repo, stack_yaml)
+    assert drift.status == FAIL and "attention_backend" in drift.detail
+
+
 def test_verify_approval_reads_the_protocol_sha_from_the_tracked_document():
     """Comparing the approval's protocol_sha to itself always passes and proves nothing.
 

@@ -219,7 +219,7 @@ def check_stack_manifest(repo: Path, stack_config: Path) -> CheckResult:
             "not freeze it at launch.",
         )
 
-    from .ops.live_stack import compare, observe
+    from .ops.live_stack import attention_backend_from_log, compare, observe
 
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -233,6 +233,15 @@ def check_stack_manifest(repo: Path, stack_config: Path) -> CheckResult:
         vllm_python=Path(str(declared.get("engine", {}).get("vllm_venv", ""))) / "bin" / "python",
         engine_pid=engine_pid,
     )
+    # The attention backend is only knowable from a served engine: vLLM picks it at startup and
+    # records it in its own log. Read the same way the freeze read it, so doctor verifies the
+    # engine running *now* chose the backend the manifest froze -- an engine restarted onto a
+    # different backend is caught here.
+    engine_log = _engine_log(repo)
+    if engine_log:
+        backend = attention_backend_from_log(engine_log)
+        if backend:
+            observation.values["attention_backend"] = backend
     layer = declared.get("isolation", {}).get("causal", {})
     expected_flags = [
         f"--max-num-seqs", str(layer.get("max_num_seqs", 1)),
@@ -264,6 +273,20 @@ def _engine_pid() -> Optional[int]:
         return None
     pid = int(raw)
     return pid if Path(f"/proc/{pid}").exists() else None
+
+
+def _engine_log(repo: Path) -> Optional[Path]:
+    """The causal engine's own startup log, for the attention backend it chose.
+
+    Unlike the pid, a log *path* under our own repo is safe to default: it names a file this
+    study writes, never a foreign process, so there is nothing to accidentally match. The
+    supervisor writes logs/<name>.log, and the causal engine's name is vllm-causal;
+    SHAPEFLOW_ENGINE_LOG overrides it. Returned only if it exists, so a missing log leaves the
+    backend unobservable and the stack check fails closed rather than recording a guess.
+    """
+    raw = os.environ.get("SHAPEFLOW_ENGINE_LOG", "").strip()
+    candidate = Path(raw) if raw else Path(repo) / "logs" / "vllm-causal.log"
+    return candidate if candidate.exists() else None
 
 
 def run_pure_checks(

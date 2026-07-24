@@ -63,8 +63,35 @@ step() { STEP=$((STEP + 1)); echo "== [${STEP}/${TOTAL_STEPS}] $* =="; }
 # it -- so a step would run as the right uid while failing the check that says so.
 as() { local role="$1"; shift; runuser -u "$role" -- env USER="$role" LOGNAME="$role" \
         SHAPEFLOW_DATA_ROOT="$DATA_ROOT" SHAPEFLOW_REPO="$REPO" \
-        PYTHONHASHSEED=0 TZ=UTC "$@"; }
+        PYTHONHASHSEED=0 TZ=UTC \
+        ${SHAPEFLOW_ENGINE_PID:+SHAPEFLOW_ENGINE_PID="$SHAPEFLOW_ENGINE_PID"} \
+        ${SHAPEFLOW_ENGINE_LOG:+SHAPEFLOW_ENGINE_LOG="$SHAPEFLOW_ENGINE_LOG"} \
+        "$@"; }
 SF="$REPO/.venv/bin/shapeflow-p1"
+
+# The causal engine runs under sfsupervise; find the api_server pid that is genuinely a
+# descendant of OUR supervisor (its pid is in the run file), so doctor's flags check reads this
+# run's process and can never match a foreign vLLM on a shared host. Empty output if not found,
+# in which case doctor still verifies the backend from the log but leaves the flags unchecked.
+discover_engine_pid() {
+  local runfile="${SHAPEFLOW_RUN_DIR:-/run/shapeflow}/vllm-causal.pid" sup pid p argv0
+  [ -r "$runfile" ] || return 1
+  sup="$(cat "$runfile" 2>/dev/null)" || return 1
+  [ -n "$sup" ] || return 1
+  for pid in $(pgrep -f "vllm.entrypoints.openai.api_server" 2>/dev/null); do
+    # The engine is the python interpreter itself, not the runuser/env wrappers whose argv
+    # also carries the command -- pick the one whose argv[0] is python so the flags read from
+    # /proc match what the freeze recorded.
+    argv0="$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | head -1)"
+    case "${argv0##*/}" in python | python3 | python3.*) ;; *) continue ;; esac
+    p="$pid"
+    while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
+      p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+      [ "$p" = "$sup" ] && { echo "$pid"; return 0; }
+    done
+  done
+  return 1
+}
 
 # ---------------------------------------------------------------------------------------
 step "singleton: no active coordinator"
@@ -129,6 +156,11 @@ step "approval binds the live configuration"
   || blocked "APPROVAL_MISMATCH" "launch_approval.json does not bind the live configuration"
 
 step "doctor: stack, GPU UUID, driver, CUDA, vLLM, model revision, patch, APC"
+# The frozen stack manifest is only verifiable against a running engine. Give doctor the
+# engine's own log (for the attention backend it chose at startup) and its pid (for the live
+# --max-num-seqs 1 and prefix-caching-off flags that make the causal layer causal).
+export SHAPEFLOW_ENGINE_LOG="$REPO/logs/vllm-causal.log"
+SHAPEFLOW_ENGINE_PID="$(discover_engine_pid || true)"; export SHAPEFLOW_ENGINE_PID
 as sfrunner "$SF" doctor --config "$CONFIG" --role runner || blocked "DOCTOR" "doctor failed"
 
 step "acceptance matrix"
