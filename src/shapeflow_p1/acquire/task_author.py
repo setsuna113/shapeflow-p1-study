@@ -244,7 +244,7 @@ _TASK_SCHEMA = {
                 "question": {"type": "string", "minLength": 40, "maxLength": 900},
                 "required_facets": {"type": "array", "minItems": 1, "maxItems": 8,
                                     "items": {"type": "string", "minLength": 2}},
-                "fixed_queries": {"type": "array", "minItems": 2, "maxItems": 8,
+                "fixed_queries": {"type": "array", "minItems": 3, "maxItems": 8,
                                   "items": {"type": "string", "minLength": 5}},
                 "conflict_probe": {"type": ["string", "null"]},
                 "negative_probe": {"type": ["string", "null"]},
@@ -294,6 +294,7 @@ async def author_tasks(
     target_model: str,
     min_question_chars: int = 60,
     max_question_chars: int = 600,
+    min_fixed_queries: int = 3,
     attempts_per_cluster: int = 3,
 ) -> tuple[list[TaskSpec], AuthoringFingerprint, list[dict]]:
     """Author the whole corpus. Returns (tasks, fingerprint, raw responses).
@@ -336,18 +337,29 @@ async def author_tasks(
                 if not (min_question_chars <= len(" ".join(str(t["question"]).split()))
                         <= max_question_chars)
             ]
-            if not short:
+            thin = [
+                t["profile_id"] for t in response.data["tasks"]
+                if len([q for q in t["fixed_queries"] if str(q).strip()]) < min_fixed_queries
+            ]
+            if not short and not thin:
                 break
+            parts = []
+            if short:
+                parts.append(
+                    f"these profiles had a question outside the {min_question_chars}-"
+                    f"{max_question_chars} character range and must be rewritten longer or "
+                    f"shorter: {', '.join(short)}")
+            if thin:
+                parts.append(
+                    f"these profiles had fewer than {min_fixed_queries} fixed_queries and must "
+                    f"be given more: {', '.join(thin)}")
             correction = (
-                f"\n\nATTEMPT {attempt + 2}: these profiles had a question outside the "
-                f"{min_question_chars}-{max_question_chars} character range and must be "
-                f"rewritten longer or shorter: {', '.join(short)}\n"
+                f"\n\nATTEMPT {attempt + 2}: " + "; ".join(parts) + "\n"
             )
         else:
             raise AuthoringError(
-                f"cluster {cluster['cluster_id']!r} still has a question outside "
-                f"[{min_question_chars}, {max_question_chars}] after "
-                f"{attempts_per_cluster} attempts"
+                f"cluster {cluster['cluster_id']!r} still violates the declared question "
+                f"length or query-count bounds after {attempts_per_cluster} attempts"
             )
         returned_model = response.returned_model or returned_model
         system_fingerprint = response.system_fingerprint or system_fingerprint

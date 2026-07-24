@@ -191,6 +191,7 @@ async def prepare_corpus(
         target_model=target_model,
         min_question_chars=int(task_config["audit"]["min_question_chars"]),
         max_question_chars=int(task_config["audit"]["max_question_chars"]),
+        min_fixed_queries=int(task_config["audit"]["min_fixed_queries"]),
     )
 
     audit = audit_tasks(specs, config=task_config)
