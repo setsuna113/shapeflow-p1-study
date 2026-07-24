@@ -20,7 +20,13 @@ git -C vendor/open_deep_research archive HEAD | tar -x -C .build/odr-pristine
 git -C vendor/open_deep_research archive HEAD | tar -x -C .build/open_deep_research-patched
 git apply --directory=.build/open_deep_research-patched patches/odr_p1_hooks.patch
 
-ACTUAL="$(python -c "
+# Prefer the project venv when it exists, then python3: a bare `python` is absent
+# on the run host and the hash check would silently not run.
+PY="${PYTHON:-}"
+[ -n "$PY" ] || { [ -x "$REPO/.venv/bin/python" ] && PY="$REPO/.venv/bin/python"; }
+[ -n "$PY" ] || PY="$(command -v python3 || command -v python)"
+[ -n "$PY" ] || { echo "no python available to verify the patched tree" >&2; exit 1; }
+ACTUAL="$("$PY" -c "
 from pathlib import Path; import sys
 sys.path.insert(0, 'src')
 from shapeflow_p1.treehash import tree_sha256

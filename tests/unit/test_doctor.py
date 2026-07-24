@@ -140,7 +140,9 @@ def test_a_present_manifest_is_not_evidence_until_the_verifier_exists(tmp_path, 
     }))
     res = check_stack_manifest(fake_repo, fake_repo / "configs" / "stack.yaml")
     assert res.status == FAIL
-    assert "NOT_IMPLEMENTED" in res.detail
+    # The verifier now names what disagreed rather than reporting that it does not exist.
+    assert "mismatch" in res.detail
+    assert "artifact_merkle_root" in res.detail or "stack.yaml changed" in res.detail
 
 
 def test_verify_approval_reads_the_protocol_sha_from_the_tracked_document():
@@ -195,26 +197,49 @@ def test_verify_approval_hashes_config_contents_not_the_path(monkeypatch):
     assert config_sha(data) == sha
 
 
-def test_launch_gate_phase_commands_exit_3_and_accept_the_gates_options():
+def test_the_launch_gate_commands_accept_the_options_the_gate_passes():
     """A missing option must never be mistaken for a missing capability.
 
     bootstrap_and_run.sh calls these with --config. Before they accepted it, the gate died on
     Typer's "No such option: --config" -- an argument-parsing error dressed as a stack failure.
+    Now they are implemented, so the option must parse and the command must fail for a *real*
+    reason (wrong identity, missing corpus), never on argument parsing.
     """
     from typer.testing import CliRunner
 
     from shapeflow_p1.cli import app
 
     runner = CliRunner()
-    for command in ("prepare", "smoke", "accept", "freeze-stack", "test-p0-parity",
-                    "run-screen", "run-holdout", "release-holdout", "acquire"):
+    for command in ("prepare", "smoke", "freeze-stack", "run-screen", "release-holdout",
+                    "acquire", "build-truth", "evaluate"):
         result = runner.invoke(app, [command, "--config", "configs/week1.yaml"])
-        assert result.exit_code == 3, f"{command}: expected exit 3, got {result.exit_code}"
-        assert "not implemented" in result.output.lower() or "not implemented" in str(result.stderr)
-    # run-week1 additionally takes the flags the gate execs it with.
+        assert result.exit_code != 0, f"{command} succeeded without its preconditions"
+        assert "No such option" not in result.output, f"{command} rejected --config"
     result = runner.invoke(app, ["run-week1", "--config", "configs/week1.yaml",
                                  "--resume", "--protocol-sha", "deadbeef"])
-    assert result.exit_code == 3
+    assert "No such option" not in result.output
+
+
+def test_a_phase_command_refuses_the_wrong_identity():
+    """The UID separation is the boundary; a command that only documented it enforced nothing."""
+    from typer.testing import CliRunner
+
+    from shapeflow_p1.cli import app
+
+    result = CliRunner().invoke(app, ["prepare", "--config", "configs/week1.yaml"])
+    assert result.exit_code == 1
+    assert "must run as sfsteward" in result.output
+
+
+def test_release_holdout_is_a_gate_that_refuses_not_a_stub():
+    """This round has no confirmatory holdout, and the command must say which precondition failed."""
+    from typer.testing import CliRunner
+
+    from shapeflow_p1.cli import app
+
+    result = CliRunner().invoke(app, ["release-holdout", "--config", "configs/week1.yaml"])
+    assert result.exit_code == 1
+    assert "FORMATIVE_ONLY" in result.output and "open_holdout" in result.output
 
 
 def test_cli_app_constructs_and_has_commands():

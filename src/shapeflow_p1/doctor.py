@@ -202,7 +202,7 @@ def check_stack_manifest(repo: Path, stack_config: Path) -> CheckResult:
     flags) against the running host, the honest status is that the check has not been built --
     not that the stack is fine. A gate that cannot fail is not a gate.
     """
-    manifest = repo / "protocol" / "stack_manifest.json"
+    manifest_path = repo / "protocol" / "stack_manifest.json"
     declared, _ = load_config(stack_config)
     unresolved = [
         f"{section}.{key}"
@@ -211,19 +211,59 @@ def check_stack_manifest(repo: Path, stack_config: Path) -> CheckResult:
         for key, value in block.items()
         if isinstance(value, str) and value.startswith("@")
     ]
-    if not manifest.exists():
+    if not manifest_path.exists():
         return CheckResult(
             "stack_manifest", FAIL,
             f"protocol/stack_manifest.json missing; {len(unresolved)} field(s) unresolved. "
             "Run `shapeflow-p1 freeze-stack` as the steward before approval -- doctor will "
             "not freeze it at launch.",
         )
-    return CheckResult(
-        "stack_manifest", FAIL,
-        "NOT_IMPLEMENTED: live stack verification is Block 9. A present manifest is not "
-        "evidence -- its digest, schema and every live value (GPU UUID, driver, model Merkle "
-        "root, vLLM package tree, attention backend, unit flags) are still unchecked.",
+
+    from .ops.live_stack import compare, observe
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return CheckResult("stack_manifest", FAIL, f"manifest unreadable: {e}")
+
+    engine_pid = _engine_pid()
+    observation = observe(
+        gpu_uuid=str(declared.get("host", {}).get("gpu_uuid", "")),
+        model_dir=Path(str(declared.get("model", {}).get("path", ""))),
+        vllm_python=Path(str(declared.get("engine", {}).get("vllm_venv", ""))) / "bin" / "python",
+        engine_pid=engine_pid,
     )
+    layer = declared.get("isolation", {}).get("causal", {})
+    expected_flags = [
+        f"--max-num-seqs", str(layer.get("max_num_seqs", 1)),
+    ] if engine_pid else []
+    if engine_pid and layer.get("enable_prefix_caching") is False:
+        expected_flags.append("--no-enable-prefix-caching")
+
+    problems = compare(manifest, declared, observation,
+                       expected_engine_flags=expected_flags)
+    if problems:
+        return CheckResult("stack_manifest", FAIL,
+                           f"{len(problems)} mismatch(es): " + "; ".join(problems[:4]))
+    return CheckResult(
+        "stack_manifest", PASS,
+        f"manifest {manifest.get('manifest_sha256', '')[:12]} matches the live stack"
+        + (f" (engine pid {engine_pid})" if engine_pid else " (engine not running)"),
+    )
+
+
+def _engine_pid() -> Optional[int]:
+    """The pid serving the causal engine, if one is running.
+
+    Read from the environment the unit sets rather than guessed from a process name: guessing
+    could match a foreign vLLM on a shared host, and this study never touches a process that is
+    not its own.
+    """
+    raw = os.environ.get("SHAPEFLOW_ENGINE_PID", "").strip()
+    if not raw.isdigit():
+        return None
+    pid = int(raw)
+    return pid if Path(f"/proc/{pid}").exists() else None
 
 
 def run_pure_checks(

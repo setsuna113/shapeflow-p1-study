@@ -14,7 +14,6 @@ an error body -- the way a real provider leaks one -- and asserted absent from e
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -25,7 +24,6 @@ from shapeflow_p1.experiment.ledger import Ledger
 from shapeflow_p1.object_store import ObjectStore
 from shapeflow_p1.providers.provider_client import (
     PROVIDER_KEY_PLACEHOLDER,
-    ProviderCallError,
     ProviderClient,
 )
 from shapeflow_p1.runtime.provider_server import (

@@ -1,20 +1,25 @@
 """The `shapeflow-p1` command surface (plan §19).
 
-The commands map one-to-one to campaign phases. Those that run anywhere (doctor,
-verify-approval, report, verify-artifacts, status) are wired here. The phase commands that are
-not built yet are declared with the exact names and options the launch gate passes, and each
-exits 3 with "not implemented" -- so a missing option can never be mistaken for a missing
-capability, and an unbuilt phase can never be mistaken for a passing one.
+The commands map one-to-one to campaign phases, and each asserts the identity it must run as:
+the steward acquires and freezes, the runner executes treatments, the evaluator reads truth. A
+command that checked nothing but a docstring would leave the whole UID separation resting on
+whoever typed it.
 
-Nothing here approximates a phase it cannot perform. Once `LAUNCH_GATE_PASSED.json` exists,
-mutation commands accept only `--resume --protocol-sha <exact>`, so a diagnostic override can
-never silently alter an approved run.
+Once ``reports/LAUNCH_GATE_PASSED.json`` exists, mutation commands accept only
+``--resume --protocol-sha <exact>``: a diagnostic override after launch would silently alter an
+approved run, and any real change to budget, sample or phase order mints a new protocol SHA and
+needs a new approval instead.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import typer
 
@@ -26,41 +31,70 @@ _CONFIGS = {
     "budget": _REPO / "configs" / "budget_v1.yaml",
 }
 _SCHEMAS = _REPO / "schemas"
+_CFG = typer.Option(None, "--config", help="Campaign config (configs/week1.yaml)")
 
 
-_NOT_IMPLEMENTED = {
-    "prepare": "Block 4 (frozen corpus + task registry)",
-    "smoke": "Block 10 (real GPU canary)",
-    "run-screen": "Block 7 (campaign runner)",
-    "run-holdout": "Block 7 (campaign runner)",
-    "run-week1": "Block 7 (campaign runner)",
-    "release-holdout": "Block 8 (holdout gate)",
-    "acquire": "Block 4 (Tavily acquisition)",
-    "test-p0-parity": "Block 2 (ODR adapter + parity harness)",
-    "accept": "Block 10 (acceptance matrix)",
-    "freeze-stack": "Block 9 (stewarded stack manifest)",
-    "preflight": "Block 7 (campaign preflight)",
-}
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _not_implemented(name: str) -> None:
-    """Refuse loudly. Never approximate a phase that has not been built.
+def _fail(message: str, code: int = 1) -> None:
+    typer.echo(message, err=True)
+    raise typer.Exit(code=code)
 
-    Exit 3 is distinct from a check *failing* (exit 1): the launch gate must be able to tell
-    "this stack is wrong" from "this command does not exist yet", and neither may ever be
-    mistaken for success.
-    """
-    typer.echo(
-        f"[{name}] is not implemented yet -- {_NOT_IMPLEMENTED[name]}. It refuses to run rather "
-        "than approximate a phase, so the launch gate cannot pass an incomplete stack.",
-        err=True,
-    )
-    raise typer.Exit(code=3)
+
+def _require_role(role: str) -> None:
+    """Assert the effective identity. The separation is the boundary; this enforces it."""
+    from .doctor import check_identity
+
+    result = check_identity(role)
+    if result.status == "FAIL":
+        _fail(f"  FAIL  {result.name}: {result.detail}")
+
+
+def _settings():
+    from .campaign.settings import Settings
+
+    return Settings.load(_REPO)
+
+
+def _launched() -> bool:
+    return (_REPO / "reports" / "LAUNCH_GATE_PASSED.json").exists()
+
+
+def _assert_post_launch_flags(protocol_sha: Optional[str], resume: bool) -> None:
+    """After the gate has passed, only `--resume --protocol-sha <exact>` may mutate a run."""
+    if not _launched():
+        return
+    from .protocol import protocol_sha as document_sha
+
+    if not resume:
+        _fail("this run has already launched; mutation requires --resume", code=2)
+    expected = document_sha(_REPO)
+    if protocol_sha != expected:
+        _fail(
+            f"--protocol-sha must be the exact approved SHA {expected[:12]}...; a budget, "
+            "sample or phase change mints a new protocol SHA and needs a new approval",
+            code=2,
+        )
+
+
+def _provider_client(settings, role: str = "runner"):
+    from .providers.provider_client import ProviderClient, load_role_token
+
+    token_dir = str(settings.get("week1", "provider", "token_dir"))
+    host = settings.get("week1", "provider", "bind_host")
+    port = settings.get("week1", "provider", "bind_port")
+    return ProviderClient(base_url=f"http://{host}:{port}",
+                          token=load_role_token(token_dir, role))
+
+
+# --- read-only ---------------------------------------------------------------------------
 
 
 @app.command()
 def doctor(
-    config: Path = typer.Option(None, "--config", help="Campaign config (configs/week1.yaml)"),
+    config: Path = _CFG,
     role: str = typer.Option(None, "--role", help="Assert the effective identity for this role"),
 ) -> None:
     """Verify the environment and stack, read-only. Fails closed on any non-PASS check."""
@@ -70,123 +104,81 @@ def doctor(
     report.add(check_git_clean(_REPO))
     report.add(check_stack_manifest(_REPO, _REPO / "configs" / "stack.yaml"))
     if config is not None and not config.exists():
-        typer.echo(f"  FAIL  config: {config} not found", err=True)
-        raise typer.Exit(code=1)
-    for c in report.checks:
-        typer.echo(f"  {c.status:4}  {c.name}: {c.detail}")
+        _fail(f"  FAIL  config: {config} not found")
+    for check in report.checks:
+        typer.echo(f"  {check.status:4}  {check.name}: {check.detail}")
     if not report.ok:
         skipped = report.skipped
         if skipped:
-            typer.echo(
-                f"doctor: FAILED -- {len(skipped)} check(s) could not run. A check that did not "
-                "run has not been satisfied; it is not a pass.",
-                err=True,
-            )
-        else:
-            typer.echo("doctor: FAILED", err=True)
-        raise typer.Exit(code=1)
+            _fail(f"doctor: FAILED -- {len(skipped)} check(s) could not run. A check that did "
+                  "not run has not been satisfied; it is not a pass.")
+        _fail("doctor: FAILED")
     typer.echo("doctor: ok")
 
 
 @app.command("verify-approval")
 def verify_approval(
     approval: Path = typer.Option(..., "--approval", help="protocol/launch_approval.json"),
-    config: Path = typer.Option(None, "--config", help="Campaign config (unused for hashing)"),
+    config: Path = _CFG,
 ) -> None:
     """Assert the approval binds the whole live configuration, not just three of its hashes.
 
-    The launch gate runs this BEFORE any paid step. Checking only that the file exists, and
-    verifying its hashes afterwards, means an edited threshold or budget can already have spent
-    Tavily credits and GPU hours by the time the mismatch surfaces.
-
-    The protocol SHA is read from the tracked protocol document, never from the environment: a
-    value the caller supplies and then compares against itself is a gate that cannot fail. If
-    ``SHAPEFLOW_PROTOCOL_SHA`` is set it is treated as an *additional* assertion by the caller
-    about which protocol they meant, and a disagreement is fatal.
+    The protocol SHA is read from the tracked document, never from the environment: a value the
+    caller supplies and then compares against itself is a gate that cannot fail. A caller who
+    *claims* a different SHA is a disagreement about which experiment is running, and fatal.
     """
-    import os
-
     from .protocol import ApprovalError, verify_approval_file
 
     try:
         binding = verify_approval_file(_REPO, approval)
     except ApprovalError as e:
-        typer.echo(f"approval mismatch: {e}", err=True)
-        raise typer.Exit(code=1)
+        _fail(f"approval mismatch: {e}")
 
     claimed = os.environ.get("SHAPEFLOW_PROTOCOL_SHA")
     if claimed and claimed != binding.protocol_sha:
-        typer.echo(
-            f"SHAPEFLOW_PROTOCOL_SHA={claimed[:12]} does not match the protocol document "
-            f"({binding.protocol_sha[:12]}); the caller and the repository disagree about which "
-            "protocol is being run",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    typer.echo(
-        f"approval ok (protocol={binding.protocol_sha[:12]} binding={binding.digest[:12]})"
-    )
-
-
-@app.command("freeze-approval")
-def freeze_approval(
-    approved_commit: str = typer.Option("", "--approved-commit"),
-    approval: Path = typer.Option(None, "--approval"),
-) -> None:
-    """Steward-only: record the approval for the configuration that is live right now.
-
-    This grants nothing. Protocol v0.1 already fixed the mode, the budgets and the thresholds;
-    this writes down their hashes so a later edit is detectable. It refuses to overwrite an
-    approval that describes a different configuration.
-    """
-    from datetime import datetime, timezone
-
-    from .doctor import check_identity
-    from .protocol import ApprovalError, write_approval_file
-
-    identity = check_identity("steward")
-    if identity.status == "FAIL":
-        typer.echo(f"  FAIL  {identity.name}: {identity.detail}", err=True)
-        raise typer.Exit(code=1)
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try:
-        binding = write_approval_file(
-            _REPO, approved_at_utc=now, approved_commit=approved_commit,
-            approval_path=approval,
-        )
-    except ApprovalError as e:
-        typer.echo(f"cannot write approval: {e}", err=True)
-        raise typer.Exit(code=1)
-    typer.echo(f"approval recorded (binding={binding.digest[:12]})")
-
-
-@app.command("serve-provider")
-def serve_provider(
-    config: Path = typer.Option(None, "--config", help="Campaign config (configs/week1.yaml)"),
-) -> None:  # pragma: no cover - process entry point
-    """Run the provider. The only process that reads a credential, and never as root."""
-    from .campaign.settings import Settings
-    from .doctor import check_identity
-    from .runtime.provider_main import run
-
-    identity = check_identity("provider")
-    if identity.status == "FAIL":
-        typer.echo(f"  FAIL  {identity.name}: {identity.detail}", err=True)
-        raise typer.Exit(code=1)
-    if config is not None and not config.exists():
-        typer.echo(f"  FAIL  config: {config} not found", err=True)
-        raise typer.Exit(code=1)
-    run(Settings.load(_REPO))
+        _fail(f"SHAPEFLOW_PROTOCOL_SHA={claimed[:12]} does not match the protocol document "
+              f"({binding.protocol_sha[:12]}); the caller and the repository disagree about "
+              "which protocol is being run")
+    typer.echo(f"approval ok (protocol={binding.protocol_sha[:12]} binding={binding.digest[:12]})")
 
 
 @app.command()
-def report(decision_json: Path = typer.Argument(..., help="Path to a WEEK1_P1_DECISION.json")) -> None:
-    """Render a decision JSON to Markdown on stdout (both come from one object upstream)."""
-    import json
+def status(status_json: Path = typer.Option(None, help="Path to runs/STATUS.json")) -> None:
+    """Print the latest STATUS.json if present."""
+    path = status_json or (_REPO / "reports" / "STATUS.json")
+    if not path.exists():
+        typer.echo("no STATUS.json yet")
+        raise typer.Exit(code=0)
+    typer.echo(path.read_text(encoding="utf-8"))
 
-    from .analysis.report import render_markdown
+
+@app.command("verify-artifacts")
+def verify_artifacts(ledger_path: Path, object_store: Path) -> None:
+    """Confirm every committed work item's artifact still verifies in the object store."""
+    from .experiment.ledger import Ledger
+    from .object_store import ObjectStore
+
+    ledger = Ledger(str(ledger_path))
+    store = ObjectStore(object_store)
+    counts = ledger.state_counts()
+    committed = counts.get("COMMITTED", 0)
+    rows = ledger.raw_connection.execute(
+        "SELECT result_object_ref FROM attempts WHERE state='COMMITTED'").fetchall()
+    bad = sum(1 for r in rows if not (r["result_object_ref"]
+                                      and store.verify(r["result_object_ref"])))
+    typer.echo(f"committed={committed} verified={committed - bad} corrupt={bad}")
+    ledger.close()
+    if bad:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def report(
+    decision_json: Path = typer.Argument(..., help="Path to a WEEK1_P1_DECISION.json"),
+) -> None:
+    """Render a decision JSON to Markdown on stdout (both come from one object upstream)."""
     from .analysis.decision import Verdict
-    from .analysis.report import DecisionObject, EffectWithCI, NodeDecision
+    from .analysis.report import DecisionObject, EffectWithCI, NodeDecision, render_markdown
 
     data = json.loads(decision_json.read_text(encoding="utf-8"))
 
@@ -211,71 +203,183 @@ def report(decision_json: Path = typer.Argument(..., help="Path to a WEEK1_P1_DE
     typer.echo(render_markdown(decision))
 
 
-@app.command("verify-artifacts")
-def verify_artifacts(ledger_path: Path, object_store: Path) -> None:
-    """Confirm every committed work item's artifact still verifies in the object store."""
-    from .experiment.ledger import Ledger
-    from .object_store import ObjectStore
+# --- steward -----------------------------------------------------------------------------
 
-    lg = Ledger(str(ledger_path))
-    store = ObjectStore(object_store)
-    bad = 0
-    counts = lg.state_counts()
-    committed = counts.get("COMMITTED", 0)
-    rows = lg.raw_connection.execute(
-        "SELECT result_object_ref FROM attempts WHERE state='COMMITTED'"
-    ).fetchall()
-    for r in rows:
-        ref = r["result_object_ref"]
-        if not (ref and store.verify(ref)):
-            bad += 1
-    typer.echo(f"committed={committed} verified={committed - bad} corrupt={bad}")
-    lg.close()
-    if bad:
-        raise typer.Exit(code=1)
+
+@app.command("freeze-approval")
+def freeze_approval(
+    approved_commit: str = typer.Option("", "--approved-commit"),
+    approval: Path = typer.Option(None, "--approval"),
+) -> None:
+    """Steward-only: record the approval for the configuration that is live right now."""
+    from .protocol import ApprovalError, write_approval_file
+
+    _require_role("steward")
+    try:
+        binding = write_approval_file(_REPO, approved_at_utc=_now(),
+                                      approved_commit=approved_commit, approval_path=approval)
+    except ApprovalError as e:
+        _fail(f"cannot write approval: {e}")
+    typer.echo(f"approval recorded (binding={binding.digest[:12]})")
+
+
+@app.command("freeze-stack")
+def freeze_stack(
+    config: Path = _CFG,
+    engine_pid: int = typer.Option(None, "--engine-pid", help="Running vLLM pid, for its flags"),
+    engine_log: Path = typer.Option(None, "--engine-log",
+                                    help="The engine's startup log, for its attention backend"),
+) -> None:
+    """Steward-only: resolve every @STEWARD_FREEZES@ field into protocol/stack_manifest.json."""
+    from .campaign.truth import truth_prompt_sha256
+    from .ops.live_stack import (
+        StackError,
+        attention_backend_from_log,
+        freeze_stack as do_freeze,
+        observe,
+    )
+
+    _require_role("steward")
+    settings = _settings()
+    stack = settings.configs["stack"]
+    observation = observe(
+        gpu_uuid=str(stack["host"]["gpu_uuid"]),
+        model_dir=Path(str(stack["model"]["path"])),
+        vllm_python=Path(str(stack["engine"]["vllm_venv"])) / "bin" / "python",
+        engine_pid=engine_pid,
+    )
+    # The attention backend is only knowable from a served engine: vLLM picks it at startup.
+    # Recorded from the engine's own log when it is running, and left unresolved otherwise so
+    # the freeze refuses rather than writing down a plausible guess.
+    backend = attention_backend_from_log(engine_log) if engine_log else ""
+    if backend:
+        observation.values["attention_backend"] = backend
+    observation.values["truth_prompt_sha256"] = truth_prompt_sha256()
+    observation.values["atomize_prompt_sha256"] = truth_prompt_sha256()
+    observation.values["report_prompt_sha256"] = truth_prompt_sha256()
+    try:
+        body = do_freeze(_REPO, stack, observation, frozen_at_utc=_now())
+    except StackError as e:
+        _fail(f"freeze-stack failed: {e}")
+    typer.echo(f"stack frozen (manifest={body['manifest_sha256'][:12]}, "
+               f"unavailable={len(body['unavailable'])})")
 
 
 @app.command()
-def status(status_json: Path = typer.Option(None, help="Path to runs/STATUS.json")) -> None:
-    """Print the latest STATUS.json if present."""
-    path = status_json or (_REPO / "runs" / "STATUS.json")
-    if not path.exists():
-        typer.echo("no STATUS.json yet")
-        raise typer.Exit(code=0)
-    typer.echo(path.read_text(encoding="utf-8"))
+def prepare(config: Path = _CFG,
+            protocol_sha: str = typer.Option(None, "--protocol-sha"),
+            resume: bool = typer.Option(False, "--resume")) -> None:
+    """Steward-only: author, audit, split and seal the task registry."""
+    from .campaign.prepare import prepare_corpus
+    from .evaluation.judge_client import DeepSeekJudge
+    from .providers.provider_client import PROVIDER_KEY_PLACEHOLDER
 
-
-# --- phases not yet built: declared so the contract is stable, refuse to fake work ------
-#
-# Each accepts the options the launch gate passes, so a missing flag can never be mistaken for
-# a missing capability, and each exits 3. The gate then blocks with an accurate slug instead of
-# dying on "No such option: --config".
-
-_CFG = typer.Option(None, "--config", help="Campaign config (configs/week1.yaml)")
+    _assert_post_launch_flags(protocol_sha, resume)
+    _require_role("steward")
+    settings = _settings()
+    client = _provider_client(settings, "steward")
+    judge = DeepSeekJudge(
+        client.deepseek_transport(op_class="TASK_AUTHOR", work_key="prepare"),
+        settings.judge_model(), PROVIDER_KEY_PLACEHOLDER,
+    )
+    result = asyncio.run(prepare_corpus(
+        settings, judge=judge, authored_at_utc=_now(),
+        target_model=str(settings.get("stack", "model", "repo")),
+    ))
+    typer.echo(f"sealed {len(result.registry.tasks)} tasks "
+               f"(registry={result.registry_sha256[:12]}, "
+               f"steward={result.steward_task_count}, runner={result.runner_task_count})")
 
 
 @app.command()
-def acquire(config: Path = _CFG) -> None:  # noqa: D401
-    """Acquire and freeze the Tavily source pool."""
-    _not_implemented("acquire")
+def acquire(config: Path = _CFG,
+            protocol_sha: str = typer.Option(None, "--protocol-sha"),
+            resume: bool = typer.Option(False, "--resume")) -> None:
+    """Steward-only: call Tavily once per task and freeze the world."""
+    from .acquire.tavily_client import TavilyCaptureClient
+    from .campaign.acquire import acquire_all, tavily_params_from
+    from .providers.provider_client import PROVIDER_KEY_PLACEHOLDER
+
+    _assert_post_launch_flags(protocol_sha, resume)
+    _require_role("steward")
+    settings = _settings()
+    client = _provider_client(settings, "steward")
+    params = tavily_params_from(settings)
+
+    def factory(task_id: str) -> TavilyCaptureClient:
+        return TavilyCaptureClient(
+            client.tavily_transport(task_id=task_id), params, PROVIDER_KEY_PLACEHOLDER)
+
+    outcome = asyncio.run(acquire_all(settings, client_factory=factory, fetched_at_utc=_now()))
+    typer.echo(f"acquired={outcome.tasks_acquired} skipped={outcome.tasks_skipped} "
+               f"queries ok/empty/failed={outcome.queries_ok}/{outcome.queries_empty}/"
+               f"{outcome.queries_failed} root={outcome.campaign_sha256[:12]}")
+    if outcome.blocked_budget:
+        _fail("acquisition stopped on a refused budget reservation; already-frozen worlds kept")
+
+
+@app.command("build-truth")
+def build_truth(config: Path = _CFG) -> None:
+    """Evaluator-only: build a TruthPacket per acquired task from the frozen sources."""
+    from .campaign.acquire import acquired_task_ids
+    from .campaign.truth import build_truth_for_task
+    from .evaluation.judge_client import DeepSeekJudge
+    from .providers.provider_client import PROVIDER_KEY_PLACEHOLDER
+
+    _require_role("evaluator")
+    settings = _settings()
+    client = _provider_client(settings, "evaluator")
+    judge = DeepSeekJudge(
+        client.deepseek_transport(op_class="JUDGE_TRUTH"),
+        settings.judge_model(), PROVIDER_KEY_PLACEHOLDER,
+    )
+    steward_tasks = settings.path("tasks")
+    built = 0
+    for task_id in acquired_task_ids(settings):
+        record = json.loads((steward_tasks / f"{task_id}.json").read_text(encoding="utf-8"))
+        asyncio.run(build_truth_for_task(
+            settings, judge=judge, task_id=task_id,
+            question=record["treatment_visible"]["original_question"],
+            required_facets=record["acquisition_spec"]["authored_facets"],
+        ))
+        built += 1
+    typer.echo(f"truth packets built: {built}")
+
+
+# --- gates --------------------------------------------------------------------------------
 
 
 @app.command("test-p0-parity")
 def test_p0_parity(config: Path = _CFG) -> None:
-    """Assert the patched hooks-off graph matches vendor byte-for-byte."""
-    _not_implemented("test-p0-parity")
+    """Assert the patched hooks-off graph reproduces vendor, and that explicit P0 does too."""
+    import subprocess
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "tests/integration/test_p0_parity.py"],
+        cwd=str(_REPO), capture_output=True, text=True, timeout=3600,
+    )
+    typer.echo(result.stdout[-4000:])
+    if result.returncode != 0:
+        typer.echo(result.stderr[-4000:], err=True)
+        _fail("P0 parity failed; all GPU screening is barred")
+    typer.echo("p0 parity: ok")
 
 
 @app.command()
-def prepare(config: Path = _CFG) -> None:
-    """Build the frozen task registry and corpus."""
-    _not_implemented("prepare")
+def accept(config: Path = _CFG) -> None:
+    """Run the acceptance matrix and write reports/ACCEPTANCE.json."""
+    from .ops.acceptance import run_acceptance
 
-
-@app.command()
-def smoke(config: Path = _CFG) -> None:
-    """Real GPU smoke over a tiny task set."""
-    _not_implemented("smoke")
+    settings = _settings()
+    body = run_acceptance(settings, repo=_REPO)
+    path = _REPO / "reports" / "ACCEPTANCE.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    for gate in body["gates"]:
+        typer.echo(f"  {gate['status']:4}  {gate['name']}: {gate['detail']}")
+    if not body["ok"]:
+        _fail("acceptance: FAILED")
+    typer.echo("acceptance: ok")
 
 
 @app.command()
@@ -283,48 +387,132 @@ def preflight(
     config: Path = _CFG,
     approved_protocol_sha: str = typer.Option(None, "--approved-protocol-sha"),
 ) -> None:
-    """Campaign-level preflight against the approved protocol SHA."""
-    _not_implemented("preflight")
+    """Campaign preflight: the approval, the sealed corpus, the frozen world, the schedule."""
+    from .ops.acceptance import run_preflight
+
+    settings = _settings()
+    body = run_preflight(settings, repo=_REPO, approved_protocol_sha=approved_protocol_sha)
+    for check in body["checks"]:
+        typer.echo(f"  {check['status']:4}  {check['name']}: {check['detail']}")
+    if not body["ok"]:
+        _fail("preflight: FAILED")
+    typer.echo("preflight: ok")
 
 
 @app.command()
-def accept(config: Path = _CFG) -> None:
-    """Run the acceptance matrix and write reports/ACCEPTANCE.json."""
-    _not_implemented("accept")
+def smoke(config: Path = _CFG,
+          tasks: int = typer.Option(None, "--tasks"),
+          protocol_sha: str = typer.Option(None, "--protocol-sha"),
+          resume: bool = typer.Option(False, "--resume")) -> None:
+    """Runner-only: the real GPU canary. Engineering correctness only, never a quality gate."""
+    from .campaign.canary import run_canary
+
+    _assert_post_launch_flags(protocol_sha, resume)
+    _require_role("runner")
+    settings = _settings()
+    body = asyncio.run(run_canary(settings, repo=_REPO, task_limit=tasks))
+    path = _REPO / "reports" / "GPU_SMOKE_REPORT.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body["markdown"], encoding="utf-8")
+    (_REPO / "reports" / "GPU_SMOKE.json").write_text(
+        json.dumps(body["json"], indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    for check in body["json"]["checks"]:
+        typer.echo(f"  {check['status']:4}  {check['name']}: {check['detail']}")
+    if not body["json"]["ok"]:
+        _fail("gpu smoke: FAILED")
+    typer.echo("gpu smoke: ok")
 
 
-@app.command("freeze-stack")
-def freeze_stack(config: Path = _CFG) -> None:
-    """Steward-only: resolve every @STEWARD_FREEZES@ field into protocol/stack_manifest.json."""
-    _not_implemented("freeze-stack")
+# --- the campaign ---------------------------------------------------------------------------
 
 
 @app.command("run-screen")
-def run_screen(config: Path = _CFG) -> None:
-    """Run component screening."""
-    _not_implemented("run-screen")
+def run_screen(config: Path = _CFG,
+               resume: bool = typer.Option(False, "--resume"),
+               protocol_sha: str = typer.Option(None, "--protocol-sha"),
+               max_cells: int = typer.Option(None, "--max-cells")) -> None:
+    """Runner-only: causal screening over the FORMATIVE_SCREEN split, in paired blocks."""
+    from .campaign.screen import run_screening
+
+    _assert_post_launch_flags(protocol_sha, resume)
+    _require_role("runner")
+    body = asyncio.run(run_screening(_settings(), repo=_REPO, max_cells=max_cells))
+    typer.echo(json.dumps(body, indent=2, sort_keys=True))
+    if not body.get("ok", False):
+        raise typer.Exit(code=1)
 
 
 @app.command("run-week1")
-def run_week1(
-    config: Path = _CFG,
-    resume: bool = typer.Option(False, "--resume"),
-    protocol_sha: str = typer.Option(None, "--protocol-sha"),
-) -> None:
-    """Run the Week-1 campaign."""
-    _not_implemented("run-week1")
+def run_week1(config: Path = _CFG,
+              resume: bool = typer.Option(False, "--resume"),
+              protocol_sha: str = typer.Option(None, "--protocol-sha")) -> None:
+    """Runner-only: the Week-1 campaign. Idempotent; a restart fills gaps."""
+    from .campaign.screen import run_screening
+
+    _assert_post_launch_flags(protocol_sha, resume)
+    _require_role("runner")
+    body = asyncio.run(run_screening(_settings(), repo=_REPO, max_cells=None))
+    typer.echo(json.dumps(body, indent=2, sort_keys=True))
+    if not body.get("ok", False):
+        raise typer.Exit(code=1)
 
 
-@app.command("run-holdout")
-def run_holdout(config: Path = _CFG) -> None:
-    """Run the honest holdout."""
-    _not_implemented("run-holdout")
+@app.command()
+def evaluate(config: Path = _CFG) -> None:
+    """Evaluator-only: score frozen outputs against the truth packets."""
+    from .campaign.evaluate import evaluate_frozen
+
+    _require_role("evaluator")
+    body = asyncio.run(evaluate_frozen(_settings(), repo=_REPO))
+    typer.echo(json.dumps(body, indent=2, sort_keys=True))
+
+
+@app.command("stop-safely")
+def stop_safely(config: Path = _CFG) -> None:
+    """Stop admission without modifying the protocol. Finished work is kept."""
+    settings = _settings()
+    sentinel = settings.data_root / str(settings.get("week1", "runtime", "stop_sentinel"))
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text(_now() + "\n", encoding="utf-8")
+    typer.echo(f"stop requested at {sentinel}")
 
 
 @app.command("release-holdout")
 def release_holdout(config: Path = _CFG) -> None:
-    """Holdout gate: materialize the holdout corpus for the runner, once."""
-    _not_implemented("release-holdout")
+    """Holdout gate: materialize the holdout corpus for the runner, once.
+
+    Fail-closed, and this round it must fail: a formative machine-authored corpus has no
+    confirmatory holdout, and the campaign never reaches POLICY_FROZEN. This is a gate that
+    refuses, not a stub -- it checks the real preconditions and reports which one is unmet.
+    """
+    from .campaign.phases import PhaseStore
+    from .experiment.ledger import Ledger
+    from .experiment.state_machine import Phase
+
+    settings = _settings()
+    if not bool(settings.get("week1", "campaign", "open_holdout")):
+        _fail("configs/week1.yaml sets open_holdout: false -- this corpus is FORMATIVE_ONLY and "
+              "has no confirmatory holdout to release")
+    ledger = Ledger(str(settings.data_root / str(settings.get("week1", "paths", "runs"))
+                        / "ledger.sqlite"))
+    phases = PhaseStore(ledger, protocol_sha=settings.shas["week1"])
+    if not phases.is_complete(Phase.POLICY_FROZEN):
+        ledger.close()
+        _fail("holdout release requires POLICY_FROZEN; releasing earlier would let the holdout "
+              "be seen before the policy that it validates was fixed")
+    ledger.close()
+    _fail("holdout release is not authorized under this approval")
+
+
+@app.command("serve-provider")
+def serve_provider(config: Path = _CFG) -> None:  # pragma: no cover - process entry point
+    """Run the provider. The only process that reads a credential, and never as root."""
+    from .runtime.provider_main import run
+
+    _require_role("provider")
+    if config is not None and not config.exists():
+        _fail(f"  FAIL  config: {config} not found")
+    run(_settings())
 
 
 def main() -> None:  # pragma: no cover

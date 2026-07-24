@@ -79,7 +79,7 @@ class CampaignRunner:
         ledger: Ledger,
         store: ObjectStore,
         config: RunnerConfig,
-        model_call: Optional[Callable] = None,
+        model_call_factory: Optional[Callable] = None,
         register_cell: Optional[Callable] = None,
         graph: object = None,
     ) -> None:
@@ -89,7 +89,7 @@ class CampaignRunner:
         self.config = config
         self.phases = PhaseStore(ledger, protocol_sha=settings.shas["week1"])
         self.registry = load_registry(settings.repo / "configs")
-        self._model_call = model_call
+        self._model_call_factory = model_call_factory
         self._register_cell = register_cell
         self._graph = graph
         self.outcomes: list[CellOutcome] = []
@@ -182,18 +182,60 @@ class CampaignRunner:
 
     # --- execution ---------------------------------------------------------------------
 
-    def _bundle_for(self, arm: ArmSpec):
+    def _page_bytes(self, pool, snapshots) -> tuple[dict, dict]:
+        """Resolve the exact bytes vendor would have summarised, keyed as the checkpoint keys them.
+
+        The H checkpoint carries only ``raw_content_id`` -- the SHA-256 of
+        ``result['raw_content'][:max_content_length]`` -- because the batch is captured before
+        anything is transformed. The selector needs the bytes themselves, and they must be
+        *vendor's truncation of them*, not the whole page: an arm that read the full page while
+        P0 read a prefix would be measuring page length rather than selection, and AGENTS.md
+        bars it from the primary contrast.
+        """
+        limit = int(self.settings.get("week1", "odr", "max_content_length"))
+        text_by_id: dict[str, str] = {}
+        occurrence_by_id: dict[str, str] = {}
+        for occurrence in pool.vendor_visible:
+            if not occurrence.content_hash:
+                continue
+            snapshot = pool.snapshots.get(occurrence.content_hash)
+            if snapshot is None:
+                continue
+            truncated = snapshots.read_text(snapshot)[:limit]
+            key = sha256_hex(truncated.encode("utf-8"))
+            text_by_id.setdefault(key, truncated)
+            occurrence_by_id.setdefault(key, occurrence.occurrence_id)
+        return text_by_id, occurrence_by_id
+
+    def _bundle_for(self, arm: ArmSpec, cell_token: str, *, pool=None, snapshots=None):
+        """Build the arm's strategies, with a selector bound to *this* cell.
+
+        The model call has to be per-cell: a selector wired to a shared, untagged endpoint would
+        spend its tokens outside any cell, and the work it cost could not be attributed to the
+        arm that spent it.
+        """
         from ..odr.hooks import StrategyBundle
         from ..strategies.p0 import VendorCloseStrategy, VendorPageStrategy
 
         if arm.page_variant == "P0" and arm.close_variant == "P0":
             return StrategyBundle(variant_id="P0", page=VendorPageStrategy({}),
                                   close=VendorCloseStrategy())
+        if self._model_call_factory is None:
+            raise ValueError(
+                f"arm {arm.arm_id} needs a selector but no model call factory was provided")
+        text_by_id, occurrence_by_id = ({}, {})
+        if pool is not None and snapshots is not None:
+            text_by_id, occurrence_by_id = self._page_bytes(pool, snapshots)
         factory = StrategyFactory(
             registry=self.registry,
-            model_call=self._model_call,
+            model_call=self._model_call_factory(cell_token),
             token_budget=int(self.settings.get("week1", "measurement",
                                                "selected_token_budget")),
+            # Without these the page selector is offered no candidates at all: it would publish
+            # empty content, spend nothing, and look like a working P1 arm that happens to save
+            # everything. That is exactly the inert-P1 failure the canary exists to catch.
+            raw_text_for=lambda content_id: text_by_id.get(content_id, ""),
+            occurrence_for=lambda content_id: occurrence_by_id.get(content_id, content_id),
         )
         page = factory.build(arm.page_variant).page if arm.page_variant != "P0" \
             else VendorPageStrategy({})
@@ -264,7 +306,8 @@ class CampaignRunner:
             pool, snapshots = load_frozen_pool(self.settings, cell.task_id)
             result = await run_cell(
                 self.settings, spec, pool=pool, snapshots=snapshots,
-                bundle=self._bundle_for(cell.arm),
+                bundle=self._bundle_for(cell.arm, token, pool=pool,
+                                        snapshots=snapshots),
                 provider_base_url=self.config.provider_base_url,
                 runner_token=self.config.runner_token,
                 store_checkpoint=self._store_checkpoint,
@@ -279,6 +322,10 @@ class CampaignRunner:
         payload = {
             "cell": cell.content(),
             "run_id": self.config.run_id,
+            # The provider records its calls against this key, so it is what joins a cell's
+            # output to the tokens it actually spent. Without it the two ledgers cannot be
+            # reconciled and every token-based check would compare against nothing.
+            "work_key": work_key,
             "variant_id": spec.variant_id,
             "final_report": result.final_report,
             "notes": list(result.notes),

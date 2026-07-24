@@ -24,8 +24,6 @@ class FakeEngine:
         self.searches_per_researcher = searches_per_researcher
         self.selector_ids = selector_ids
         self.requests: list[dict] = []
-        self._search_counts: dict[str, int] = {}
-        self._conduct_counts: dict[str, int] = {}
 
     # transport signature matches ProviderService's injected upstream
     def __call__(self, url, headers, body, timeout):
@@ -54,20 +52,18 @@ class FakeEngine:
                 "summary": f"Summary of the page: {excerpt[:120]}",
                 "key_excerpts": excerpt,
             })
+        # Stateless, like the engine it stands in for: how far along a conversation is has to
+        # be read from the conversation. A counter kept on the double would be shared by two
+        # cells of the same block -- they send identical prompts -- and the second cell would
+        # finish before doing any research, which looks like an arm that produced nothing.
         if "ConductResearch" in names:
-            key = _conversation_key(body)
-            count = self._conduct_counts.get(key, 0)
-            self._conduct_counts[key] = count + 1
-            if count == 0:
+            if _tool_results(body) == 0:
                 return self._tool_reply(model, "ConductResearch", {
                     "research_topic": _last_user(body)[:300] or "the question",
                 })
             return self._tool_reply(model, "ResearchComplete", {})
         if "tavily_search" in names:
-            key = _conversation_key(body)
-            count = self._search_counts.get(key, 0)
-            self._search_counts[key] = count + 1
-            if count < self.searches_per_researcher:
+            if _tool_results(body) < self.searches_per_researcher:
                 return self._tool_reply(model, "tavily_search", {
                     "queries": [_search_query(body)],
                     "max_results": 5,
@@ -169,10 +165,9 @@ def _text(content) -> str:
     return str(content or "")
 
 
-def _conversation_key(body: dict) -> str:
-    """A stable key per conversation, so two researchers count their own searches."""
-    messages = body.get("messages") or ()
-    return _text(messages[0].get("content"))[:80] if messages else "-"
+def _tool_results(body: dict) -> int:
+    """How many tool results this conversation already carries."""
+    return sum(1 for m in (body.get("messages") or ()) if m.get("role") == "tool")
 
 
 def _search_query(body: dict) -> str:

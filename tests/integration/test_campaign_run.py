@@ -15,29 +15,12 @@ import pytest
 from shapeflow_p1.acquire.tavily_client import TavilyCaptureClient
 from shapeflow_p1.campaign.acquire import acquire_all, tavily_params_from
 from shapeflow_p1.campaign.prepare import prepare_corpus
-from shapeflow_p1.campaign.runner import (
-    CampaignRunner,
-    RunnerConfig,
-    available_tasks,
-    questions_for,
-    write_status,
-)
+from shapeflow_p1.campaign.runner import available_tasks, questions_for, write_status
 from shapeflow_p1.campaign.schedule import ArmSpec, cell_key
-from shapeflow_p1.campaign.selector_client import SelectorModelCall
 from shapeflow_p1.campaign.settings import Settings
 from shapeflow_p1.evaluation.judge_client import DeepSeekJudge
-from shapeflow_p1.experiment.budget import Budget
-from shapeflow_p1.experiment.ledger import Ledger
-from shapeflow_p1.object_store import ObjectStore
-from shapeflow_p1.providers.provider_client import ProviderClient
-from shapeflow_p1.runtime.provider_server import (
-    ProviderConfig,
-    ProviderService,
-    RoleTokens,
-    serve_forever,
-)
-from shapeflow_p1.secrets import SecretRedactor
 
+from fixtures.campaign_harness import Harness
 from fixtures.fake_engine import FakeEngine
 from fixtures.fake_tavily import FakeTavily
 from fixtures.scripted_author import ScriptedAuthor
@@ -81,62 +64,11 @@ async def _world(settings):
         fetched_at_utc="2026-07-24T01:00:00Z")
 
 
-class Harness:
-    """Provider + ledger + runner, wired the way the campaign wires them."""
-
-    def __init__(self, settings, tmp_path, engine):
-        self.settings = settings
-        self.engine = engine
-        self.provider_ledger = Ledger(str(tmp_path / "provider.sqlite"))
-        budget = Budget(self.provider_ledger)
-        for resource, cap in settings.budget_caps().items():
-            budget.ensure_account(resource, cap)
-        redactor = SecretRedactor()
-        self.service = ProviderService(
-            ProviderConfig(served_model="Qwen3-14B-AWQ"),
-            ledger=self.provider_ledger, budget=budget,
-            store=ObjectStore(tmp_path / "provider-objects"), redactor=redactor,
-            tokens=RoleTokens(TOKENS), upstream=engine, tavily_key=None, deepseek_key=None,
-        )
-        self.service.reconcile_on_start()
-        self.tcp, _ = serve_forever(self.service, ProviderConfig(bind_port=0), redactor)
-        self.base = f"http://127.0.0.1:{self.tcp.server_address[1]}"
-        self.client = ProviderClient(base_url=self.base, token=TOKENS["runner"])
-        self.run_ledger = Ledger(str(tmp_path / "run.sqlite"))
-        self.store = ObjectStore(tmp_path / "run-objects")
-
-    def runner(self, **kw):
-        async def register(spec):
-            await self.client.register_cell(
-                cell_token=spec.cell_token, run_id=spec.run_id, task_id=spec.task_id,
-                arm_id=spec.arm_id, variant_id=spec.variant_id,
-                replicate_id=spec.replicate_id, work_key=spec.work_key)
-
-        def model_call_factory(cell_token):
-            return SelectorModelCall(
-                self.client, cell_token=cell_token, repo=REPO, temperature=0.0, top_p=1.0,
-                max_completion_tokens=int(self.settings.get(
-                    "week1", "measurement", "selector_max_completion_tokens")),
-            )
-
-        config = RunnerConfig(run_id="RUN-TEST", provider_base_url=self.base,
-                              runner_token=TOKENS["runner"], **kw)
-        runner = CampaignRunner(
-            self.settings, ledger=self.run_ledger, store=self.store, config=config,
-            model_call=model_call_factory("cell-shared-000001"), register_cell=register)
-        return runner
-
-    def close(self):
-        self.tcp.shutdown()
-        self.provider_ledger.close()
-        self.run_ledger.close()
-
-
 @pytest.fixture()
 async def harness(settings, tmp_path):
     await _world(settings)
     engine = FakeEngine(selector_ids=["S1"])
-    h = Harness(settings, tmp_path, engine)
+    h = Harness(settings, tmp_path, engine, TOKENS, REPO)
     try:
         yield h
     finally:

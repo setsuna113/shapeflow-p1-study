@@ -30,9 +30,11 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 # Only these paths are writable; everything else is read-only to this unit.
-ReadWritePaths=@REPO@/runs @REPO@/reports @REPO@/logs @REPO@/object_store @REPO@/data
+ReadWritePaths=@DATA_ROOT@/runner @REPO@/reports @REPO@/logs
 # The runner gets an explicit environment allowlist; no credential variables are present.
-Environment=PYTHONHASHSEED=0 TZ=UTC
+Environment=PYTHONHASHSEED=0 TZ=UTC PYTHONUNBUFFERED=1
+Environment=SHAPEFLOW_DATA_ROOT=@DATA_ROOT@
+Environment=SHAPEFLOW_REPO=@REPO@
 
 # Redacted logs (the app's SecretRedactor runs before every handler; journald captures stdio).
 StandardOutput=append:@REPO@/logs/coordinator.log

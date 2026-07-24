@@ -25,8 +25,12 @@ Type=simple
 User=@INFER_USER@
 WorkingDirectory=@REPO@
 # Reuses the pinned existing vLLM as a read-only executable; never installs into its venv.
+# --revision is deliberately absent: the model is a local directory, and vLLM's --revision
+# only selects a hub commit. The revision is pinned and verified separately, from the HF
+# download metadata, by freeze-stack and doctor -- a flag that silently does nothing is
+# worse than no flag, because it reads as a check that is not happening.
 ExecStart=@VLLM_VENV@/bin/python -m vllm.entrypoints.openai.api_server \
-  --model @MODEL_PATH@ --revision @MODEL_REVISION@ \
+  --model @MODEL_PATH@ --served-model-name Qwen3-14B-AWQ \
   --host 127.0.0.1 --port @VLLM_PORT@ \
   --max-model-len 16384 --gpu-memory-utilization 0.90 \
   --max-num-seqs 1 \
@@ -42,6 +46,8 @@ PrivateTmp=true
 # The device is frozen by UUID, never index: indices renumber across driver reloads and a
 # renumbered index would silently move the campaign onto a different card.
 Environment=PYTHONHASHSEED=0 TZ=UTC CUDA_VISIBLE_DEVICES=@GPU_UUID@
+# Nothing is fetched at serve time: the frozen weights are the ones that load.
+Environment=HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 # Binds 127.0.0.1 only; no external exposure.
 
 StandardOutput=append:@REPO@/logs/vllm-causal.log
