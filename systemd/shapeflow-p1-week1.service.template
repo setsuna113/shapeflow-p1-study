@@ -3,8 +3,12 @@
 # holds a credential path (the provider does), only reads the frozen corpus and writes run state.
 [Unit]
 Description=ShapeFlow P1 Week-1 coordinator
-After=network.target shapeflow-api-provider.service shapeflow-vllm.service
-Requires=shapeflow-api-provider.service shapeflow-vllm.service
+After=network.target shapeflow-api-provider.service shapeflow-vllm-causal.service
+Requires=shapeflow-api-provider.service shapeflow-vllm-causal.service
+# At most 3 restarts in 30 min, else give up (BLOCKED_REPEATED_CRASH). These belong in
+# [Unit]; systemd ignores them under [Service], silently removing the crash ceiling.
+StartLimitIntervalSec=1800
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -14,11 +18,10 @@ WorkingDirectory=@REPO@
 ExecStart=@REPO@/.venv/bin/shapeflow-p1 run-week1 --config configs/week1.yaml --resume --protocol-sha @PROTOCOL_SHA@
 ExecStop=@REPO@/scripts/stop_safely.sh
 
-# Restart policy: at most 3 restarts in 30 min, else give up (BLOCKED_REPEATED_CRASH).
+# Restart policy: give up after 3 restarts in 30 min (BLOCKED_REPEATED_CRASH). The
+# StartLimit* half lives in [Unit] -- systemd ignores it here.
 Restart=on-failure
 RestartSec=30
-StartLimitIntervalSec=1800
-StartLimitBurst=3
 
 # Hardening.
 UMask=0077

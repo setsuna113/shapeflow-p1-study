@@ -5,6 +5,10 @@
 [Unit]
 Description=ShapeFlow P1 API provider (sole credential holder)
 After=network.target
+# At most 3 restarts in 30 min, else give up (BLOCKED_REPEATED_CRASH). These belong in
+# [Unit]; systemd ignores them under [Service], silently removing the crash ceiling.
+StartLimitIntervalSec=1800
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -22,8 +26,6 @@ Environment=DEEPSEEK_API_KEY_FILE=%d/deepseek
 
 Restart=on-failure
 RestartSec=30
-StartLimitIntervalSec=1800
-StartLimitBurst=3
 
 UMask=0077
 NoNewPrivileges=true

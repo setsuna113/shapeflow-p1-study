@@ -6,20 +6,39 @@ version: v0.1
 
 model:
   repo: Qwen/Qwen3-14B-AWQ
-  revision: 31c69efc29464b6bb0aee1398b5a7b50a99340c3
   path: /storage/nvme/reme/models/Qwen3-14B-AWQ
   enable_thinking: false
   quantization: awq
   kv_dtype: auto
+  # The on-disk model is a plain directory, not a git checkout -- but a revision IS recoverable
+  # and was verified read-only on sjtu 2026-07-24: all 12 files under
+  # .cache/huggingface/download/*.metadata record this commit. Both identities are pinned and
+  # doctor requires BOTH to match (plan 5.3: if the revision cannot be established, stop; never
+  # silently fall back to latest).
+  revision: 31c69efc29464b6bb0aee1398b5a7b50a99340c3
+  revision_source: hf_download_metadata
+  # Merkle root over the weight + config + tokenizer files actually loaded. Written once by an
+  # explicit steward-run `shapeflow-p1 freeze-stack`, BEFORE approval -- never by the campaign's
+  # doctor. A doctor that froze what it happened to observe would launder a drifted environment
+  # into a legitimate baseline, which is the opposite of what the check is for.
+  artifact_merkle_root: "@STEWARD_FREEZES@"
 
 engine:
-  vllm_version: "0.24.0"        # doctor must confirm the git SHA of the reused venv
+  # Observed on sjtu 2026-07-24. Two version strings that do not match each other and must both
+  # be recorded: the distribution is a cu129 wheel, while vllm.__version__ reports only the
+  # upstream release. Comparing against either one alone silently accepts the other.
+  vllm_distribution_version: "0.24.0+cu129"
+  vllm_dunder_version: "0.24.0"
+  vllm_package_tree_sha256: "@STEWARD_FREEZES@"   # wheel install; there is no git SHA
   vllm_venv: /storage/nvme/drbat/.venv
+  torch_version: "2.11.0+cu129"
+  torch_compiled_cuda: "12.9"    # torch.version.cuda
   max_model_len: 16384
   gpu_memory_utilization: 0.90
-  enable_prefix_caching: true
-  enable_chunked_prefill: true
-  attention_backend: "@DOCTOR_CONFIRMS@"
+  attention_backend: "@STEWARD_FREEZES@"
+  # NOTE: prefix caching / chunked prefill are NOT global engine settings -- they differ by
+  # measurement layer and are set per unit under `isolation` below. A single shared value here
+  # is what let the causal arm silently run with APC on.
 
 sampling:
   temperature: 0.3
@@ -27,11 +46,23 @@ sampling:
   n: 1
 
 host:
-  # Frozen at doctor time; UUID not index. Candidate observed 2026-07-24 (must re-verify).
+  # Frozen by UUID, never index. Observed read-only on sjtu 2026-07-24; doctor re-verifies and
+  # refuses to run if the leased UUID is absent or busy. Four 4090s are present and idle; the
+  # campaign leases exactly one (plan section 5.2: default to a single GPU, never pkill a
+  # foreign PID -- wait or pause instead).
+  hostname: LiuYancheng
   gpu_name: "NVIDIA GeForce RTX 4090"
-  gpu_uuid: "@DOCTOR_CONFIRMS@"
+  gpu_uuid: "GPU-ef013951-e496-78da-da70-a5a289dcc634"   # index 0 at observation time
+  gpu_uuid_pool:
+    - "GPU-ef013951-e496-78da-da70-a5a289dcc634"
+    - "GPU-d1f5d8c4-2f0f-45f7-0574-ac90018440db"
+    - "GPU-11b9da9d-6149-3c1b-79c8-011d74a180d2"
+    - "GPU-99847987-522a-5889-1066-a21512dff220"
   driver_version: "550.163.01"
-  cuda_runtime: "@DOCTOR_CONFIRMS@"
+  # nvidia-smi's "CUDA Version" is the driver's maximum supported capability, NOT the runtime
+  # torch was built against (12.9 above). They legitimately differ; recording one as the other
+  # would make a real stack change look like a match.
+  driver_cuda_capability: "12.4"
   python: "3.12"
 
 determinism:
@@ -39,9 +70,22 @@ determinism:
   timezone: UTC
 
 isolation:
-  # Primary causal mode: single upstream request in flight; APC off; one task attempt at a time.
-  causal_max_num_seqs: 1
-  causal_gateway_max_upstream_inflight: 1
-  causal_apc: false
-  # Operational mode: native APC on, continuous batching per the frozen deployment config.
-  operational_apc: true
+  # Two measurement layers, two SEPARATE vLLM units. These values are the source of truth for
+  # the unit templates; doctor asserts each running engine's flags match its layer, because a
+  # causal arm that quietly ran with prefix caching on would make every quality and work number
+  # incomparable to P0 (plan section 5.4).
+  causal:
+    unit: shapeflow-vllm-causal.service
+    max_num_seqs: 1                  # --max-num-seqs 1
+    gateway_max_upstream_inflight: 1
+    enable_prefix_caching: false     # APC OFF
+    enable_chunked_prefill: false
+  operational:
+    unit: shapeflow-vllm-operational.service
+    max_num_seqs: 256                # frozen deployment config
+    gateway_max_upstream_inflight: 0 # 0 = unbounded; real batching is the point
+    enable_prefix_caching: true      # native APC ON
+    enable_chunked_prefill: true
+    # Cross-arm carry-over must be *proved* absent, not assumed (plan section 5.5).
+    cache_isolation: cache_salt      # fallback: fresh_process
+    cache_salt_probe_required: true

@@ -1,0 +1,51 @@
+# shapeflow-vllm-causal unit (plan sections 5.4, 17.2). The PRIMARY causal/quality layer.
+#
+# One upstream request in flight, prefix caching OFF, chunked prefill OFF. These are not
+# performance defaults -- they are what makes the quality and mechanism comparison valid. A
+# causal arm that ran with APC on shares KV state across arms, so P1's measured work would
+# include cache hits P0 never got and the two arms would no longer be comparable.
+#
+# This unit and shapeflow-vllm-operational.service are mutually exclusive (Conflicts=) because
+# they serve the same port and the same GPU with deliberately different engine semantics.
+# Running both would silently mix measurement layers.
+#
+# Every flag below is asserted against configs/stack.yaml `isolation.causal` by doctor before
+# the coordinator will use this engine. Fill @PLACEHOLDERS@.
+[Unit]
+Description=ShapeFlow P1 vLLM engine (causal layer: single-inflight, APC off)
+After=network.target
+Conflicts=shapeflow-vllm-operational.service
+# At most 3 restarts in 30 min, else give up. These directives belong in [Unit]; systemd
+# ignores them under [Service], which silently disables the crash ceiling entirely.
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=@INFER_USER@
+WorkingDirectory=@REPO@
+# Reuses the pinned existing vLLM as a read-only executable; never installs into its venv.
+ExecStart=@VLLM_VENV@/bin/python -m vllm.entrypoints.openai.api_server \
+  --model @MODEL_PATH@ --revision @MODEL_REVISION@ \
+  --host 127.0.0.1 --port @VLLM_PORT@ \
+  --max-model-len 16384 --gpu-memory-utilization 0.90 \
+  --max-num-seqs 1 \
+  --no-enable-prefix-caching \
+  --no-enable-chunked-prefill
+
+Restart=on-failure
+RestartSec=30
+
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+# The device is frozen by UUID, never index: indices renumber across driver reloads and a
+# renumbered index would silently move the campaign onto a different card.
+Environment=PYTHONHASHSEED=0 TZ=UTC CUDA_VISIBLE_DEVICES=@GPU_UUID@
+# Binds 127.0.0.1 only; no external exposure.
+
+StandardOutput=append:@REPO@/logs/vllm-causal.log
+StandardError=append:@REPO@/logs/vllm-causal.err
+
+[Install]
+WantedBy=multi-user.target

@@ -6,6 +6,10 @@
 [Unit]
 Description=ShapeFlow P1 holdout gate (release-once, hash-matched)
 After=network.target
+# At most 3 restarts in 30 min, else give up (BLOCKED_REPEATED_CRASH). These belong in
+# [Unit]; systemd ignores them under [Service], silently removing the crash ceiling.
+StartLimitIntervalSec=1800
+StartLimitBurst=3
 
 [Service]
 Type=oneshot
