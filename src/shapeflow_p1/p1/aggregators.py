@@ -44,22 +44,44 @@ class AggregationError(ValueError):
 
 @dataclass(frozen=True)
 class AggregatedItem:
-    """A published span, carrying exactly the annotations the selector gave it.
+    """A published span and the (facet, role) relations the selector gave it.
 
-    ``relations`` is the authoritative (facet, role) list; ``role``/``facet_ids`` are the
-    convenience views preflight compares against the selection. An aggregator may drop an item;
-    it may never edit these, and preflight enforces that.
+    ``relations`` is the ONLY stored annotation. It previously sat alongside ``role`` and
+    ``facet_ids`` as three fields describing one fact, and they diverged exactly as two
+    representations of one fact eventually do: preflight compared role/facet_ids while the
+    renderer preferred relations, so an item with `role="support"` and
+    `relations=(("f1","contradict"),)` passed preflight and published "contradict".
+
+    ``role`` and ``facet_ids`` remain as derived properties for the aggregators' ordering, but
+    nothing can set them independently.
     """
 
     span_id: str
-    role: Optional[str] = None
-    facet_ids: tuple[str, ...] = ()
     relations: tuple[tuple[str, Optional[str]], ...] = ()
+
+    @property
+    def role(self) -> Optional[str]:
+        """The single role, when the span plays exactly one. None if it plays several.
+
+        Callers that make a *decision* from this must handle None: a span supporting one facet
+        and contradicting another legitimately has no single role, and reading None as "no
+        role" is what made the contradiction guard fail on the very evidence it protects.
+        """
+        roles = {r for _, r in self.relations if r}
+        return roles.pop() if len(roles) == 1 else None
+
+    @property
+    def facet_ids(self) -> tuple[str, ...]:
+        from .contracts import OVERALL_FACET
+
+        return tuple(f for f, _ in self.relations if f != OVERALL_FACET)
+
+    def roles_on(self, facet: str) -> set[str]:
+        return {r for f, r in self.relations if f == facet and r}
 
     @classmethod
     def from_parsed(cls, item) -> "AggregatedItem":
-        return cls(span_id=item.span_id, role=item.role,
-                   facet_ids=item.facet_ids, relations=item.relations)
+        return cls(span_id=item.span_id, relations=item.relations)
 
 
 @dataclass(frozen=True)
@@ -142,15 +164,21 @@ def coverage_budget_v1(
     # Facets the selector marked as a live disagreement (both a support and a contradict span).
     # Items on such a facet are force-kept as a unit, so budget pressure can never one-side a
     # conflict; if that overflows the budget, preflight catches it and the sample falls to P0.
+    # Read from relations, not from a single role. A span can support one facet and contradict
+    # another, and collapsing that to one value both loses the conflict and misranks the item.
     facet_roles: dict[str, set[str]] = {}
     for item in items:
-        for facet in item.facet_ids:
-            if item.role:
-                facet_roles.setdefault(facet, set()).add(item.role)
+        for facet, role in item.relations:
+            if role:
+                facet_roles.setdefault(facet, set()).add(role)
     contradiction_facets = {f for f, roles in facet_roles.items() if {"support", "contradict"} <= roles}
 
-    # Deterministic consideration order: role priority, then source, then span id.
-    items.sort(key=lambda it: (_ROLE_RANK.get(it.role, 2), _order_key(registry[it.span_id])))
+    # Deterministic consideration order: strongest role the span plays, then source, then id.
+    def rank(it) -> int:
+        roles = {r for _, r in it.relations if r}
+        return min((_ROLE_RANK.get(r, 2) for r in roles), default=2)
+
+    items.sort(key=lambda it: (rank(it), _order_key(registry[it.span_id])))
 
     kept: list[AggregatedItem] = []
     kept_sources: set[str] = set()
@@ -169,7 +197,7 @@ def coverage_budget_v1(
     for item in items:
         agg = AggregatedItem.from_parsed(item)
         source = _source_key(registry[item.span_id])
-        in_conflict = any(f in contradiction_facets for f in item.facet_ids)
+        in_conflict = any(f in contradiction_facets for f, _ in item.relations)
         # Force-admit conflict spans (keep both sides) and up to the source-diversity minimum,
         # even against a tight budget, so neither a disagreement nor breadth is silently lost.
         force = in_conflict or (len(kept_sources) < min_sources and source not in kept_sources)

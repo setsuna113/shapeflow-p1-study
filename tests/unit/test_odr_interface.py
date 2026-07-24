@@ -3,6 +3,8 @@ parity comparison."""
 
 from __future__ import annotations
 
+import pytest
+
 import contextvars
 
 from shapeflow_p1.odr.checkpoints import (
@@ -25,6 +27,7 @@ from shapeflow_p1.odr.hooks import (
     current_strategies,
 )
 from shapeflow_p1.odr.p0_parity import (
+    PublishBatch,
     ModelRequest,
     RunTrace,
     ToolMessageRecord,
@@ -231,7 +234,7 @@ def _req(prompt="p", out="o"):
 def test_identical_traces_are_parity_ok():
     t = RunTrace(
         model_requests=(_req(),),
-        tool_messages=(ToolMessageRecord("c1", "tavily_search", "h"),),
+        publish_batches=(PublishBatch((ToolMessageRecord("c1", "tavily_search", "h",)),),),
         close_reasons=("RESEARCH_COMPLETE",),
         final_report_sha256="f",
     )
@@ -255,9 +258,92 @@ def test_output_difference_ignored_in_weak_mode_only():
     assert not compare_traces(v, p, require_output_equality=True).ok
 
 
+def test_an_atomic_publish_is_not_equal_to_two_partial_ones():
+    """`[[A,B]]` vs `[[A],[B]]` is the distinction the whole H design turns on.
+
+    A flat tool-message list cannot express it: both flatten to `[A, B]` and compared equal.
+    But publishing half a batch is precisely what P1 must never do, and a P1 failure must take
+    the whole batch to P0 rather than leaving a `[P1(A), P0(B)]` hybrid -- which is not an arm,
+    and would be scored as one.
+    """
+    a = ToolMessageRecord("c1", "tavily_search", "a" * 64)
+    b = ToolMessageRecord("c2", "tavily_search", "b" * 64)
+    atomic = RunTrace(publish_batches=(PublishBatch((a, b)),))
+    split = RunTrace(publish_batches=(PublishBatch((a,)), PublishBatch((b,))))
+    assert atomic.tool_messages == split.tool_messages       # the old view saw no difference
+    assert not compare_traces(atomic, split, require_output_equality=True).ok
+
+
+def test_identical_bytes_with_different_routing_are_not_parity():
+    a = ToolMessageRecord("c1", "tavily_search", "a" * 64)
+    vendor = RunTrace(publish_batches=(PublishBatch((a,), goto="researcher"),))
+    patched = RunTrace(publish_batches=(PublishBatch((a,), goto="compress_research"),))
+    assert not compare_traces(vendor, patched, require_output_equality=True).ok
+
+
+def test_a_hooks_off_run_that_reached_vendor_via_fallback_is_not_parity():
+    """Falling back produces vendor's bytes, so byte comparison alone calls it identical.
+
+    It is not: the hooks-off path must be inert, not merely recoverable. A patch that crashed
+    and quietly fell back would otherwise pass the gate that exists to prove it is inert.
+    """
+    a = ToolMessageRecord("c1", "tavily_search", "a" * 64)
+    vendor = RunTrace(publish_batches=(PublishBatch((a,)),))
+    patched = RunTrace(publish_batches=(PublishBatch((a,), fallback="WHOLE_BATCH_P0"),))
+    assert not compare_traces(vendor, patched, require_output_equality=True).ok
+
+
+def test_a_swallowed_exception_is_a_parity_difference():
+    a = ToolMessageRecord("c1", "tavily_search", "a" * 64)
+    vendor = RunTrace(publish_batches=(PublishBatch((a,)),))
+    patched = RunTrace(publish_batches=(PublishBatch((a,)),), exceptions=("TimeoutError",))
+    assert not compare_traces(vendor, patched, require_output_equality=True).ok
+
+
+def test_strategy_binding_is_released_even_when_an_arm_raises():
+    """A binding that survived an exception would execute one arm's strategy under another
+    arm's id -- a mislabelled observation, not a crash, and undetectable downstream."""
+    from shapeflow_p1.odr.hooks import StrategyBundle, current_strategies, strategies_bound
+
+    bundle = StrategyBundle(variant_id="H02", page=object(), close=object())
+    with pytest.raises(RuntimeError):
+        with strategies_bound(bundle):
+            assert current_strategies() is bundle
+            raise RuntimeError("arm failed")
+    assert current_strategies() is None
+
+
+def test_both_strategy_protocols_are_async():
+    """The vendor path is async and a strategy makes model calls. A sync strategy would block
+    the event loop, changing the batching and timing this study measures."""
+    import inspect
+
+    from shapeflow_p1.odr.hooks import PageTransformStrategy, ResearchCloseStrategy
+
+    assert inspect.iscoroutinefunction(PageTransformStrategy.transform_tool_batch)
+    assert inspect.iscoroutinefunction(ResearchCloseStrategy.close_researcher)
+
+
+def test_frozen_message_keeps_the_fields_a_rendered_prompt_depends_on():
+    """C_VISIBLE's claim is that the selector saw exactly what P0's compressor saw.
+
+    The compressor sees the rendered message list, so a dropped field is a field the clone
+    lacks -- the two prompts differ by however it renders, while every hash we compute agrees.
+    """
+    from shapeflow_p1.odr.checkpoints import FrozenMessage
+
+    keys = set(FrozenMessage(role="ai", content="x").content_dict())
+    assert {"additional_kwargs", "response_metadata", "usage_metadata", "artifact",
+            "invalid_tool_calls", "status"} <= keys
+    # Structured content blocks survive as blocks rather than being flattened to text.
+    blocks = FrozenMessage(role="ai", content=[{"type": "text", "text": "hi"}])
+    assert blocks.content_dict()["content"] == [{"type": "text", "text": "hi"}]
+    assert blocks.text_sha256 != FrozenMessage(role="ai", content="hi").text_sha256
+
+
 def test_tool_bytes_always_compared_even_in_weak_mode():
-    v = RunTrace(tool_messages=(ToolMessageRecord("c1", "s", "h1"),))
-    p = RunTrace(tool_messages=(ToolMessageRecord("c1", "s", "h2"),))
+    v = RunTrace(publish_batches=(PublishBatch((ToolMessageRecord("c1", "s", "h1"),)),))
+    p = RunTrace(publish_batches=(PublishBatch((ToolMessageRecord("c1", "s", "h2"),)),))
     assert not compare_traces(v, p, require_output_equality=False).ok
 
 

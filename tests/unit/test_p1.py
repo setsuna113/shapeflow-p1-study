@@ -25,7 +25,7 @@ from shapeflow_p1.p1.preflight import (
     bridge_novelty_errors,
     preflight,
 )
-from shapeflow_p1.p1.renderer import make_coster, render
+from shapeflow_p1.p1.view import CandidateViewRecord
 from shapeflow_p1.p1.selectors import (
     Candidate,
     CpuLexicalSelector,
@@ -40,23 +40,27 @@ CH = "c" * 64
 OCC = "occ1"
 
 
+def _view(spans=None, **kw):
+    """The offered candidate view -- the single source for bodies, labels, cost and render."""
+    if spans is None:
+        spans = [
+            build_evidence_span(c, SOURCE, content_hash=CH, source_occurrence_ids=[OCC],
+                                chunker_version="v1")
+            for c in paragraph_sentence_v1(SOURCE, tokenizer=TOK, max_tokens=6)
+        ]
+    kw.setdefault("namespace", "RAW_SOURCE")
+    kw.setdefault("snapshot_texts", {CH: SOURCE})
+    kw.setdefault("query_attempts", [("q_a", "cats")])
+    kw.setdefault("token_budget", 10_000)
+    kw.setdefault("contract", "P1_ID")
+    kw.setdefault("topic", "feline animals")
+    return CandidateViewRecord.build(spans=spans, tokenizer=TOK, **kw)
+
+
 def _fixture():
-    """Build spans/registry/candidate-set/texts from SOURCE."""
-    chunks = paragraph_sentence_v1(SOURCE, tokenizer=TOK, max_tokens=6)
-    spans = [
-        build_evidence_span(c, SOURCE, content_hash=CH, source_occurrence_ids=[OCC],
-                            chunker_version="v1")
-        for c in chunks
-    ]
-    registry = {s["span_id"]: s for s in spans}
-    span_ids = [s["span_id"] for s in spans]
-    cs = CandidateSet.build(span_ids)
-    coster = make_coster(
-        source_text_for=lambda sp: SOURCE[sp["char_start"]:sp["char_end"]],
-        label_for=cs.label_for,
-        tokenizer=TOK,
-    )
-    return spans, registry, span_ids, cs, coster
+    view = _view()
+    return (list(view.registry.values()), view.registry,
+            [c.span_id for c in view.candidates], view.candidate_set, view.coster())
 
 
 TASK = TaskContext(task_id="t", protocol_sha="p", variant_id="H02", seed=1,
@@ -104,16 +108,14 @@ def test_coverage_budget_respects_rendered_token_budget():
     _, registry, span_ids, cs, coster = _fixture()
     sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1", "E2", "E3"]}, cs)
     everything = AggregatedEvidence(
-        items=tuple(AggregatedItem(s, None, ()) for s in span_ids)
+        items=tuple(AggregatedItem(s) for s in span_ids)
     )
     full = coster(everything, registry)
     tight = full // 2
     agg = coverage_budget_v1(sel, registry, token_budget=tight, coster=coster, min_sources=1)
     assert agg.dropped_for_budget  # something was dropped under the tight budget
     # what remains renders within budget
-    r = render(agg, registry, source_text_for=lambda sp: SOURCE[sp["char_start"]:sp["char_end"]],
-               label_for=cs.label_for, tokenizer=TOK)
-    assert r.token_count <= tight
+    assert _view().render(agg).token_count <= tight
 
 
 def test_coverage_budget_keeps_both_sides_of_contradiction():
@@ -136,13 +138,12 @@ def test_renderer_deterministic_and_coster_matches():
     _, registry, span_ids, cs, coster = _fixture()
     sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1", "E2"]}, cs)
     agg = stable_union_v1(sel, registry)
-    kw = dict(source_text_for=lambda sp: SOURCE[sp["char_start"]:sp["char_end"]],
-              label_for=cs.label_for, tokenizer=TOK)
-    r1 = render(agg, registry, **kw)
-    r2 = render(agg, registry, **kw)
+    view = _view()
+    r1 = view.render(agg)
+    r2 = view.render(agg)
     assert r1 == r2
     # the coster's estimate equals the real render token count for the same evidence
-    assert coster(agg, registry) == r1.token_count
+    assert view.cost(agg) == r1.token_count
     # exact span bytes appear verbatim -- the renderer never rewrites content
     assert "feline" in r1.text
 
@@ -155,7 +156,7 @@ def test_coster_charges_for_gaps_and_bridges():
     that makes them different, which biases the work comparison in their favour.
     """
     _, registry, span_ids, cs, coster = _fixture()
-    items = (AggregatedItem(span_ids[0], "support", ("diet",)),)
+    items = (AggregatedItem(span_ids[0], (("diet", "support"),)),)
     bare = AggregatedEvidence(items=items)
     with_extras = AggregatedEvidence(
         items=items,
@@ -164,10 +165,7 @@ def test_coster_charges_for_gaps_and_bridges():
     )
     assert coster(with_extras, registry) > coster(bare, registry)
     # And the estimate is the truth, not an approximation of it.
-    rendered = render(with_extras, registry,
-                      source_text_for=lambda sp: SOURCE[sp["char_start"]:sp["char_end"]],
-                      label_for=cs.label_for, tokenizer=TOK)
-    assert coster(with_extras, registry) == rendered.token_count
+    assert coster(with_extras, registry) == _view().render(with_extras).token_count
 
 
 def test_gap_line_distinguishes_a_failed_search_from_a_real_absence():
@@ -178,16 +176,14 @@ def test_gap_line_distinguishes_a_failed_search_from_a_real_absence():
     """
     _, registry, span_ids, cs, _ = _fixture()
     ev = AggregatedEvidence(
-        items=(AggregatedItem(span_ids[0], None, ()),),
+        items=(AggregatedItem(span_ids[0]),),
         gaps=(ParsedGap(facet_id="origin", query_attempt_ids=("q_timeout",)),),
     )
-    kw = dict(source_text_for=lambda sp: SOURCE[sp["char_start"]:sp["char_end"]],
-              label_for=cs.label_for, tokenizer=TOK)
-    failed = render(ev, registry, query_status={"q_timeout": "TIMEOUT"}, **kw)
+    failed = _view(query_status={"q_timeout": "TIMEOUT"}).render(ev)
     assert "no evidence found" not in failed.text
     assert "did not complete" in failed.text
 
-    answered = render(ev, registry, query_status={"q_timeout": "EMPTY"}, **kw)
+    answered = _view(query_status={"q_timeout": "EMPTY"}).render(ev)
     assert "no evidence found" in answered.text
 
 
@@ -222,9 +218,8 @@ def test_adjacent_same_source_spans_share_one_header():
     for preflight to reconstruct.
     """
     _, registry, span_ids, cs, _ = _fixture()
-    ev = AggregatedEvidence(items=tuple(AggregatedItem(s, None, ()) for s in span_ids[:2]))
-    out = render(ev, registry, source_text_for=lambda sp: SOURCE[sp["char_start"]:sp["char_end"]],
-                 label_for=cs.label_for, tokenizer=TOK)
+    ev = AggregatedEvidence(items=tuple(AggregatedItem(s) for s in span_ids[:2]))
+    out = _view().render(ev)
     # One shared SOURCE header, but each span keeps its own label line -- see
     # test_render_keeps_role_and_facet_attached_to_their_own_span for why merging is wrong.
     assert out.text.count("SOURCE:") == 1
@@ -236,11 +231,10 @@ def test_adjacent_same_source_spans_share_one_header():
 # --- preflight ------------------------------------------------------------------------
 
 
-def _clean_preflight(sel, agg, registry, cs, budget=10_000, **kw):
+def _clean_preflight(sel, agg, registry, cs, budget=10_000, view=None, **kw):
     return preflight(
-        selection=sel, aggregated=agg, registry=registry,
-        snapshot_texts={CH: SOURCE}, known_occurrence_ids={OCC}, tokenizer=TOK,
-        label_for=cs.label_for,
+        selection=sel, aggregated=agg, view=view if view is not None else _view(),
+        known_occurrence_ids={OCC},
         config=PreflightConfig(selected_token_budget=budget, **kw),
     )
 
@@ -253,12 +247,18 @@ def test_preflight_passes_clean_selection():
 
 
 def test_preflight_flags_tampered_offsets():
-    spans, registry, _, cs, _ = _fixture()
+    """A corrupted recorded hash is caught even though the view resolved the body by offset.
+
+    The view reads bodies from the snapshot, so a bad `text_sha256` no longer changes what is
+    rendered -- but it still means the span record and the bytes disagree, which is corruption
+    and must stop the publication rather than be quietly rendered around.
+    """
+    view = _view()
+    cs = view.candidate_set
     sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
-    agg = stable_union_v1(sel, registry)
-    # Corrupt the recorded hash of the selected span.
-    registry[agg.items[0].span_id]["text_sha256"] = "0" * 64
-    assert not _clean_preflight(sel, agg, registry, cs).ok
+    agg = stable_union_v1(sel, view.registry)
+    view.registry[agg.items[0].span_id]["text_sha256"] = "0" * 64
+    assert not _clean_preflight(sel, agg, view.registry, cs, view=view).ok
 
 
 def test_preflight_flags_dangling_citation():
@@ -266,9 +266,8 @@ def test_preflight_flags_dangling_citation():
     sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
     agg = stable_union_v1(sel, registry)
     # Occurrence set does not contain OCC -> lineage closure fails.
-    res = preflight(selection=sel, aggregated=agg, registry=registry,
-                    snapshot_texts={CH: SOURCE}, known_occurrence_ids=set(), tokenizer=TOK,
-                    label_for=cs.label_for,
+    res = preflight(selection=sel, aggregated=agg, view=_view(),
+                    known_occurrence_ids=set(),
                     config=PreflightConfig(selected_token_budget=10_000))
     assert not res.ok
 
@@ -323,7 +322,7 @@ def test_aggregator_drops_a_bridge_whose_support_lost_the_budget():
                        {"span_id": "E3", "role": "background"}],
         "bridges": [{"text": "E3 qualifies E1.", "evidence_ids": ["E1", "E3"]}],
     }, cs)
-    tiny = coster(AggregatedEvidence(items=(AggregatedItem(span_ids[0], None, ()),)), registry)
+    tiny = coster(AggregatedEvidence(items=(AggregatedItem(span_ids[0]),)), registry)
     agg = coverage_budget_v1(sel, registry, token_budget=tiny, coster=coster, min_sources=1)
     if span_ids[2] not in {it.span_id for it in agg.items}:
         assert agg.bridges == ()

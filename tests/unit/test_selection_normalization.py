@@ -19,7 +19,7 @@ from shapeflow_p1.evidence.identity import CandidateSet, build_evidence_span
 from shapeflow_p1.p1.aggregators import AggregatedEvidence, AggregatedItem, stable_union_v1
 from shapeflow_p1.p1.contracts import SelectionContractError, parse_selection
 from shapeflow_p1.p1.preflight import PreflightConfig, preflight
-from shapeflow_p1.p1.renderer import make_coster, render
+from shapeflow_p1.p1.view import CandidateViewRecord, ViewConstructionError
 
 TOK = WhitespaceTokenizer()
 SOURCE = "Cats are feline animals here. Dogs are canine animals here. Birds can surely fly here."
@@ -27,29 +27,44 @@ CH = "c" * 64
 OCC = "occ1"
 
 
-def _fixture():
-    chunks = paragraph_sentence_v1(SOURCE, tokenizer=TOK, max_tokens=6)
-    spans = [
+def _spans():
+    return [
         build_evidence_span(c, SOURCE, content_hash=CH, source_occurrence_ids=[OCC],
                             chunker_version="v1")
-        for c in chunks
+        for c in paragraph_sentence_v1(SOURCE, tokenizer=TOK, max_tokens=6)
     ]
-    registry = {s["span_id"]: s for s in spans}
-    span_ids = [s["span_id"] for s in spans]
-    cs = CandidateSet.build(span_ids, ["q_a", "q_b"])
-    return registry, span_ids, cs
+
+
+def _fixture(spans=None):
+    spans = spans if spans is not None else _spans()
+    view = _view(spans)
+    return view, [c.span_id for c in view.candidates], view.candidate_set
 
 
 def _text_of(span: dict) -> str:
     return SOURCE[span["char_start"]:span["char_end"]]
 
 
-def _run_preflight(sel, agg, registry, cs, *, budget=10_000, **kw):
+def _view(spans, **kw):
+    """Build the offered view. Several checks that preflight used to make now happen HERE.
+
+    That is the point of the move: a candidate the selector must not see has to be rejected
+    before the model call, not after -- once the model has read it, no downstream check can
+    undo what it read.
+    """
+    kw.setdefault("namespace", "RAW_SOURCE")
+    kw.setdefault("snapshot_texts", {CH: SOURCE})
+    kw.setdefault("query_attempts", [("q_a", "cats"), ("q_b", "dogs")])
+    kw.setdefault("token_budget", 10_000)
+    kw.setdefault("contract", "P1_ID")
+    kw.setdefault("topic", "feline animals")
+    return CandidateViewRecord.build(spans=spans, tokenizer=TOK, **kw)
+
+
+def _run_preflight(sel, agg, view, *, budget=10_000, **kw):
     return preflight(
-        selection=sel, aggregated=agg, registry=registry,
-        snapshot_texts={CH: SOURCE}, known_occurrence_ids={OCC}, tokenizer=TOK,
-        label_for=cs.label_for,
-        config=PreflightConfig(selected_token_budget=budget), **kw
+        selection=sel, aggregated=agg, view=view, known_occurrence_ids={OCC},
+        config=PreflightConfig(selected_token_budget=budget, **kw),
     )
 
 
@@ -65,7 +80,7 @@ def test_same_span_with_conflicting_roles_is_rejected(order):
     times. Worse, the pair looks like a preserved contradiction to the contradiction guard,
     manufacturing a false positive for the property the study most wants to measure.
     """
-    registry, _, cs = _fixture()
+    view, _, cs = _fixture()
     raw = {"contract": "P1_TYPED", "selections": [
         {"span_id": "E1", "role": order[0], "facet_ids": ["f"]},
         {"span_id": "E1", "role": order[1], "facet_ids": ["f"]},
@@ -76,7 +91,7 @@ def test_same_span_with_conflicting_roles_is_rejected(order):
 
 def test_exact_duplicate_selection_is_normalized_not_rejected():
     """An exactly repeated line is harmless redundancy; rejecting it would only bias to P0."""
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_TYPED", "selections": [
         {"span_id": "E1", "role": "support", "facet_ids": ["f"]},
         {"span_id": "E1", "role": "support", "facet_ids": ["f"]},
@@ -95,7 +110,7 @@ def test_same_span_same_role_different_facets_merges_by_a_stated_rule():
     discarded the second facet and the coverage metric then scored a facet the selector had
     actually addressed as missed.
     """
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_TYPED", "selections": [
         {"span_id": "E1", "role": "support", "facet_ids": ["diet"]},
         {"span_id": "E1", "role": "support", "facet_ids": ["origin"]},
@@ -107,7 +122,7 @@ def test_same_span_same_role_different_facets_merges_by_a_stated_rule():
 
 
 def test_p1_id_exact_duplicates_are_deduped_stably():
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E3", "E1", "E1", "E3"]}, cs)
     assert sel.selected_span_ids == (span_ids[2], span_ids[0])  # first-seen order preserved
     assert sel.normalization.raw_count == 4
@@ -115,7 +130,7 @@ def test_p1_id_exact_duplicates_are_deduped_stably():
 
 
 def test_repeated_gap_facet_unions_its_query_attempts():
-    registry, _, cs = _fixture()
+    view, _, cs = _fixture()
     sel = parse_selection({"contract": "P1_TYPED",
                            "selections": [{"span_id": "E1", "role": "support"}],
                            "gaps": [
@@ -132,7 +147,7 @@ def test_normalization_counts_are_recorded_for_the_strict_valid_rate():
     Normalizing silently would let a variant that emits malformed output look identical to one
     that does not, hiding a real quality difference between contracts.
     """
-    registry, _, cs = _fixture()
+    view, _, cs = _fixture()
     sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1", "E1"]}, cs)
     assert sel.normalization.was_repaired is True
     clean = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
@@ -149,40 +164,38 @@ def test_render_keeps_role_and_facet_attached_to_their_own_span():
     or facet belongs to which span, nor which body text is which label -- and a contradiction
     the selector correctly marked becomes unreadable.
     """
-    registry, span_ids, cs = _fixture()
-    ev = AggregatedEvidence(items=(
-        AggregatedItem(span_ids[0], "support", ("f1",)),
-        AggregatedItem(span_ids[1], "contradict", ("f2",)),
-    ))
-    out = render(ev, registry, source_text_for=_text_of, label_for=cs.label_for,
-                 tokenizer=TOK).text
+    view, span_ids, cs = _fixture()
+    sel = parse_selection({"contract": "P1_TYPED", "selections": [
+        {"span_id": "E1", "role": "support", "facet_ids": ["f1"]},
+        {"span_id": "E2", "role": "contradict", "facet_ids": ["f2"]},
+    ]}, cs)
+    out = _run_preflight(sel, stable_union_v1(sel, view.registry), view).rendered.text
     # One shared SOURCE header for the run...
     assert out.count("SOURCE:") == 1
-    # ...but each span keeps its own label line with its own role and facet.
-    assert "[E1] (support) facets: f1" in out
-    assert "[E2] (contradict) facets: f2" in out
-    assert "(support,contradict)" not in out
+    # ...but each span keeps its own label line with its own relation.
+    assert "[E1] (support:f1)" in out
+    assert "[E2] (contradict:f2)" in out
     # And each label line immediately precedes its own bytes.
     lines = [ln for ln in out.splitlines() if ln.strip()]
-    assert lines[lines.index("[E1] (support) facets: f1") + 1].startswith("Cats are feline")
-    assert lines[lines.index("[E2] (contradict) facets: f2") + 1].startswith("Dogs are canine")
+    assert lines[lines.index("[E1] (support:f1)") + 1].startswith("Cats are feline")
+    assert lines[lines.index("[E2] (contradict:f2)") + 1].startswith("Dogs are canine")
 
 
 def test_render_keeps_each_spans_own_breadcrumb():
-    registry, span_ids, cs = _fixture()
     from shapeflow_p1.hashing import sha256_hex
-    # Breadcrumbs are addressed ranges, so each resolves to real snapshot bytes.
-    registry[span_ids[0]]["heading_refs"] = [{
+
+    spans = _spans()
+    # Breadcrumbs are addressed ranges into the span's own source, so each resolves to real
+    # snapshot bytes and is re-derived by the view rather than trusted.
+    spans[0]["heading_refs"] = [{
         "content_hash": CH, "char_start": 0, "char_end": 4,
         "text_sha256": sha256_hex(SOURCE[0:4].encode())}]
-    registry[span_ids[1]]["heading_refs"] = [{
+    spans[1]["heading_refs"] = [{
         "content_hash": CH, "char_start": 30, "char_end": 34,
         "text_sha256": sha256_hex(SOURCE[30:34].encode())}]
-    ev = AggregatedEvidence(items=(
-        AggregatedItem(span_ids[0], None, ()), AggregatedItem(span_ids[1], None, ()),
-    ))
-    res = _run_preflight(
-        parse_selection({"contract": "P1_ID", "selected_ids": ["E1", "E2"]}, cs), ev, registry, cs)
+    view, span_ids, cs = _fixture(spans)
+    sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1", "E2"]}, cs)
+    res = _run_preflight(sel, stable_union_v1(sel, view.registry), view)
     assert res.ok, res.errors
     assert f"under: {SOURCE[0:4]}" in res.rendered.text
     assert f"under: {SOURCE[30:34]}" in res.rendered.text
@@ -197,40 +210,43 @@ def test_injected_unhashed_context_is_rejected():
     With `context` as plain text, tampering left the span id unchanged, RAW_SOURCE
     reconstruction passing and preflight ok -- while the injected string was rendered
     downstream. Context must address frozen bytes like any other evidence.
+
+    The rejection now happens when the VIEW is built, which is strictly earlier: context is
+    rendered into the selector prompt, so catching it at publish time would already be one
+    model call too late.
     """
-    registry, span_ids, cs = _fixture()
-    registry[span_ids[0]]["context_refs"] = [{
+    spans = _spans()
+    spans[0]["context_refs"] = [{
         "content_hash": CH, "char_start": 0, "char_end": 4,
         "text_sha256": "0" * 64,        # does not match SOURCE[0:4]
     }]
-    sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
-    agg = stable_union_v1(sel, registry)
-    res = _run_preflight(sel, agg, registry, cs)
-    assert not res.ok
-    assert any("context" in e for e in res.errors)
+    with pytest.raises(ViewConstructionError, match="hash mismatch"):
+        _view(spans)
 
 
 def test_faithful_context_ref_reconstructs_and_renders():
-    registry, span_ids, cs = _fixture()
     from shapeflow_p1.hashing import sha256_hex
-    registry[span_ids[0]]["context_refs"] = [{
+
+    spans = _spans()
+    spans[0]["context_refs"] = [{
         "content_hash": CH, "char_start": 0, "char_end": 4,
         "text_sha256": sha256_hex(SOURCE[0:4].encode()),
     }]
+    view, span_ids, cs = _fixture(spans)
     sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
-    agg = stable_union_v1(sel, registry)
-    assert _run_preflight(sel, agg, registry, cs).ok
+    res = _run_preflight(sel, stable_union_v1(sel, view.registry), view)
+    assert res.ok, res.errors
+    assert f"ctx| {SOURCE[0:4]}" in res.rendered.text
 
 
 def test_out_of_bounds_context_ref_is_rejected():
-    registry, span_ids, cs = _fixture()
-    registry[span_ids[0]]["context_refs"] = [{
+    spans = _spans()
+    spans[0]["context_refs"] = [{
         "content_hash": CH, "char_start": 0, "char_end": 99_999,
         "text_sha256": "0" * 64,
     }]
-    sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
-    agg = stable_union_v1(sel, registry)
-    assert not _run_preflight(sel, agg, registry, cs).ok
+    with pytest.raises(ViewConstructionError, match="out of bounds"):
+        _view(spans)
 
 
 # --- 4. preflight verifies what is published -------------------------------------------
@@ -243,18 +259,18 @@ def test_preflight_recomputes_the_render_itself():
     so a caller that renders one thing and reports another passes. Preflight renders the
     aggregated evidence itself, in canonical order, and gates on that.
     """
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1", "E2", "E3"]}, cs)
-    agg = stable_union_v1(sel, registry)
-    res = _run_preflight(sel, agg, registry, cs, budget=1)
+    agg = stable_union_v1(sel, view.registry)
+    res = _run_preflight(sel, agg, view, budget=1)
     assert not res.ok
     assert any("exceeds selected_token_budget" in e for e in res.errors)
     # And it reports the render it actually verified, so the caller publishes that exact text.
-    ok = _run_preflight(sel, agg, registry, cs, budget=10_000)
+    ok = _run_preflight(sel, agg, view, budget=10_000)
     assert ok.ok and ok.rendered is not None
-    # Every span's exact frozen bytes appear, resolved by preflight itself.
-    for sid in span_ids:
-        assert _text_of(registry[sid]) in ok.rendered.text
+    # Every span's exact frozen bytes appear, resolved by the view rather than by a caller.
+    for candidate in view.candidates:
+        assert candidate.text in ok.rendered.text
 
 
 def test_preflight_rejects_evidence_the_selector_never_chose():
@@ -264,12 +280,12 @@ def test_preflight_rejects_evidence_the_selector_never_chose():
     span the model never selected, and every downstream metric would attribute it to the
     selector.
     """
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
     smuggled = AggregatedEvidence(items=(
-        AggregatedItem(span_ids[0], None, ()), AggregatedItem(span_ids[1], None, ()),
+        AggregatedItem(span_ids[0]), AggregatedItem(span_ids[1]),
     ))
-    res = _run_preflight(sel, smuggled, registry, cs)
+    res = _run_preflight(sel, smuggled, view)
     assert not res.ok
     assert any("not in the resolved selection" in e for e in res.errors)
 
@@ -280,24 +296,22 @@ def test_preflight_checks_contradiction_against_published_roles():
     Checking the pre-aggregation selection lets an aggregator drop one side while preflight
     still sees both in the selection and passes.
     """
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_TYPED", "selections": [
         {"span_id": "E1", "role": "support", "facet_ids": ["diet"]},
         {"span_id": "E2", "role": "contradict", "facet_ids": ["diet"]},
     ]}, cs)
-    one_sided = AggregatedEvidence(items=(AggregatedItem(span_ids[0], "support", ("diet",)),))
-    res = _run_preflight(sel, one_sided, registry, cs)
+    one_sided = AggregatedEvidence(items=(AggregatedItem(span_ids[0], (("diet", "support"),)),))
+    res = _run_preflight(sel, one_sided, view)
     assert not res.ok
     assert any("one-sided" in e for e in res.errors)
 
 
 def test_costing_uses_canonical_order_so_the_estimate_is_the_published_cost():
-    """The coster and the renderer must agree on order, or the budget gate is off by the
-    difference between them."""
-    registry, span_ids, cs = _fixture()
-    coster = make_coster(source_text_for=_text_of, label_for=cs.label_for, tokenizer=TOK)
-    forward = AggregatedEvidence(items=tuple(AggregatedItem(s, None, ()) for s in span_ids))
-    reverse = AggregatedEvidence(
-        items=tuple(AggregatedItem(s, None, ()) for s in reversed(span_ids))
-    )
-    assert coster(forward, registry) == coster(reverse, registry)
+    """The cost and the render must agree on order, or the budget gate is off by the
+    difference between them. Both now come from the view, so they cannot diverge."""
+    view, span_ids, cs = _fixture()
+    forward = AggregatedEvidence(items=tuple(AggregatedItem(s) for s in span_ids))
+    reverse = AggregatedEvidence(items=tuple(AggregatedItem(s) for s in reversed(span_ids)))
+    assert view.cost(forward) == view.cost(reverse)
+    assert view.cost(forward) == view.render(forward).token_count

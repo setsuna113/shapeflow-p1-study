@@ -31,11 +31,8 @@ from shapeflow_p1.p1.contracts import (
     SelectionContractError,
     parse_selection,
 )
-from shapeflow_p1.p1.preflight import (
-    PreflightConfig,
-    candidate_view_sha,
-    preflight,
-)
+from shapeflow_p1.p1.preflight import PreflightConfig, preflight
+from shapeflow_p1.p1.view import CandidateViewRecord, ViewConstructionError
 
 TOK = WhitespaceTokenizer()
 SOURCE = "Cats are feline animals here. Dogs are canine animals here. Birds can surely fly here."
@@ -43,23 +40,33 @@ CH = "c" * 64
 OCC = "occ1"
 
 
-def _fixture():
-    spans = [
+def _spans():
+    return [
         build_evidence_span(c, SOURCE, content_hash=CH, source_occurrence_ids=[OCC],
                             chunker_version="v1")
         for c in paragraph_sentence_v1(SOURCE, tokenizer=TOK, max_tokens=6)
     ]
-    registry = {s["span_id"]: s for s in spans}
-    span_ids = [s["span_id"] for s in spans]
-    return registry, span_ids, CandidateSet.build(span_ids, ["q_a", "q_b"])
 
 
-def _pf(sel, agg, registry, cs, **kw):
-    return preflight(
-        selection=sel, aggregated=agg, registry=registry,
-        snapshot_texts={CH: SOURCE}, known_occurrence_ids={OCC}, tokenizer=TOK,
-        label_for=cs.label_for, config=PreflightConfig(selected_token_budget=10_000), **kw
-    )
+def _view(spans=None, **kw):
+    kw.setdefault("namespace", "RAW_SOURCE")
+    kw.setdefault("snapshot_texts", {CH: SOURCE})
+    kw.setdefault("query_attempts", [("q_a", "cats"), ("q_b", "dogs")])
+    kw.setdefault("token_budget", 10_000)
+    kw.setdefault("contract", "P1_ID")
+    kw.setdefault("topic", "feline animals")
+    return CandidateViewRecord.build(
+        spans=spans if spans is not None else _spans(), tokenizer=TOK, **kw)
+
+
+def _fixture(spans=None):
+    view = _view(spans)
+    return view, [c.span_id for c in view.candidates], view.candidate_set
+
+
+def _pf(sel, agg, view, **kw):
+    return preflight(selection=sel, aggregated=agg, view=view, known_occurrence_ids={OCC},
+                     config=PreflightConfig(selected_token_budget=10_000, **kw))
 
 
 # --- 1. preflight reconstructs the body; it does not ask for it ------------------------
@@ -85,9 +92,9 @@ def test_preflight_does_not_accept_a_body_supplier():
 
 
 def test_preflight_renders_the_frozen_bytes():
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
-    res = _pf(sel, stable_union_v1(sel, registry), registry, cs)
+    res = _pf(sel, stable_union_v1(sel, view.registry), view)
     assert res.ok
     assert "Cats are feline animals here." in res.rendered.text
 
@@ -99,70 +106,61 @@ def test_context_ref_repointed_to_other_legal_bytes_is_rejected():
     """Fixing the hash after repointing is not tampering the hash check can see.
 
     A context_ref moved to a different, *real* passage with a correctly recomputed hash passed
-    every check and published text the chunker never associated with that span. Per-field
-    hashing cannot detect this; only a digest over the whole offered candidate view can, since
-    the view is what the selector was actually shown.
+    every per-field check. The view stops it a step earlier and more simply: context must
+    address the same source as its span, and the view resolves it once, so a later mutation of
+    the registry cannot agree with what the selector was shown (see drift_errors).
     """
-    registry, span_ids, cs = _fixture()
-    span = registry[span_ids[0]]
-    span["context_refs"] = [{
-        "content_hash": CH, "char_start": 0, "char_end": 4,
-        "text_sha256": sha256_hex(SOURCE[0:4].encode()),
+    spans = _spans()
+    other = "d" * 64
+    spans[0]["context_refs"] = [{
+        "content_hash": other, "char_start": 0, "char_end": 4,
+        "text_sha256": sha256_hex("Dogs".encode()),
     }]
-    sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
-    agg = stable_union_v1(sel, registry)
-    view_sha = candidate_view_sha(registry, [span_ids[0]], namespace="RAW_SOURCE")
+    with pytest.raises(ViewConstructionError, match="same source"):
+        _view(spans, snapshot_texts={CH: SOURCE, other: "Dogs are canine."})
 
-    # Repoint to other legitimate bytes and fix the hash -- per-field integrity still holds.
-    span["context_refs"] = [{
-        "content_hash": CH, "char_start": 30, "char_end": 58,
-        "text_sha256": sha256_hex(SOURCE[30:58].encode()),
-    }]
-    res = _pf(sel, agg, registry, cs, candidate_view_sha=view_sha)
+
+def test_a_registry_mutated_after_the_view_was_built_is_caught():
+    view, span_ids, cs = _fixture()
+    sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
+    agg = stable_union_v1(sel, view.registry)
+    view.registry[span_ids[0]]["char_end"] = view.registry[span_ids[0]]["char_start"] + 3
+    res = _pf(sel, agg, view)
     assert not res.ok
-    assert any("candidate view" in e for e in res.errors)
+    assert any("drifted" in e for e in res.errors)
 
 
 def test_heading_path_is_addressed_not_free_text():
     """`heading_path` was an unbound list of strings rendered straight into the prompt."""
-    registry, span_ids, cs = _fixture()
-    span = registry[span_ids[0]]
-    sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
-    agg = stable_union_v1(sel, registry)
-    view_sha = candidate_view_sha(registry, [span_ids[0]], namespace="RAW_SOURCE")
-    span["heading_refs"] = [{
-        "content_hash": CH, "char_start": 0, "char_end": 4,
-        "text_sha256": sha256_hex(SOURCE[0:4].encode()),
+    spans = _spans()
+    spans[0]["heading_refs"] = [{
+        "content_hash": CH, "char_start": 0, "char_end": 4, "text_sha256": "0" * 64,
     }]
-    res = _pf(sel, agg, registry, cs, candidate_view_sha=view_sha)
-    assert not res.ok
+    with pytest.raises(ViewConstructionError, match="hash mismatch"):
+        _view(spans)
 
 
-def test_candidate_view_sha_covers_the_whole_offered_set():
-    """Every offered candidate is pinned, not only the chosen ones.
+def test_the_view_digest_covers_every_offered_candidate_and_the_versions():
+    """An unselected candidate still shapes what the model picked, so it is inside the digest.
 
-    An unselected candidate still changes what the model chose from -- a forged one can steer
-    the selection it never appears in. Verification therefore happens over the whole offered
-    set, before the selector call.
+    The digest also closes over the prompt bytes and the prompt/renderer versions, and needs no
+    arguments from the caller: `candidate_view_sha` previously required the renderer version to
+    be passed by hand or a clean publication failed, which is not a usable protocol.
     """
-    registry, span_ids, cs = _fixture()
-    base = candidate_view_sha(registry, span_ids, namespace="RAW_SOURCE")
-    # Tamper with a candidate the selection will NOT include.
-    registry[span_ids[2]]["heading_refs"] = [{
+    base = _view().view_sha256
+    # A candidate the selection will not include still changes the view.
+    spans = _spans()
+    spans[2]["heading_refs"] = [{
         "content_hash": CH, "char_start": 0, "char_end": 4,
         "text_sha256": sha256_hex(SOURCE[0:4].encode()),
     }]
-    assert candidate_view_sha(registry, span_ids, namespace="RAW_SOURCE") != base
-
-
-def test_candidate_view_sha_covers_order_labels_namespace_and_versions():
-    registry, span_ids, cs = _fixture()
-    base = candidate_view_sha(registry, span_ids, namespace="RAW_SOURCE")
-    # Reordering changes the labels the model saw, so it changes the view.
-    assert candidate_view_sha(registry, list(reversed(span_ids)), namespace="RAW_SOURCE") != base
-    # Namespace is part of the view: the same span ids offered as a different namespace is a
-    # different experiment (C_VISIBLE vs C_REGISTRY).
-    assert candidate_view_sha(registry, span_ids, namespace="VISIBLE_MESSAGE") != base
+    assert _view(spans).view_sha256 != base
+    # Order allocates the labels, so it is part of the view.
+    assert _view(list(reversed(_spans()))).view_sha256 != base
+    # And the versions the digest claims to cover are actually in it.
+    view = _view()
+    assert view.prompt_bundle_version and view.renderer_grouping_version
+    assert view.prompt_sha256 == sha256_hex(view.prompt_bytes)
 
 
 # --- 3. the real chunker -> span -> candidate chain --------------------------------------
@@ -198,48 +196,48 @@ def test_aggregator_may_not_rewrite_role_or_facet():
     An aggregator (or a hand-assembling strategy) could turn `support/efficacy` into
     `background/safety`, and every downstream metric would attribute the rewrite to the model.
     """
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_TYPED", "selections": [
         {"span_id": "E1", "role": "support", "facet_ids": ["f1"]},
     ]}, cs)
-    forged = AggregatedEvidence(items=(AggregatedItem(span_ids[0], "background", ("f2",)),))
-    res = _pf(sel, forged, registry, cs)
+    forged = AggregatedEvidence(items=(AggregatedItem(span_ids[0], (("f2", "contradict"),)),))
+    res = _pf(sel, forged, view)
     assert not res.ok
     assert any("annotation" in e for e in res.errors)
 
 
 def test_aggregator_may_not_invent_a_gap_or_bridge():
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
     with_gap = AggregatedEvidence(
-        items=(AggregatedItem(span_ids[0], None, ()),),
+        items=(AggregatedItem(span_ids[0]),),
         gaps=(ParsedGap(facet_id="invented", query_attempt_ids=("q_a",)),),
     )
-    assert not _pf(sel, with_gap, registry, cs).ok
+    assert not _pf(sel, with_gap, view).ok
     with_bridge = AggregatedEvidence(
-        items=(AggregatedItem(span_ids[0], None, ()),),
+        items=(AggregatedItem(span_ids[0]),),
         bridges=(ParsedBridge(text="Invented.", evidence_span_ids=(span_ids[0],)),),
     )
-    assert not _pf(sel, with_bridge, registry, cs).ok
+    assert not _pf(sel, with_bridge, view).ok
 
 
 def test_p1_id_output_may_not_acquire_roles_facets_gaps_or_bridges():
     """P1_ID isolates the pointer mechanism; anything else in its output is a different arm."""
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
-    typed = AggregatedEvidence(items=(AggregatedItem(span_ids[0], "support", ("f",)),))
-    res = _pf(sel, typed, registry, cs)
+    typed = AggregatedEvidence(items=(AggregatedItem(span_ids[0], (("f", "support"),)),))
+    res = _pf(sel, typed, view)
     assert not res.ok
 
 
 def test_dropped_for_budget_must_equal_the_real_difference():
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1", "E2"]}, cs)
     lying = AggregatedEvidence(
-        items=(AggregatedItem(span_ids[0], None, ()),),
+        items=(AggregatedItem(span_ids[0]),),
         dropped_for_budget=(),          # E2 vanished but nothing was recorded
     )
-    res = _pf(sel, lying, registry, cs)
+    res = _pf(sel, lying, view)
     assert not res.ok
     assert any("dropped_for_budget" in e for e in res.errors)
 
@@ -253,7 +251,7 @@ def test_one_span_may_support_one_facet_and_contradict_another():
     A source can perfectly well support an efficacy claim and undercut a safety claim. Rejecting
     the whole sample there fails P1 on the conflict-rich tasks the study cares most about.
     """
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_TYPED", "selections": [
         {"span_id": "E1", "role": "support", "facet_ids": ["efficacy"]},
         {"span_id": "E1", "role": "contradict", "facet_ids": ["safety"]},
@@ -263,7 +261,7 @@ def test_one_span_may_support_one_facet_and_contradict_another():
 
 
 def test_one_span_may_not_take_two_roles_on_the_same_facet():
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     with pytest.raises(SelectionContractError, match="conflicting roles on facet"):
         parse_selection({"contract": "P1_TYPED", "selections": [
             {"span_id": "E1", "role": "support", "facet_ids": ["safety"]},
@@ -273,7 +271,7 @@ def test_one_span_may_not_take_two_roles_on_the_same_facet():
 
 def test_facetless_relations_use_an_explicit_sentinel_not_a_missing_key():
     """A role claimed with no facet is an overall relation, and conflicts with another one."""
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_TYPED", "selections": [
         {"span_id": "E1", "role": "support"},
     ]}, cs)
@@ -286,13 +284,13 @@ def test_facetless_relations_use_an_explicit_sentinel_not_a_missing_key():
 
 
 def test_render_shows_each_facet_role_relation():
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_TYPED", "selections": [
         {"span_id": "E1", "role": "support", "facet_ids": ["efficacy"]},
         {"span_id": "E1", "role": "contradict", "facet_ids": ["safety"]},
     ]}, cs)
-    res = _pf(sel, stable_union_v1(sel, registry), registry, cs)
-    assert res.ok
+    res = _pf(sel, stable_union_v1(sel, view.registry), view)
+    assert res.ok, res.errors
     assert "support:efficacy" in res.rendered.text
     assert "contradict:safety" in res.rendered.text
 
@@ -302,7 +300,7 @@ def test_render_shows_each_facet_role_relation():
 
 def test_intra_field_duplicates_are_counted():
     """Repair inside a field was invisible: facet_ids=["f","f"] reported duplicate_count=0."""
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_TYPED",
                            "selections": [{"span_id": "E1", "role": "support",
                                            "facet_ids": ["f", "f"]}],
@@ -313,7 +311,7 @@ def test_intra_field_duplicates_are_counted():
 
 
 def test_bridge_evidence_duplicates_are_counted():
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     sel = parse_selection({"contract": "P1_BRIDGE",
                            "selections": [{"span_id": "E1", "role": "support"}],
                            "bridges": [{"text": "x", "evidence_ids": ["E1", "E1"]}]}, cs)
@@ -326,7 +324,7 @@ def test_a_rejected_parse_still_reports_what_it_saw():
     The strict-valid rate needs the denominator: how often output was malformed, not only how
     often we managed to repair it.
     """
-    registry, span_ids, cs = _fixture()
+    view, span_ids, cs = _fixture()
     try:
         parse_selection({"contract": "P1_TYPED", "selections": [
             {"span_id": "E1", "role": "support", "facet_ids": ["safety"]},
@@ -343,32 +341,32 @@ def test_a_rejected_parse_still_reports_what_it_saw():
 # --- 7. an integrity failure never raises out of preflight ------------------------------
 
 
-def test_missing_context_snapshot_fails_closed_instead_of_raising():
+def test_an_unresolvable_candidate_is_refused_before_the_model_sees_it():
     """Preflight recorded the error and then rendered anyway, raising KeyError.
 
-    The adapter's whole-batch fallback needs a decision object; an exception escaping preflight
-    means the batch's failure path is whatever the caller's `except` happens to be.
+    Both halves are now stronger: an unresolvable body or context makes the VIEW refuse to
+    build, so the candidate never reaches a prompt; and preflight itself never raises, so the
+    adapter's whole-batch fallback always has a decision object rather than an exception.
     """
-    registry, span_ids, cs = _fixture()
-    registry[span_ids[0]]["context_refs"] = [{
+    spans = _spans()
+    spans[0]["context_refs"] = [{
         "content_hash": "z" * 64, "char_start": 0, "char_end": 3, "text_sha256": "0" * 64,
     }]
-    sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
-    res = _pf(sel, stable_union_v1(sel, registry), registry, cs)
-    assert not res.ok
-    assert res.rendered is None
+    with pytest.raises(ViewConstructionError):
+        _view(spans)
+    # A body that cannot be resolved is likewise refused, not rendered as an empty string.
+    with pytest.raises(ViewConstructionError, match="cannot resolve"):
+        _view(snapshot_texts={})
 
 
-def test_missing_body_snapshot_fails_closed():
-    registry, span_ids, cs = _fixture()
-    sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, cs)
-    res = preflight(
-        selection=sel, aggregated=stable_union_v1(sel, registry), registry=registry,
-        snapshot_texts={}, known_occurrence_ids={OCC}, tokenizer=TOK,
-        label_for=cs.label_for, config=PreflightConfig(selected_token_budget=10_000),
-    )
-    assert not res.ok
-    assert res.rendered is None
+def test_preflight_returns_a_decision_rather_than_raising():
+    from shapeflow_p1.p1.view import guard_publication
+
+    def boom():
+        raise RuntimeError("structural failure inside rendering")
+
+    errors = guard_publication(boom)
+    assert errors and "structural failure" in errors[0]
 
 
 # --- 8. the renderer's grouping behaviour is frozen -------------------------------------

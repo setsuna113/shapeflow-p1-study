@@ -33,7 +33,8 @@ from ..evidence.lineage import lineage_closure_errors, reconstruction_errors
 from ..hashing import sha256_hex
 from .aggregators import AggregatedEvidence
 from .contracts import OVERALL_FACET, ParsedSelection
-from .renderer import RenderResult, context_text_for, render
+from .renderer import RenderResult
+from .view import guard_publication
 
 __all__ = [
     "PreflightConfig", "PreflightResult", "preflight",
@@ -191,28 +192,27 @@ def preflight(
     *,
     selection: ParsedSelection,
     aggregated: AggregatedEvidence,
-    registry: dict,
-    snapshot_texts: dict[str, str],
+    view,
     known_occurrence_ids: set[str],
-    tokenizer: Tokenizer,
-    label_for: Callable[[str], str],
     config: PreflightConfig,
-    visible_views: dict[str, bytes] | None = None,
-    source_meta: dict | None = None,
-    query_status: dict[str, str] | None = None,
-    candidate_view_sha: str | None = None,
-    offered_span_ids: list[str] | None = None,
 ) -> PreflightResult:
     """Structurally verify a P1 publication and return the exact bytes to publish.
 
-    Renders the evidence itself, from bytes it resolves itself, in canonical order -- so "what
-    was checked" and "what is published" are the same object. Never raises: an integrity failure
-    returns a result with ``rendered=None`` so the adapter can run its whole-batch P0 fallback
-    on a decision rather than on an exception.
+    Takes the ``CandidateViewRecord`` -- the same object the selector was given -- and nothing
+    else. There is no ``source_text_for``, ``label_for`` or ``coster`` parameter, because each
+    was a value the caller could substitute on the publication path, and closing them one at a
+    time only postponed the next one.
+
+    Never raises: an integrity failure returns ``rendered=None`` so the adapter can run its
+    whole-batch P0 fallback on a decision rather than on an exception. Cancellation is the one
+    exception and propagates (see ``view.guard_publication``).
     """
-    visible_views = visible_views or {}
     result = PreflightResult()
-    body_for = _body_resolver(snapshot_texts, visible_views, result)
+    registry = view.registry
+    snapshot_texts = view.snapshot_texts
+    visible_views = view.visible_views
+    tokenizer = view.tokenizer
+    body_for = lambda span: view.text_for(_span_id(span))
 
     # 1. Every aggregated span must be a real candidate.
     spans = []
@@ -229,28 +229,26 @@ def preflight(
     #     metric attributes the rewrite to the model.
     result.errors.extend(_provenance_errors(selection, aggregated))
 
-    # 1c. The whole offered candidate view must be the one the selector was shown. Per-field
-    #     hashes miss a ref repointed to other genuine bytes; this digest does not. Unselected
-    #     candidates are covered too, because a forged one steers selections it never joins.
-    if candidate_view_sha is not None:
-        if offered_span_ids is None:
-            offered_span_ids = sorted(registry)
-        from .renderer import RENDERER_GROUPING_VERSION
-
-        actual = _candidate_view_sha(
-            registry, offered_span_ids,
-            namespace=config.expected_namespace or "RAW_SOURCE",
-            renderer_grouping_version=RENDERER_GROUPING_VERSION,
-        )
-        if actual != candidate_view_sha:
+    # 1c. Every published span must be one the view actually offered. The view resolved its
+    #     bytes once at construction, so this is membership in an immutable set -- not a digest
+    #     recomputed from the same mutable registry that a repointed ref was already baked into.
+    offered = {c.span_id for c in view.candidates}
+    for item in aggregated.items:
+        if item.span_id not in offered:
             result.errors.append(
-                f"candidate view digest changed since the selector call "
-                f"({candidate_view_sha[:12]} -> {actual[:12]}); the bytes offered to the model "
-                "are not the bytes being published from"
+                f"published span {item.span_id[:12]} was not in the offered candidate view"
             )
+    result.errors.extend(view.drift_errors(item.span_id for item in aggregated.items))
 
-    # 2. Every published span is in the namespace this variant may publish from.
+    # 2. Namespace. The view already refused to OFFER a foreign candidate -- which is the
+    #    binding check, since the selector reads the whole offered set -- so this is defence in
+    #    depth over what was published.
     if config.expected_namespace is not None:
+        if view.namespace != config.expected_namespace:
+            result.errors.append(
+                f"the offered view is {view.namespace!r} but this variant publishes "
+                f"{config.expected_namespace!r}"
+            )
         for span in spans:
             got = span.get("namespace")
             if got != config.expected_namespace:
@@ -286,9 +284,9 @@ def preflight(
                 declared.setdefault(facet, set()).add(role)
     published: dict[str, set[str]] = {}
     for item in aggregated.items:
-        if item.role:
-            for facet in item.facet_ids or (OVERALL_FACET,):
-                published.setdefault(facet, set()).add(item.role)
+        for facet, role in item.relations:
+            if role:
+                published.setdefault(facet, set()).add(role)
     for facet, roles in declared.items():
         if {"support", "contradict"} <= roles:
             survived = published.get(facet, set())
@@ -322,13 +320,17 @@ def preflight(
     #    a missing snapshot became a KeyError escaping preflight instead of a fail-closed
     #    result, leaving the batch's failure path to whatever the caller's `except` was.
     if not result.errors:
-        rendered = render(
-            aggregated, registry,
-            source_text_for=body_for, label_for=label_for, tokenizer=tokenizer,
-            source_meta=source_meta, visible_views=visible_views, query_status=query_status,
-            context_text_for=context_text_for(snapshot_texts),
-        )
-        if not result.errors:      # body_for records rather than raises; re-check
+        # Rendering can still fail structurally (a C_VISIBLE title that is not in the
+        # compressor-visible bytes used to raise SourceMetaLeak straight out of preflight,
+        # leaving the batch's failure path to whatever the caller's `except` was).
+        rendered = None
+
+        def _do_render():
+            nonlocal rendered
+            rendered = view.render(aggregated)
+
+        result.errors.extend(guard_publication(_do_render))
+        if not result.errors and rendered is not None:
             result.rendered = rendered
             if rendered.token_count > config.selected_token_budget:
                 result.errors.append(
@@ -356,6 +358,10 @@ def preflight(
         # to publish "the bytes preflight produced" from a run preflight rejected.
         result.rendered = None
     return result
+
+
+def _span_id(span: dict) -> str:
+    return span.get("span_id") or span.get("visible_span_id") or ""
 
 
 def _body_resolver(
@@ -423,14 +429,41 @@ def _provenance_errors(
         if aggregated.gaps or aggregated.bridges:
             errors.append("P1_ID output published gaps or bridges, which the contract cannot emit")
 
-    declared_gaps = set(selection.gaps)
-    for gap in aggregated.gaps:
-        if gap not in declared_gaps:
-            errors.append(f"published gap on facet {gap.facet_id!r} was not in the selection")
-    declared_bridges = set(selection.bridges)
+    # Gaps are preserved EXACTLY. A gap is a coverage claim the selector made; dropping one
+    # silently removes an admission of what the report does not cover, which is precisely the
+    # honesty the quality guards score.
+    if tuple(aggregated.gaps) != tuple(selection.gaps):
+        missing = [g.facet_id for g in selection.gaps if g not in set(aggregated.gaps)]
+        added = [g.facet_id for g in aggregated.gaps if g not in set(selection.gaps)]
+        errors.append(
+            f"gaps were altered (dropped {sorted(missing)}, added {sorted(added)}); a gap is "
+            "the selector's own coverage claim and must be published verbatim"
+        )
+
+    # A bridge may be dropped, but ONLY because its evidence was, and the reason is recorded.
+    declared_bridges = {b.text: b for b in selection.bridges}
+    published_ids = {item.span_id for item in aggregated.items}
     for bridge in aggregated.bridges:
-        if bridge not in declared_bridges:
+        if bridge not in set(selection.bridges):
             errors.append(f"published bridge {bridge.text[:40]!r} was not in the selection")
+    for text in aggregated.dropped_bridges:
+        bridge = declared_bridges.get(text)
+        if bridge is None:
+            errors.append(f"dropped_bridges names {text[:40]!r}, which the selector never emitted")
+            continue
+        if set(bridge.evidence_span_ids) <= published_ids:
+            errors.append(
+                f"bridge {text[:40]!r} was dropped although every span it cites survived; a "
+                "bridge may only go when its evidence does"
+            )
+    expected_dropped_bridges = {
+        b.text for b in selection.bridges if not set(b.evidence_span_ids) <= published_ids
+    }
+    if set(aggregated.dropped_bridges) != expected_dropped_bridges:
+        errors.append(
+            f"dropped_bridges records {sorted(t[:24] for t in aggregated.dropped_bridges)} but "
+            f"{sorted(t[:24] for t in expected_dropped_bridges)} actually lost their evidence"
+        )
 
     published_ids = {item.span_id for item in aggregated.items}
     expected_dropped = set(selection.selected_span_ids) - published_ids

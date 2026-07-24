@@ -23,6 +23,12 @@ The capture point matters and is encoded in the shapes here:
   ``researcher_messages`` captured *before* vendor appends its compression instruction
   (``deep_researcher.py`` line 538). Cloning after that append would poison the first fork
   and, through the shared list, every fork after it.
+
+Note the ``HCheckpoint`` capture point precisely: it is inside ``researcher_tools``, *after*
+``asyncio.gather`` returns the sibling results and *before* the ``ToolMessage`` list is built.
+Not at the top of the function -- the searches have not run there, so their result sets do not
+exist yet -- and not inside ``tavily_search``, which sees only its own call's results and
+cannot know what its siblings returned.
 """
 
 from __future__ import annotations
@@ -82,15 +88,36 @@ class FrozenToolCall:
 
 @dataclass(frozen=True)
 class FrozenMessage:
-    """A langchain message reduced to its identity-bearing fields. The adapter builds these
-    from live messages; nothing here depends on langchain."""
+    """A langchain message frozen losslessly. The adapter builds these from live messages;
+    nothing here depends on langchain.
+
+    "Identity-bearing fields" is not enough, and C_VISIBLE is why. Its whole claim is that the
+    selector saw *exactly* what P0's compressor saw -- and what the compressor sees is the
+    rendered message list. Any field dropped here is a field the reconstructed clone lacks, so
+    the two prompts differ by however that field renders, while every hash we compute agrees.
+
+    ``content`` is ``str | list[dict]``: modern providers emit structured content blocks, and
+    flattening them to text loses block boundaries that the chat template renders differently.
+    ``additional_kwargs`` and ``response_metadata`` carry provider fields (refusals, tool-call
+    deltas, logprobs) that some templates surface. ``usage_metadata`` is not rendered but is
+    the arm's token accounting, and ``artifact`` is ToolMessage payload.
+
+    The round-trip property test in the adapter is the real check: clone, rebuild, render, and
+    require byte equality with the original rendering.
+    """
 
     role: str  # ai | human | system | tool
-    content: str
+    content: object  # str | list[dict]
     tool_calls: tuple[FrozenToolCall, ...] = ()
     name: Optional[str] = None
     tool_call_id: Optional[str] = None
     message_id: Optional[str] = None
+    additional_kwargs_canonical: str = "{}"
+    response_metadata_canonical: str = "{}"
+    usage_metadata_canonical: str = "{}"
+    artifact_canonical: Optional[str] = None
+    invalid_tool_calls_canonical: str = "[]"
+    status: Optional[str] = None
 
     def content_dict(self) -> dict:
         return {
@@ -100,11 +127,21 @@ class FrozenMessage:
             "name": self.name,
             "tool_call_id": self.tool_call_id,
             "message_id": self.message_id,
+            "additional_kwargs": self.additional_kwargs_canonical,
+            "response_metadata": self.response_metadata_canonical,
+            "usage_metadata": self.usage_metadata_canonical,
+            "artifact": self.artifact_canonical,
+            "invalid_tool_calls": self.invalid_tool_calls_canonical,
+            "status": self.status,
         }
 
     @property
     def text_sha256(self) -> str:
-        return sha256_hex(self.content.encode("utf-8"))
+        """Digest of the content as it renders. Structured blocks hash over their canonical
+        form, so a block-boundary change is visible rather than flattened away."""
+        if isinstance(self.content, str):
+            return sha256_hex(self.content.encode("utf-8"))
+        return sha256_hex(canonical_json(self.content))
 
 
 @dataclass(frozen=True)

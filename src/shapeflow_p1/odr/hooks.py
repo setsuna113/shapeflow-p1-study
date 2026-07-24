@@ -15,6 +15,7 @@ researcher sees exactly the strategy its run bound.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 from dataclasses import dataclass
 from typing import Optional, Protocol, Sequence, runtime_checkable
@@ -29,6 +30,7 @@ __all__ = [
     "ResearchCloseStrategy",
     "StrategyBundle",
     "bind_strategies",
+    "strategies_bound",
     "current_strategies",
 ]
 
@@ -78,9 +80,13 @@ class PageTransformStrategy(Protocol):
 
     P0's implementation reproduces vendor ``summarize_webpage`` byte-for-byte; P1's runs
     the selector path. Both must emit one observation per sibling tool call, in the batch's
-    pinned order, because the publish unit is the whole batch."""
+    pinned order, because the publish unit is the whole batch.
 
-    def transform_tool_batch(
+    Async because the vendor path is async and a strategy makes model calls. A sync strategy
+    would either block the event loop -- changing the batching and timing this study measures --
+    or force the adapter to thread-hop, which changes them differently."""
+
+    async def transform_tool_batch(
         self, *, task_ctx: TaskContext, checkpoint: HCheckpoint
     ) -> Sequence[ToolObservation]: ...
 
@@ -91,9 +97,14 @@ class ResearchCloseStrategy(Protocol):
 
     P0 reproduces vendor ``compress_research``; P1 runs the close selector. The strategy
     receives the close reason so it can (for analysis) distinguish the three exit paths,
-    but every path enters the same strategy."""
+    but every path enters the same strategy.
 
-    def close_researcher(
+    RESEARCHER_CLOSE is its own boundary, not a consequence of the page batch: a researcher can
+    close having published no page batch at all (``ResearchComplete`` on the first turn, or a
+    no-tool exit), so a close hook reached only through the H path would silently skip those
+    runs -- and they are exactly the cheap ones."""
+
+    async def close_researcher(
         self, *, task_ctx: TaskContext, checkpoint: CCheckpoint
     ) -> ResearcherHandoff: ...
 
@@ -114,8 +125,28 @@ _ACTIVE: contextvars.ContextVar[Optional[StrategyBundle]] = contextvars.ContextV
 
 def bind_strategies(bundle: StrategyBundle) -> contextvars.Token:
     """Bind ``bundle`` for the current context. Returns a token to restore the previous
-    binding, so nested/concurrent runs don't clobber each other."""
+    binding, so nested/concurrent runs don't clobber each other.
+
+    Prefer :func:`strategies_bound`, which cannot leak the binding.
+    """
     return _ACTIVE.set(bundle)
+
+
+@contextlib.contextmanager
+def strategies_bound(bundle: Optional[StrategyBundle]):
+    """Bind for the duration of the block and restore in ``finally``.
+
+    The reset has to be unconditional. If an arm raises -- or is cancelled -- between bind and
+    reset, a manual token reset is skipped and the binding survives into whatever runs next in
+    that context. The supervisor runs researchers concurrently, so the next thing is very often
+    a *different arm*, which would then execute P1's strategy while recording P0's variant id:
+    a mislabelled observation, not a crash, and nothing downstream could detect it.
+    """
+    token = _ACTIVE.set(bundle)
+    try:
+        yield bundle
+    finally:
+        _ACTIVE.reset(token)
 
 
 def current_strategies() -> Optional[StrategyBundle]:

@@ -22,7 +22,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-__all__ = ["ModelRequest", "ToolMessageRecord", "RunTrace", "ParityReport", "compare_traces"]
+__all__ = [
+    "ModelRequest", "ToolMessageRecord", "PublishBatch", "RunTrace",
+    "ParityReport", "compare_traces",
+]
 
 
 @dataclass(frozen=True)
@@ -46,13 +49,43 @@ class ToolMessageRecord:
 
 
 @dataclass(frozen=True)
+class PublishBatch:
+    """One atomic publish: every sibling ToolMessage of one assistant turn, in pinned order.
+
+    The batch boundary is the fact being compared, so it has to be *in* the trace. A flat list
+    of tool messages cannot tell ``[[A, B]]`` -- one atomic publish -- from ``[[A], [B]]``, two
+    partial ones, and that distinction is the central claim of the whole H design: P1 must
+    never publish half a batch, and a P1 failure must take the whole batch to P0 rather than
+    leaving a ``[P1(A), P0(B)]`` hybrid.
+    """
+
+    messages: tuple[ToolMessageRecord, ...] = ()
+    goto: str = ""                    # the Command's goto target
+    state_update_sha256: str = ""     # digest of the state update the Command carried
+    checkpoint_digest: str = ""       # the H checkpoint this batch was published from
+    fallback: str = ""                # "" | "WHOLE_BATCH_P0" | the failure that forced it
+
+
+@dataclass(frozen=True)
 class RunTrace:
-    """An ordered record of one graph execution's observable facts."""
+    """An ordered record of one graph execution's observable facts.
+
+    Beyond the request envelopes and the final report, it records what the graph *did with*
+    each batch: where it went next, what it wrote to state, which checkpoint it forked from,
+    and whether it fell back. A patched graph that produced identical bytes while routing
+    differently, or while silently falling back, would otherwise compare equal to vendor.
+    """
 
     model_requests: tuple[ModelRequest, ...] = ()
-    tool_messages: tuple[ToolMessageRecord, ...] = ()
+    publish_batches: tuple[PublishBatch, ...] = ()
     close_reasons: tuple[str, ...] = ()
+    exceptions: tuple[str, ...] = ()   # type names, in order; a swallowed error is a difference
     final_report_sha256: str = ""
+
+    @property
+    def tool_messages(self) -> tuple[ToolMessageRecord, ...]:
+        """Flattened view, for assertions that genuinely do not care about batching."""
+        return tuple(m for batch in self.publish_batches for m in batch.messages)
 
 
 @dataclass
@@ -94,16 +127,35 @@ def compare_traces(
                     f"{v.output_sha256[:12]} != {p.output_sha256[:12]}"
                 )
 
-    # --- tool messages (application bytes, always compared) ---
-    if len(vendor.tool_messages) != len(patched.tool_messages):
+    # --- publish batches (application bytes AND the batch boundary) ---
+    if len(vendor.publish_batches) != len(patched.publish_batches):
         report.add(
-            f"tool message count: vendor={len(vendor.tool_messages)} "
-            f"patched={len(patched.tool_messages)}"
+            f"publish batch count: vendor={len(vendor.publish_batches)} "
+            f"patched={len(patched.publish_batches)} -- a differing batch count means the "
+            "patched graph split or merged an atomic publish"
         )
     else:
-        for i, (v, p) in enumerate(zip(vendor.tool_messages, patched.tool_messages)):
-            if v != p:
-                report.add(f"tool message[{i}] differs: {v} != {p}")
+        for i, (v, p) in enumerate(zip(vendor.publish_batches, patched.publish_batches)):
+            if v.messages != p.messages:
+                report.add(f"publish batch[{i}] messages differ: {v.messages} != {p.messages}")
+            if v.goto != p.goto:
+                report.add(f"publish batch[{i}] goto differs: {v.goto!r} != {p.goto!r}")
+            if v.state_update_sha256 != p.state_update_sha256:
+                report.add(
+                    f"publish batch[{i}] state update differs: "
+                    f"{v.state_update_sha256[:12]} != {p.state_update_sha256[:12]}"
+                )
+            if p.fallback:
+                report.add(
+                    f"publish batch[{i}] fell back ({p.fallback}); a hooks-off run must take "
+                    "the vendor path directly, never reach it via a fallback"
+                )
+
+    # --- exceptions (a swallowed error is a behavioural difference, not a detail) ---
+    if vendor.exceptions != patched.exceptions:
+        report.add(
+            f"exceptions differ: vendor={vendor.exceptions} patched={patched.exceptions}"
+        )
 
     # --- close reasons (the three exit paths must be taken identically) ---
     if vendor.close_reasons != patched.close_reasons:

@@ -108,10 +108,18 @@ class NormalizationRecord:
     unique_count: int
     duplicate_count: int
     semantic_conflict_count: int
+    # Set on every rejection, so the strict-valid rate has its denominator: schema failures and
+    # out-of-set labels used to raise with normalization=None, which counted them as if they
+    # had never happened.
+    rejected_reason: Optional[str] = None
 
     @property
     def was_repaired(self) -> bool:
         return self.duplicate_count > 0 or self.semantic_conflict_count > 0
+
+    @property
+    def was_rejected(self) -> bool:
+        return self.rejected_reason is not None
 
 
 _CLEAN = NormalizationRecord(0, 0, 0, 0)
@@ -150,17 +158,24 @@ def validate_selector_output(raw: dict) -> None:
     if errors:
         first = errors[0]
         where = "/".join(str(p) for p in first.absolute_path) or "<root>"
+        tally = _Tally(raw=_raw_element_count(raw))
         raise SelectionContractError(
-            f"selector output failed schema at {where}: {first.message}"
+            f"selector output failed schema at {where}: {first.message}",
+            tally.record(rejected="schema"),
         )
 
 
-def _resolve(candidates: CandidateSet, label: str, *, kind: str) -> str:
+def _raw_element_count(raw: dict) -> int:
+    return sum(len(raw.get(k, []) or []) for k in ("selected_ids", "selections", "gaps", "bridges"))
+
+
+def _resolve(candidates: CandidateSet, label: str, *, kind: str, tally: "_Tally | None" = None) -> str:
     try:
         return candidates.resolve(label, kind=kind)
     except OutOfSetLabel as e:
+        record = (tally or _Tally()).record(rejected="out_of_set_label")
         raise SelectionContractError(
-            f"label {label!r} is not in the offered {kind} candidate set"
+            f"label {label!r} is not in the offered {kind} candidate set", record
         ) from e
 
 
@@ -247,7 +262,9 @@ def parse_selection(raw: dict, candidates: CandidateSet) -> ParsedSelection:
         _check_facet_closure(selection, tally)
         return selection
 
-    raise SelectionContractError(f"unknown contract {contract!r}", tally.record())
+    raise SelectionContractError(
+        f"unknown contract {contract!r}", tally.record(rejected="unknown_contract")
+    )
 
 
 @dataclass
@@ -272,10 +289,11 @@ class _Tally:
         self.duplicates += len(values) - len(seen)
         return seen
 
-    def record(self, *, unique: int = 0) -> NormalizationRecord:
+    def record(self, *, unique: int = 0, rejected: Optional[str] = None) -> NormalizationRecord:
         return NormalizationRecord(
             raw_count=self.raw, unique_count=unique,
             duplicate_count=self.duplicates, semantic_conflict_count=self.conflicts,
+            rejected_reason=rejected,
         )
 
 

@@ -193,6 +193,8 @@ def render(
     visible_views: Optional[dict[str, bytes]] = None,
     query_status: Optional[dict[str, str]] = None,
     context_text_for: Optional[ContextTextFn] = None,
+    resolved_context_for: Optional[Callable[[dict], tuple[str, ...]]] = None,
+    resolved_headings_for: Optional[Callable[[dict], tuple[str, ...]]] = None,
 ) -> RenderResult:
     """Render aggregated evidence to a deterministic string with its token count.
 
@@ -237,12 +239,15 @@ def render(
                     bits.append("facets: " + ",".join(item.facet_ids))
             # Breadcrumb and context both come from addressed, re-hashed ranges -- never from
             # free strings, which would be an unbound channel into the prompt.
-            headings = [context_text_for(r) for r in span.get("heading_refs") or []]
+            headings = (list(resolved_headings_for(span)) if resolved_headings_for
+                        else [context_text_for(r) for r in span.get("heading_refs") or []])
             if headings:
                 bits.append("under: " + " > ".join(headings))
             lines.append(" ".join(bits))
-            for ref in span.get("context_refs") or []:
-                lines.append(f"  ctx| {context_text_for(ref)}")
+            contexts = (list(resolved_context_for(span)) if resolved_context_for
+                        else [context_text_for(r) for r in span.get("context_refs") or []])
+            for ctx in contexts:
+                lines.append(f"  ctx| {ctx}")
             lines.append(source_text_for(span))
         lines.append("")
 
