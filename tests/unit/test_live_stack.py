@@ -170,6 +170,9 @@ def test_the_hf_revision_reads_the_commit_not_the_blob_etag(tmp_path):
 
 def test_the_attention_backend_comes_from_the_engines_own_log(tmp_path):
     log = tmp_path / "vllm.log"
-    log.write_text("INFO ...\nINFO 07-24 Using Flash Attention backend.\nINFO ready\n")
-    assert "Flash Attention" in attention_backend_from_log(log)
+    log.write_text("(EngineCore pid=42) INFO 07-24 19:54 [cuda.py:480] Using FLASH_ATTN "
+                   "attention backend out of potential backends: [...]\nINFO ready\n")
+    # Normalized to the backend NAME, not the raw line: the line carries a pid and a timestamp
+    # that change every restart, and a frozen field that moved every restart could never match.
+    assert attention_backend_from_log(log) == "FLASH_ATTN"
     assert attention_backend_from_log(tmp_path / "missing.log") == ""

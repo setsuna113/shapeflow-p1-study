@@ -240,15 +240,28 @@ def attention_backend_from_log(log_path: Path) -> str:
     based on the hardware and the build, and which one it chose is part of what makes two runs
     comparable. An unreadable log yields an empty string, and the freeze then refuses rather
     than recording a plausible guess.
+
+    Returns the normalized backend *name* (``FLASH_ATTN``, ``FLASHINFER``, ...), not the raw log
+    line: the line carries a pid and a timestamp that change on every restart, and a manifest
+    field that moved every restart could never match.
     """
+    import re
+
     try:
         text = Path(log_path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+    named = re.compile(r"Using\s+([A-Z][A-Z0-9_]+)\s+attention backend", re.IGNORECASE)
     for line in text.splitlines():
-        for needle in _BACKEND_PATTERNS:
-            if needle.lower() in line.lower():
-                return line.strip()[-200:]
+        match = named.search(line)
+        if match:
+            return match.group(1).upper()
+    # Fall back to a recognised token if the exact phrasing differs across vLLM versions.
+    tokens = ("FLASH_ATTN", "FLASHINFER", "XFORMERS", "FLASHMLA", "TRITON_ATTN", "TORCH_SDPA")
+    for line in text.splitlines():
+        for token in tokens:
+            if token.lower() in line.lower():
+                return token
     return ""
 
 

@@ -99,18 +99,27 @@ def test_identity_asserts_the_role_instead_of_always_passing():
     assert check_identity("no-such-role").status == FAIL
 
 
-def test_stack_manifest_is_required_and_never_self_frozen():
+def test_stack_manifest_is_required_and_never_self_frozen(tmp_path):
     """Doctor compares against a stewarded manifest; it must not create one.
 
     A doctor that froze what it observed at launch would launder an already-drifted engine,
-    driver or model into a legitimate baseline.
+    driver or model into a legitimate baseline. Run against a fake repo with NO manifest: the
+    real repo now carries a committed host freeze, so the missing-manifest path is only reachable
+    on a clean tree.
     """
+    import shutil
+
     from shapeflow_p1.doctor import check_stack_manifest
 
-    res = check_stack_manifest(REPO, REPO / "configs" / "stack.yaml")
+    fake_repo = tmp_path / "repo"
+    (fake_repo / "protocol").mkdir(parents=True)
+    (fake_repo / "configs").mkdir()
+    shutil.copy(REPO / "configs" / "stack.yaml", fake_repo / "configs" / "stack.yaml")
+
+    res = check_stack_manifest(fake_repo, fake_repo / "configs" / "stack.yaml")
     assert res.status == FAIL
     assert "freeze-stack" in res.detail
-    assert not (REPO / "protocol" / "stack_manifest.json").exists(), (
+    assert not (fake_repo / "protocol" / "stack_manifest.json").exists(), (
         "checking the manifest must not have created it"
     )
 
