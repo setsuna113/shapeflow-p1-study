@@ -12,4 +12,11 @@ uv pip install --python .venv/bin/python -q \
   pytest pytest-asyncio hypothesis jsonschema pydantic PyYAML orjson httpx tenacity zstandard \
   numpy scipy typer
 
+# Install the package itself (no deps -- the line above pins what dev actually needs, and the
+# real resolution is uv.lock on the run host). Without this, `pytest` only works when the caller
+# remembers PYTHONPATH=src, which hides genuine import breakage from every local gate.
+uv pip install --python .venv/bin/python -q -e . --no-deps
+
 echo "dev venv ready: $(.venv/bin/python --version)"
+.venv/bin/python -c "import shapeflow_p1, pathlib; \
+print('shapeflow_p1 importable from', pathlib.Path(shapeflow_p1.__file__).parent)"
