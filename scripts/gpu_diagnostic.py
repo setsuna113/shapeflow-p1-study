@@ -129,7 +129,7 @@ async def main() -> int:
     # Enough react turns that the real model reliably issues a search (one turn is not
     # enough -- it often answers or completes directly), but a single researcher
     # iteration so a cell stays a few minutes rather than fifteen.
-    lean["odr"] = {**lean["odr"], "max_react_tool_calls": 3, "max_researcher_iterations": 1,
+    lean["odr"] = {**lean["odr"], "max_react_tool_calls": 5, "max_researcher_iterations": 1,
                    "max_concurrent_research_units": 1}
     settings.configs["week1"] = lean
     settings.ensure_paths("runner_root", "runs", "object_store")
@@ -169,8 +169,7 @@ async def main() -> int:
     # A targeted set: P0, one page-P1 arm, one close-P1 arm. Enough to prove the P1 path fires
     # on the real GPU and that the real model produces valid selector output; the full six-arm
     # canary is what the formative screen runs once a real world exists.
-    arms = [ArmSpec("P0", "P0", "P0"), ArmSpec("H_ID", "H02", "P0"),
-            ArmSpec("C_VISIBLE", "P0", "C01")]
+    arms = [ArmSpec("P0", "P0", "P0"), ArmSpec("H_ID", "H02", "P0")]
     from shapeflow_p1.campaign.runner import questions_for
 
     manifest = runner.build_schedule(task_ids=task_ids, arms=arms, split="FORMATIVE_SCREEN")
