@@ -137,11 +137,28 @@ render() {
       -e "s|@PROTOCOL_SHA@|${SHAPEFLOW_PROTOCOL_SHA:-UNSET}|g" \
       "$1"
 }
+SUPERVISOR="systemd"
+if ! systemctl is-system-running >/dev/null 2>&1 && ! pidof systemd >/dev/null 2>&1; then
+  # This host is a container: systemd is installed but is not PID 1, so `systemctl` cannot
+  # operate. Plan section 17.2 allows an alternative supervisor only if it passes the same
+  # fault test as the unit, which scripts/sfsupervise.sh does and
+  # tests/integration/test_supervisor_faults.py proves. The units are still rendered, to
+  # /etc/systemd/system, so the intended configuration is on the host verbatim and a future
+  # systemd host needs no re-derivation.
+  SUPERVISOR="sfsupervise"
+fi
+mkdir -p /etc/systemd/system
 for unit in shapeflow-api-provider shapeflow-vllm-causal shapeflow-p1-week1; do
   render "$REPO/systemd/$unit.service.template" > "/etc/systemd/system/$unit.service"
   chmod 0644 "/etc/systemd/system/$unit.service"
 done
-systemctl daemon-reload
+if [ "$SUPERVISOR" = "systemd" ]; then
+  systemctl daemon-reload
+else
+  echo "systemd is not PID 1 on this host; supervision falls back to scripts/sfsupervise.sh"
+  echo "(units rendered to /etc/systemd/system for the record, not started)"
+fi
+install -m 0755 "$REPO/scripts/sfsupervise.sh" /usr/local/bin/sfsupervise
 
 # --- prove the boundary rather than asserting it -----------------------------------------------------
 say "proving credential isolation"
@@ -167,4 +184,5 @@ echo "host installed."
 echo "  credentials  : $CRED_DIR (sfprovider only, proved)"
 echo "  role tokens  : $TOKEN_DIR (one per role, proved)"
 echo "  data root    : $DATA_ROOT (per-identity ownership)"
-echo "  units        : shapeflow-api-provider, shapeflow-vllm-causal, shapeflow-p1-week1"
+echo "  units        : rendered to /etc/systemd/system"
+echo "  supervisor   : $SUPERVISOR"
