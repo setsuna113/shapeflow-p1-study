@@ -170,9 +170,16 @@ def test_the_generation_cap_is_a_completion_limit_not_a_schema_bound(settings):
 
 def test_the_judge_model_comes_from_the_environment(settings, monkeypatch):
     monkeypatch.delenv("DEEPSEEK_JUDGE_MODEL", raising=False)
-    assert settings.judge_model() == "deepseek-chat"
-    monkeypatch.setenv("DEEPSEEK_JUDGE_MODEL", "deepseek-chat-v9")
-    assert settings.judge_model() == "deepseek-chat-v9"
+    assert settings.judge_model() == "deepseek-v4-flash"
+    monkeypatch.setenv("DEEPSEEK_JUDGE_MODEL", "deepseek-v4-pro")
+    assert settings.judge_model() == "deepseek-v4-pro"
+
+
+def test_a_retired_model_is_refused_rather_than_failing_at_the_first_call(settings, monkeypatch):
+    """deepseek-chat no longer exists; the API answers 400. Better to refuse at config load."""
+    monkeypatch.setenv("DEEPSEEK_JUDGE_MODEL", "deepseek-chat")
+    with pytest.raises(ConfigError, match="forbidden"):
+        settings.judge_model()
 
 
 def test_a_model_that_cannot_honour_json_mode_is_refused(settings, monkeypatch):
@@ -188,16 +195,19 @@ def test_a_missing_judgment_is_never_imputed(settings):
     assert policy["drop_sample"] is False
 
 
-def test_the_pricing_snapshot_records_its_source_and_date(settings):
+def test_the_pricing_snapshot_records_its_source_and_whether_it_is_verified(settings):
+    """An unverified price must say so, and must over-count rather than under-count."""
     pricing = settings.get("judge", "pricing")
     assert pricing["source"].startswith("https://")
     assert pricing["retrieved_utc"] == "2026-07-24"
+    assert pricing["verified"] is False
+    assert "upper_bound" in pricing["basis"]
 
 
 def test_the_provider_config_is_built_from_the_campaign_config(settings):
     config = settings.provider_config()
     assert config.bind_host == "127.0.0.1"
-    assert config.deepseek_usd_per_1m_input == 0.27
+    assert config.deepseek_usd_per_1m_input == 2.00
     assert config.model_aliases["qwen-selector-page"].value == "PAGE_P1_SELECTOR_LOCAL"
 
 
