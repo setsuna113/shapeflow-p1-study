@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import enum
 
-__all__ = ["OpClass", "TREATMENT_OPS", "JUDGE_OPS", "is_treatment_work"]
+__all__ = ["OpClass", "TREATMENT_OPS", "JUDGE_OPS", "REMOTE_ALLOWED_OPS", "is_treatment_work"]
 
 
 class OpClass(enum.Enum):
@@ -29,6 +29,11 @@ class OpClass(enum.Enum):
     JUDGE_ATOMIZE = "JUDGE_ATOMIZE"
     JUDGE_TRUTH = "JUDGE_TRUTH"
     JUDGE_REPORT = "JUDGE_REPORT"
+    JUDGE_EXPLAIN = "JUDGE_EXPLAIN"
+    # steward (DeepSeek), before any treatment output exists -- corpus authoring and the
+    # arm-independent AcquisitionSpec decomposition the plan permits in §3.4. Listed apart from
+    # the judge ops because it is spent before the experiment starts, not while scoring it.
+    TASK_AUTHOR = "TASK_AUTHOR"
 
 
 #: Op classes that count as treatment GPU work.
@@ -44,7 +49,13 @@ TREATMENT_OPS = frozenset({
 })
 
 #: Judge op classes. Reported separately as API cost; never added to treatment GPU work.
-JUDGE_OPS = frozenset({OpClass.JUDGE_ATOMIZE, OpClass.JUDGE_TRUTH, OpClass.JUDGE_REPORT})
+JUDGE_OPS = frozenset({OpClass.JUDGE_ATOMIZE, OpClass.JUDGE_TRUTH, OpClass.JUDGE_REPORT,
+                       OpClass.JUDGE_EXPLAIN})
+
+#: Everything the remote (DeepSeek) provider is permitted to serve. The complement of this set
+#: within OpClass is the treatment path, and a remote model must never appear there: a second
+#: model inside the system under measurement would make every arm's result partly its output.
+REMOTE_ALLOWED_OPS = JUDGE_OPS | {OpClass.TASK_AUTHOR}
 
 
 def is_treatment_work(op: OpClass) -> bool:
