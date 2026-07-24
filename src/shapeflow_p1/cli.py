@@ -203,6 +203,72 @@ def report(
     typer.echo(render_markdown(decision))
 
 
+@app.command("freeze-corpus-attempt")
+def freeze_corpus_attempt(
+    config: Path = _CFG,
+    attempt_id: str = typer.Option(..., "--attempt-id", help="e.g. attempt-1"),
+    corpus_version: str = typer.Option(..., "--corpus-version"),
+    state: str = typer.Option("FAILED_AUTHORING_ATTEMPT", "--state"),
+    reason: str = typer.Option("", "--reason"),
+    note: str = typer.Option("", "--note"),
+) -> None:
+    """Close out one round of corpus work without deleting or refunding anything.
+
+    Everything this round spent stays spent and stays on the books. The point is not to
+    tidy up -- it is to make the failure a recorded fact, so a later round is visibly a new
+    attempt rather than a silent continuation of a corpus nobody can reconstruct. The
+    ledger is copied through the backup API first, so the frozen state of the round
+    survives whatever happens to the live database next.
+    """
+    from .experiment.ledger import Ledger
+    from .protocol import protocol_sha
+
+    _require_role("provider")
+    settings = _settings()
+    ledger_path = settings.path("provider_ledger")
+    if not ledger_path.exists():
+        _fail(f"no provider ledger at {ledger_path}")
+
+    ledger = Ledger(str(ledger_path))
+    try:
+        snapshot_dir = ledger_path.parent / "ledger_snapshots"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        snapshot = snapshot_dir / f"{attempt_id}-{_now().replace(':', '')}.sqlite"
+        ledger.backup_to(str(snapshot))
+        os.chmod(snapshot, 0o400)
+
+        ledger.record_corpus_attempt(
+            attempt_id=attempt_id, corpus_version=corpus_version, state=state,
+            reason=reason, protocol_sha=protocol_sha(_REPO), note=note,
+        )
+        spend = {
+            r["resource"]: {"cap": r["cap"], "reserved": r["reserved_total"],
+                            "settled": r["settled_total"]}
+            for r in ledger.raw_connection.execute(
+                "SELECT resource, cap, reserved_total, settled_total FROM budget_accounts")
+        }
+        calls = [
+            dict(r) for r in ledger.raw_connection.execute(
+                "SELECT provider, op_class, state, COUNT(*) n FROM external_call_attempts"
+                " a JOIN external_calls c USING(call_id) GROUP BY 1,2,3 ORDER BY 1,2,3")
+        ]
+    finally:
+        ledger.close()
+
+    body = {
+        "attempt_id": attempt_id, "corpus_version": corpus_version, "state": state,
+        "reason": reason, "note": note, "frozen_at_utc": _now(),
+        "ledger_snapshot": str(snapshot), "spend": spend, "attempts_by_outcome": calls,
+    }
+    out = _REPO / "reports" / f"{state}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    typer.echo(f"{state} recorded as {attempt_id}; ledger snapshot at {snapshot}")
+    for resource, totals in sorted(spend.items()):
+        if totals["settled"]:
+            typer.echo(f"  kept on the books: {resource} = {totals['settled']}")
+
+
 # --- steward -----------------------------------------------------------------------------
 
 

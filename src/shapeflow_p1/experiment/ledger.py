@@ -816,6 +816,20 @@ class Ledger:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def backup_to(self, path: str) -> None:
+        """Take a consistent copy through SQLite's backup API.
+
+        Never copy the file: a WAL database on disk is the main file plus a write-ahead log,
+        and a plain ``cp`` of the three parts at three different moments produces an
+        archive that can be silently missing the most recent transactions (§16.3).
+        """
+        with self._lock:
+            target = sqlite3.connect(path)
+            try:
+                self._conn.backup(target)
+            finally:
+                target.close()
+
     def integrity_check(self) -> bool:
         with self._lock:
             row = self._conn.execute("PRAGMA integrity_check;").fetchone()

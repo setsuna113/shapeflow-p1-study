@@ -106,7 +106,45 @@ def run_acceptance(settings: Settings, *, repo: Path) -> dict:
     gates.append(Gate("claim_scope", PASS if scope_ok else FAIL,
                       f"{settings.corpus_tier} / {settings.claim_scope}"))
 
+    # 8. No report claims something no artifact supports.
+    gates.append(check_report_claims(repo))
+
     return {"ok": _ok(gates), "gates": [g.as_dict() for g in gates]}
+
+
+#: Phrases a report may not contain, and what is wrong with each. These are not style
+#: preferences: every one of them was written about this study while the artifact that
+#: would justify it did not exist. A verdict that survives an adversarial reader cannot
+#: contain a sentence whose evidence nobody can produce.
+UNSUPPORTED_CLAIMS: dict[str, str] = {
+    "Block C/D 完成": "no block is complete while the component screen re-runs the full graph",
+    "Block C/D complete": "no block is complete while the component screen re-runs the full graph",
+    "campaign runner 完成": "the campaign runner cannot start: PhaseStore rejects its first phase",
+    "campaign runner complete": "the campaign runner cannot start: PhaseStore rejects its first phase",
+    "leased GPU": "the GPU is borrowed on a shared host; nothing is leased",
+    "662 tests all green": "cite the count the suite actually collects, from a run you did",
+}
+
+
+def check_report_claims(repo: Path) -> Gate:
+    """Refuse to launch while a report asserts something this tree cannot back up."""
+    reports = repo / "reports"
+    if not reports.exists():
+        return Gate("report_claims", PASS, "no reports yet")
+    found: list[str] = []
+    for path in sorted(reports.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in (".md", ".json", ".txt"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for phrase in UNSUPPORTED_CLAIMS:
+            if phrase in text:
+                found.append(f"{path.relative_to(repo)}: {phrase!r}")
+    if found:
+        return Gate("report_claims", FAIL, "; ".join(found[:6]))
+    return Gate("report_claims", PASS, "no unsupported claims in reports/")
 
 
 async def _unusable_model_call(**_kw):  # pragma: no cover - never invoked

@@ -86,3 +86,39 @@ def test_stop_reasons_listed():
     stop = evaluate_auto_stop(budget_exhausted=True, freeze_hash_changed=True)
     assert stop.stop
     assert len(stop.reasons) == 2
+
+
+# --- reports may not claim what no artifact supports ----------------------------------------
+
+
+def test_a_report_that_claims_a_finished_block_fails_the_gate(tmp_path):
+    from shapeflow_p1.ops.acceptance import check_report_claims
+
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "WEEK1_P1_FINAL.md").write_text(
+        "# Week 1\n\nBlock C/D 完成; ran on a leased GPU with 662 tests all green.\n",
+        encoding="utf-8",
+    )
+    gate = check_report_claims(tmp_path)
+    assert gate.status == "FAIL"
+    assert "Block C/D 完成" in gate.detail
+    assert "leased GPU" in gate.detail
+
+
+def test_a_report_of_what_actually_happened_passes(tmp_path):
+    from shapeflow_p1.ops.acceptance import check_report_claims
+
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "FAILED_AUTHORING_ATTEMPT.md").write_text(
+        "Authoring stopped: the search credential was rejected 262 times.\n"
+        "Spend kept on the books: $1.339 DeepSeek, 990 GPU-seconds.\n",
+        encoding="utf-8",
+    )
+    assert check_report_claims(tmp_path).status == "PASS"
+
+
+def test_the_gate_is_vacuous_only_when_there_are_no_reports(tmp_path):
+    from shapeflow_p1.ops.acceptance import check_report_claims
+
+    gate = check_report_claims(tmp_path)
+    assert gate.status == "PASS" and "no reports yet" in gate.detail
