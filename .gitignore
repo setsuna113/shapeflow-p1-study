@@ -44,3 +44,8 @@ htmlcov/
 Thumbs.db
 .idea/
 .vscode/
+
+# Materialized vendor trees: reproduced by scripts/materialize_vendor.sh from the pinned
+# submodule plus patches/odr_p1_hooks.patch, and pinned by patches/patched_tree.sha256.
+# Committing them would create a second copy of vendor that could drift from the first.
+.build/

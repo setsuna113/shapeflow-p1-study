@@ -1,0 +1,135 @@
+--- a/src/open_deep_research/utils.py
++++ b/src/open_deep_research/utils.py
+@@ -75,9 +75,36 @@
+             if url not in unique_results:
+                 unique_results[url] = {**result, "query": response['query']}
+     
+-    # Step 3: Set up the summarization model with configuration
++    # --- ShapeFlow P1 hook: defer, do not transform ------------------------------------
++    # Sibling tool calls only meet at asyncio.gather in researcher_tools, so this function
++    # cannot see the assistant turn's whole batch. When a strategy is bound it therefore
++    # returns the acquired-but-untransformed results and the closure that would have produced
++    # vendor's string; the batch is reduced and published once, in researcher_tools.
++    # With nothing bound, execution falls straight through to vendor's code below, unchanged.
++    from shapeflow_p1.odr import vendor_hooks as _sf
++
+     configurable = Configuration.from_runnable_config(config)
+-    
++
++    async def _sf_vendor_summarize_and_format():
++        return await _vendor_steps_3_to_7(unique_results, configurable, config)
++
++    if _sf.page_hook_active():
++        return _sf.defer_page_batch(
++            # The id is supplied at reduce time: observations and tool_calls are zipped there
++            # in vendor's own order, so position already identifies the call and this function
++            # does not need to reach into config for it.
++            tool_call_id="",
++            tool_name="tavily_search",
++            unique_results=unique_results,
++            render_vendor=_sf_vendor_summarize_and_format,
++            max_content_length=configurable.max_content_length,
++        )
++    return await _sf_vendor_summarize_and_format()
++
++
++async def _vendor_steps_3_to_7(unique_results, configurable, config):
++    """Vendor's original steps 3-7, verbatim, lifted into a function so both the hooks-off
++    path and the whole-batch P0 fallback run exactly the same code."""
+     # Character limit to stay within model token limits (configurable)
+     max_char_to_include = configurable.max_content_length
+     
+--- a/src/open_deep_research/deep_researcher.py
++++ b/src/open_deep_research/deep_researcher.py
+@@ -477,7 +477,22 @@
+         for tool_call in tool_calls
+     ]
+     observations = await asyncio.gather(*tool_execution_tasks)
+-    
++
++    # --- ShapeFlow P1 hook: the whole assistant turn, reduced once ----------------------
++    # This is the only point where the complete sibling batch exists and nothing has been
++    # published yet. Everything below stays vendor's code, so the single Command that follows
++    # publishes the entire batch atomically -- there is no path that emits one sibling early.
++    # With nothing bound, reduce_published_batch returns `observations` unchanged.
++    from shapeflow_p1.odr import vendor_hooks as _sf
++
++    observations = await _sf.reduce_published_batch(
++        assistant_message=most_recent_message,
++        tool_calls=tool_calls,
++        observations=observations,
++        researcher_state_hash=_sf_state_hash(researcher_messages),
++        assistant_turn_index=state.get("tool_call_iterations", 0),
++    )
++
+     # Create tool messages from execution results
+     tool_outputs = [
+         ToolMessage(
+@@ -534,6 +549,23 @@
+     # Step 2: Prepare messages for compression
+     researcher_messages = state.get("researcher_messages", [])
+     
++    # --- ShapeFlow P1 hook: RESEARCHER_CLOSE, before the in-place append ----------------
++    # compress_research MUTATES the list it was handed. A clone taken after the append would
++    # carry the compression instruction and, through the shared list, poison every later fork
++    # from this same state -- so the boundary is captured here, first.
++    #
++    # This hook is reached independently of the page path: a researcher can arrive with no
++    # published batch at all (ResearchComplete on the first turn, or a no-tool exit).
++    from shapeflow_p1.odr import vendor_hooks as _sf
++
++    if _sf.close_hook_active():
++        _sf_handoff = await _sf.run_close_strategy(
++            researcher_messages=list(researcher_messages),
++            close_reason=_sf_close_reason(state, configurable),
++        )
++        if _sf_handoff is not None:
++            return _sf_handoff
++
+     # Add instruction to switch from research mode to compression mode
+     researcher_messages.append(HumanMessage(content=compress_research_simple_human_message))
+     
+@@ -716,4 +748,41 @@
+ deep_researcher_builder.add_edge("final_report_generation", END)                   # Final exit point
+ 
+ # Compile the complete deep researcher workflow
+-deep_researcher = deep_researcher_builder.compile()
+\ No newline at end of file
++deep_researcher = deep_researcher_builder.compile()
++
++# --- ShapeFlow P1 helpers ---------------------------------------------------------------
++
++
++def _sf_state_hash(researcher_messages):
++    """Digest of the researcher state the batch is being published from.
++
++    Part of the checkpoint identity: two forks that started from different conversation state
++    are not comparable, however similar their batches look.
++    """
++    from shapeflow_p1.hashing import sha256_hex
++    from shapeflow_p1.odr.adapter import freeze_messages
++    from shapeflow_p1.canonical import canonical_json
++
++    frozen = freeze_messages(researcher_messages)
++    return sha256_hex(canonical_json([m.content_dict() for m in frozen]))
++
++
++def _sf_close_reason(state, configurable):
++    """Classify the close on the same signals vendor branches on.
++
++    All three exits enter the same treatment policy; the label exists so the analysis can tell
++    them apart afterwards, not so any of them can be treated differently.
++    """
++    from shapeflow_p1.odr.close_reason import classify_close
++
++    messages = state.get("researcher_messages", [])
++    last = messages[-1] if messages else None
++    tool_calls = list(getattr(last, "tool_calls", None) or [])
++    reason = classify_close(
++        has_tool_calls=bool(tool_calls),
++        has_native_search=False,
++        research_complete_called=any(tc.get("name") == "ResearchComplete" for tc in tool_calls),
++        tool_call_iterations=state.get("tool_call_iterations", 0),
++        max_react_tool_calls=configurable.max_react_tool_calls,
++    )
++    return reason.value if reason is not None else "NO_TOOL_CALL"
