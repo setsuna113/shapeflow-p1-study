@@ -48,6 +48,14 @@ PrivateTmp=true
 Environment=PYTHONHASHSEED=0 TZ=UTC CUDA_VISIBLE_DEVICES=@GPU_UUID@
 # Nothing is fetched at serve time: the frozen weights are the ones that load.
 Environment=HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+# The pinned venv's bin must be on PATH or flashinfer's JIT cannot find ninja and the
+# engine dies initialising the KV cache. FLASH_ATTN pins the prebuilt kernel: the
+# default selection JIT-compiles FlashInfer against the system CUDA, which is 11 here
+# while torch is built for 12.9. Which kernel served the run is part of the frozen
+# stack, and freeze-stack records it from this engine's own log.
+Environment=PATH=@VLLM_VENV@/bin:/usr/local/bin:/usr/bin:/bin
+Environment=VLLM_ATTENTION_BACKEND=FLASH_ATTN VLLM_USE_FLASHINFER_SAMPLER=0
+Environment=HOME=/tmp
 # Binds 127.0.0.1 only; no external exposure.
 
 StandardOutput=append:@REPO@/logs/vllm-causal.log
