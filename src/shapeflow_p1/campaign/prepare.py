@@ -168,11 +168,17 @@ async def prepare_corpus(
     task_config = settings.configs["task_source"]
     splits = task_config["splits"]
     total = total or sum(splits.values())
-    clusters = clusters or int(task_config["audit"]["require_distinct_topic_clusters"])
-    # Whole clusters move to one split, so the cluster size has to divide each split evenly or
-    # the assignment cannot honour the configured sizes.
-    while total % clusters and clusters > 1:
-        clusters -= 1
+    minimum = clusters or int(task_config["audit"]["require_distinct_topic_clusters"])
+    # Whole clusters move to one split, so the cluster count has to divide the corpus evenly --
+    # and it must still meet the configured minimum. Searching *downwards* from the minimum
+    # satisfies the first constraint by breaking the second, which is how the first attempt
+    # produced eight clusters against a declared floor of twelve and the audit refused to seal.
+    clusters = next((n for n in range(minimum, total + 1) if total % n == 0), 0)
+    if not clusters:
+        raise ValueError(
+            f"no cluster count divides {total} tasks evenly at or above the configured minimum "
+            f"of {minimum}; change the split sizes rather than the floor"
+        )
 
     specs, fingerprint, responses = await author_tasks(
         judge,
@@ -183,6 +189,8 @@ async def prepare_corpus(
         seed=int(task_config["authoring"]["seed"]),
         authored_at_utc=authored_at_utc,
         target_model=target_model,
+        min_question_chars=int(task_config["audit"]["min_question_chars"]),
+        max_question_chars=int(task_config["audit"]["max_question_chars"]),
     )
 
     audit = audit_tasks(specs, config=task_config)

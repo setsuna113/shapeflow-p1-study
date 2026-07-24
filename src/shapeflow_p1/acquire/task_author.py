@@ -292,6 +292,9 @@ async def author_tasks(
     seed: int,
     authored_at_utc: str,
     target_model: str,
+    min_question_chars: int = 60,
+    max_question_chars: int = 600,
+    attempts_per_cluster: int = 3,
 ) -> tuple[list[TaskSpec], AuthoringFingerprint, list[dict]]:
     """Author the whole corpus. Returns (tasks, fingerprint, raw responses).
 
@@ -313,14 +316,39 @@ async def author_tasks(
             cluster_scope=cluster["scope"],
             profiles="\n".join(p.describe() for p in wanted),
         )
-        try:
-            response = await judge.judge(
-                AUTHOR_SYSTEM_PROMPT, prompt, validate=_checker(_TASK_SCHEMA))
-        except JudgeUnavailable as e:
+        # A bounded retry on a *format* rule, not on anything about the content: a question
+        # two characters under the declared floor is a malformed draft, and re-requesting it is
+        # not corpus selection. Retrying on anything outcome-related would be.
+        response = None
+        correction = ""
+        for attempt in range(attempts_per_cluster):
+            try:
+                response = await judge.judge(
+                    AUTHOR_SYSTEM_PROMPT, prompt + correction,
+                    validate=_checker(_TASK_SCHEMA))
+            except JudgeUnavailable as e:
+                raise AuthoringError(
+                    f"cluster {cluster['cluster_id']!r} could not be authored: {e}. A partially "
+                    "authored corpus is not a corpus; nothing is sealed."
+                ) from e
+            short = [
+                t["profile_id"] for t in response.data["tasks"]
+                if not (min_question_chars <= len(" ".join(str(t["question"]).split()))
+                        <= max_question_chars)
+            ]
+            if not short:
+                break
+            correction = (
+                f"\n\nATTEMPT {attempt + 2}: these profiles had a question outside the "
+                f"{min_question_chars}-{max_question_chars} character range and must be "
+                f"rewritten longer or shorter: {', '.join(short)}\n"
+            )
+        else:
             raise AuthoringError(
-                f"cluster {cluster['cluster_id']!r} could not be authored: {e}. A partially "
-                "authored corpus is not a corpus; nothing is sealed."
-            ) from e
+                f"cluster {cluster['cluster_id']!r} still has a question outside "
+                f"[{min_question_chars}, {max_question_chars}] after "
+                f"{attempts_per_cluster} attempts"
+            )
         returned_model = response.returned_model or returned_model
         system_fingerprint = response.system_fingerprint or system_fingerprint
         raw_responses.append({
