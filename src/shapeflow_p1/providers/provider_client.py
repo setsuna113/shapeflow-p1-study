@@ -77,6 +77,22 @@ class ProviderClient:
 
     # --- transports for the existing clients -------------------------------------------
 
+    def exa_transport(self, *, task_id: str = "", call_key: str = ""):
+        """An Exa transport that goes through the provider and never holds a credential.
+
+        The client sends no key at all: Exa authenticates with a header, which the provider
+        adds. There is nothing here for a caller to leak.
+        """
+
+        async def transport(_url: str, payload: dict) -> tuple[int, dict]:
+            body = dict(payload)
+            if task_id:
+                body["_task_id"] = task_id
+            body["_call_key"] = call_key or str(payload.get("query", ""))
+            return await self._post("/v1/exa/search", body)
+
+        return transport
+
     def tavily_transport(self, *, task_id: str = "", call_key: str = ""):
         """A transport for :class:`TavilyCaptureClient`: ``(url, body) -> (status, payload)``.
 

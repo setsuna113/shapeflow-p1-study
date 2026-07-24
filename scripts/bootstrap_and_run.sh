@@ -174,17 +174,22 @@ step "P0 parity (mock model, no GPU, no credits)"
 # Everything past this line can consume a paid resource.
 SPEND_POSSIBLE=1
 
-step "prepare + acquire (steward) then GPU smoke (runner)"
+step "prepare + acquire (steward)"
 as sfsteward "$SF" prepare --config "$CONFIG" || blocked "PREPARE" "prepare failed"
 as sfsteward "$SF" acquire --config "$CONFIG" || blocked "ACQUIRE" "acquisition failed"
-as sfrunner "$SF" smoke --config "$CONFIG" || blocked "GPU_SMOKE" "the GPU canary failed"
 
+# Preflight is the last check BEFORE treatment, so it runs before the GPU canary rather
+# than after it. It used to sit after prepare, acquire and smoke, by which point the
+# credits and the GPU hours it was meant to protect were already spent.
 step "preflight against the approved protocol SHA"
 APPROVED_SHA="$("$REPO/.venv/bin/python" -c \
   "import sys; sys.path.insert(0,'src'); from pathlib import Path; \
 from shapeflow_p1.protocol import protocol_sha; print(protocol_sha(Path('.')))")"
 as sfrunner "$SF" preflight --config "$CONFIG" --approved-protocol-sha "$APPROVED_SHA" \
   || blocked "PREFLIGHT" "campaign preflight failed under protocol $APPROVED_SHA"
+
+step "GPU smoke (runner)"
+as sfrunner "$SF" smoke --config "$CONFIG" || blocked "GPU_SMOKE" "the GPU canary failed"
 
 # ---------------------------------------------------------------------------------------
 cat > "$REPORTS/LAUNCH_GATE_PASSED.json" <<JSON

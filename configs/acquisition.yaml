@@ -1,22 +1,39 @@
-# Tavily acquisition parameters (plan §6.2). Explicit, never auto_parameters.
+# Exa acquisition parameters (plan §6.2). Explicit, never `type: auto`.
 #
 # The same query must address the same slice of the web on every acquisition, so every retrieval
-# parameter is pinned here and hashed into the query's snapshot id. `auto_parameters` would let
-# the provider choose them for us, which means two acquisitions of the same query could freeze
-# two different worlds and nothing downstream could tell.
+# parameter is pinned here and hashed into the query's snapshot id. `type: auto` would let the
+# provider choose a search strategy per query -- the same defect as Tavily's `auto_parameters`:
+# two acquisitions of one query could freeze two different worlds and nothing downstream could
+# tell. ExaParams refuses `auto` rather than trusting this file to be right.
+#
+# The provider changed from Tavily to Exa when the Tavily quota ran out. `text` is the cleaned
+# page text and becomes PAGE_RAW_CONTENT (still not browser HTML, so the node keeps its name);
+# `highlights` are the query-relevant excerpts and become the short snippet. Exa returns no
+# relevance score, so occurrences record none rather than a fabricated one. The provider name
+# and the mapping version are inside every snapshot id, so an Exa world can never be confused
+# with the Tavily one taken for the same query text.
 version: v0.1
 
-tavily:
-  search_depth: advanced
-  include_raw_content: markdown
-  include_answer: false
-  include_usage: true
-  max_results_per_query: 8
+exa:
+  type: fast
+  num_results_per_query: 8
+  text_max_characters: 100000
+  include_html_tags: false
+  highlights: true
+  category: null
   timeout_seconds: 60
-  topic: general
+
+# The published price list, as data, so admission control and the report cite one source.
+# $7/1k requests including 10 results, $1/1k results beyond that.
+exa_pricing:
+  usd_per_request: 0.007
+  usd_per_extra_result: 0.001
+  results_included: 10
+  source: https://exa.ai/docs/changelog/pricing-update
+  retrieved_utc: "2026-07-24"
 
 # Per plan §6.2 every task's queries must cover these roles. The count is what bounds the
-# Tavily spend: 48 acquired tasks x at most 8 queries stays inside the 500-request cap with
+# search spend: 48 acquired tasks x at most 8 queries stays inside the request cap with
 # headroom for reserve substitutions, so the registry is never trimmed after the fact.
 queries_per_task:
   original_question: 1

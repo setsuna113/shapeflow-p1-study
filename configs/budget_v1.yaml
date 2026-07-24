@@ -5,6 +5,11 @@
 version: v0.1
 
 api_budget:
+  # Exa replaced Tavily when the Tavily quota ran out. The tavily_* caps stay so the 262
+  # rejected requests this round already spent remain on the books under the resource that
+  # recorded them; nothing new is charged there.
+  exa_max_requests: 500
+  exa_max_usd: 5.00
   tavily_max_requests: 500
   tavily_max_credits: 1000
   deepseek_max_requests: 2000

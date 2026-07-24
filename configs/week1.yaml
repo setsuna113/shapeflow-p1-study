@@ -50,6 +50,7 @@ provider:
   # back up unable to talk to each other. Each file is owned by its role and
   # group-readable by the provider, so a role can read only its own capability.
   token_dir: /etc/shapeflow-tokens
+  exa_endpoint: https://api.exa.ai/search
   tavily_endpoint: https://api.tavily.com/search
   deepseek_base_url: https://api.deepseek.com
   vllm_base_url: http://127.0.0.1:8000/v1
@@ -60,6 +61,9 @@ provider:
   inference_timeout_seconds: 900.0
   # Worst-case reservations. Admission control only means something if the reserved amount is an
   # upper bound on what the call can cost, so these are ceilings and not estimates.
+  # Derived in Settings from the pinned num_results and the Exa price list, and asserted
+  # to cover it. Declared here so the frozen config states the number that was reserved.
+  exa_usd_worst_case: 0.007
   tavily_credits_worst_case: 2.0
   deepseek_input_tokens_worst_case: 32000.0
   deepseek_output_tokens_worst_case: 8000.0
@@ -90,6 +94,10 @@ model_aliases:
 # Vendor knobs both arms share. P0 and P1 must start from the same bytes under the same
 # truncation, so max_content_length is protocol, not a tuning parameter.
 odr:
+  # The vendor's own tool name, not the acquisition provider. At run time nothing
+  # reaches a search vendor at all: FrozenTaskCorpusBackend answers from the frozen
+  # world in the shape vendor's tavily_search builds, which is what keeps the
+  # vendor-visible view reproducible.
   search_api: tavily
   max_react_tool_calls: 5
   max_content_length: 50000

@@ -11,8 +11,11 @@ Protocol of record: `SHAPEFLOW_P1_WEEK1_CODING_PLAN_v0.1_2026-07-24.md` (parent 
 ## 1. Naming
 
 - The page node is `WEBPAGE_P1` / `PAGE_RAW_CONTENT`. **Never** `HTML_P1` in code,
-  schemas, figures or verdicts. Tavily `raw_content` is cleaned markdown/text, not
-  browser HTML bytes. A real `DOM_HTML_P1` is a *secondary* study with its own fetch.
+  schemas, figures or verdicts. Acquisition moved from Tavily to Exa when the Tavily quota
+  ran out; Exa `text` is cleaned page text exactly as Tavily `raw_content` was, not browser
+  HTML bytes, so the node keeps its name. A real `DOM_HTML_P1` is a *secondary* study with
+  its own fetch. The provider name and the field-mapping version are inside every snapshot
+  id, so an Exa world can never be confused with the Tavily one for the same query.
 - The close node is `RESEARCHER_CLOSE`.
 - `C_VISIBLE` and `C_REGISTRY` are different treatments and may never be merged or
   reported under one label. `C_VISIBLE` is the compressor-only experiment.

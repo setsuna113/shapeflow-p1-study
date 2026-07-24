@@ -154,14 +154,22 @@ async def _unusable_model_call(**_kw):  # pragma: no cover - never invoked
 def run_preflight(settings: Settings, *, repo: Path,
                   approved_protocol_sha: Optional[str] = None) -> dict:
     """The last check before treatment: approval, corpus, world, and the runner's own view."""
-    from ..campaign.acquire import acquired_task_ids
+    from ..acquire.manifest import campaign_manifest
+    from ..campaign.acquire import task_world_is_complete
     from ..campaign.prepare import load_sealed_registry
     from ..protocol import ApprovalError, protocol_sha, verify_approval_file
 
     checks: list[Gate] = []
 
     live_sha = protocol_sha(repo)
-    if approved_protocol_sha and approved_protocol_sha != live_sha:
+    if not approved_protocol_sha:
+        # Absent used to pass. The one caller that omits the flag is a caller that never
+        # said which protocol it believes it is running, which is the disagreement this
+        # gate exists to catch.
+        checks.append(Gate("protocol_sha", FAIL,
+                           "no --approved-protocol-sha was named; the caller has not said "
+                           "which protocol it believes it is running"))
+    elif approved_protocol_sha != live_sha:
         checks.append(Gate("protocol_sha", FAIL,
                            f"approved {approved_protocol_sha[:12]} != live {live_sha[:12]}"))
     else:
@@ -181,13 +189,47 @@ def run_preflight(settings: Settings, *, repo: Path,
         checks.append(Gate("sealed_registry", FAIL, f"{type(e).__name__}: {e}"))
         registry = {"tasks": []}
 
-    frozen = acquired_task_ids(settings)
+    # Every world re-verified, not just counted by filename. A pool file exists for a task
+    # whose blobs are gone and whose manifest never verified; globbing the directory counted
+    # that as frozen.
     split = str(settings.get("week1", "screen", "split"))
     wanted = [t["task_id"] for t in registry.get("tasks", []) if t.get("split") == split]
-    missing = sorted(set(wanted) - set(frozen))
-    checks.append(Gate("frozen_world", PASS if wanted and not missing else FAIL,
-                       f"{len(frozen)} worlds frozen" if not missing
-                       else f"{len(missing)} {split} task(s) unacquired"))
+    broken = []
+    for task_id in wanted:
+        complete, _digest, reason = task_world_is_complete(settings, task_id)
+        if not complete:
+            broken.append(f"{task_id}: {reason}")
+    checks.append(Gate("frozen_world", PASS if wanted and not broken else FAIL,
+                       f"{len(wanted)} worlds frozen and verified" if wanted and not broken
+                       else "; ".join(broken[:5]) or "no tasks in this split"))
+
+    # The campaign manifest describes the whole acquisition, and nothing re-checked it.
+    campaign_path = settings.path("acquisition") / "campaign_acquisition.json"
+    if not campaign_path.exists():
+        checks.append(Gate("campaign_manifest", FAIL, "no campaign acquisition manifest"))
+    else:
+        try:
+            body = json.loads(campaign_path.read_text(encoding="utf-8"))
+            recorded = body.get("campaign_acquisition_sha256", "")
+            recomputed = campaign_manifest(
+                {k: v for k, v in (body.get("per_task") or {}).items()},
+                registry_sha256=body.get("registry_sha256", ""),
+                claim_scope=body.get("claim_scope", ""),
+                corpus_tier=body.get("corpus_tier", ""),
+            )["campaign_acquisition_sha256"] if body.get("per_task") else recorded
+            covered = set(body.get("per_task") or body.get("tasks") or {})
+            uncovered = sorted(set(wanted) - covered) if covered else []
+            checks.append(Gate(
+                "campaign_manifest",
+                PASS if recorded and recomputed == recorded and not uncovered else FAIL,
+                f"{len(covered)} tasks, {recorded[:12]}" if not uncovered
+                else f"{len(uncovered)} screen task(s) absent from the manifest"))
+        except (OSError, json.JSONDecodeError, KeyError) as e:
+            checks.append(Gate("campaign_manifest", FAIL, f"{type(e).__name__}: {e}"))
+
+    # Real source overlap, not the topic label the author invented. Two tasks sharing pages
+    # are one observation; across two splits they are a leak.
+    checks.append(_source_cluster_gate(settings, registry))
 
     # The runner's own view must carry the question and nothing else.
     runner_tasks = settings.path("frozen_corpus_for_runner") / "tasks"
@@ -201,12 +243,49 @@ def run_preflight(settings: Settings, *, repo: Path,
                        "question only" if not leaked
                        else f"{len(leaked)} task view(s) carry more than the question"))
 
+    # The evaluator's own view must exist, or truth has nothing to be built from.
+    evaluator_tasks = settings.path("evaluator_root") / "tasks"
+    published = sorted(evaluator_tasks.glob("*.json")) if evaluator_tasks.exists() else []
+    checks.append(Gate("evaluator_view", PASS if published else FAIL,
+                       f"{len(published)} task views published"
+                       if published else f"{evaluator_tasks} is empty"))
+
     # Neither the answer key nor the steward's audit graph may be reachable from here.
     ok, detail = tree_isolation(repo, settings, ("evaluator_root", "steward_root"))
     checks.append(Gate("tree_isolation", PASS if ok else FAIL, detail))
 
     return {"ok": _ok(checks), "checks": [c.as_dict() for c in checks],
             "protocol_sha": live_sha}
+
+
+def _source_cluster_gate(settings: Settings, registry: dict) -> Gate:
+    """No cluster of source-sharing tasks may straddle two splits."""
+    from ..acquire.source_clusters import (
+        build_source_clusters,
+        cross_split_overlap,
+        worlds_from_pools,
+    )
+    from ..campaign.acquire import runner_pool_path
+
+    splits = {t["task_id"]: t.get("split", "") for t in registry.get("tasks", [])}
+    pools: dict[str, dict] = {}
+    for task_id in splits:
+        path = runner_pool_path(settings, task_id)
+        if path.exists():
+            try:
+                pools[task_id] = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return Gate("source_clusters", FAIL, f"{path.name} is unreadable")
+    if not pools:
+        return Gate("source_clusters", FAIL, "no frozen pools to cluster")
+    leaks = cross_split_overlap(build_source_clusters(worlds_from_pools(pools, splits)))
+    if leaks:
+        detail = "; ".join(
+            f"{c.cluster_id} spans {sorted(c.splits)} ({len(c.task_ids)} tasks)"
+            for c in leaks[:4])
+        return Gate("source_clusters", FAIL, detail)
+    return Gate("source_clusters", PASS,
+                f"{len(pools)} worlds, no cluster spans two splits")
 
 
 def tree_isolation(repo: Path, settings: Settings, names: tuple[str, ...]) -> tuple[bool, str]:

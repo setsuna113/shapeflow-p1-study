@@ -83,6 +83,7 @@ PROVIDER_KEY_PLACEHOLDER = "@SHAPEFLOW_PROVIDER@"
 #: acquisition is the steward's, judging is the evaluator's. This is the boundary; the token
 #: check below only enforces it.
 ROLE_ROUTES: dict[str, frozenset[str]] = {
+    "exa.search": frozenset({"steward"}),
     "tavily.search": frozenset({"steward"}),
     "deepseek.chat": frozenset({"steward", "evaluator"}),
     "chat.completions": frozenset({"runner", "steward"}),
@@ -185,6 +186,7 @@ class ProviderConfig:
     unix_socket: Optional[str] = None
     token_dir: str = "/run/shapeflow/tokens"
 
+    exa_endpoint: str = "https://api.exa.ai/search"
     tavily_endpoint: str = "https://api.tavily.com/search"
     deepseek_base_url: str = "https://api.deepseek.com"
     vllm_base_url: str = "http://127.0.0.1:8000"
@@ -203,6 +205,7 @@ class ProviderConfig:
 
     # Worst-case reservations. Admission control is only meaningful if the reserved amount is
     # an upper bound on what the call can cost, so these are ceilings, not estimates.
+    exa_usd_worst_case: float = 0.007
     tavily_credits_worst_case: float = 2.0
     deepseek_input_tokens_worst_case: float = 32000.0
     deepseek_output_tokens_worst_case: float = 8000.0
@@ -368,6 +371,7 @@ class ProviderService:
         redactor: SecretRedactor,
         tokens: RoleTokens,
         upstream: Upstream,
+        exa_key: Optional[str] = None,
         tavily_key: Optional[str] = None,
         deepseek_key: Optional[str] = None,
         clock: Callable[[], float] = time.time,
@@ -380,6 +384,7 @@ class ProviderService:
         self._redactor = redactor
         self._tokens = tokens
         self._upstream = upstream
+        self._exa_key = exa_key
         self._tavily_key = tavily_key
         self._deepseek_key = deepseek_key
         self._clock = clock
@@ -394,7 +399,7 @@ class ProviderService:
         self._events: list[dict] = []
         self._ready = False
         tokens.register_with(redactor)
-        for key in (tavily_key, deepseek_key):
+        for key in (exa_key, tavily_key, deepseek_key):
             if key:
                 redactor.register(key, label="provider")
 
@@ -543,6 +548,8 @@ class ProviderService:
             return (200, {"status": "ready"}) if self._ready else (503, {"status": "starting"})
         if route == "cells.register":
             return self.register_cell(body)
+        if route == "exa.search":
+            return self.exa_search(body)
         if route == "tavily.search":
             return self.tavily_search(body)
         if route == "deepseek.chat":
@@ -576,6 +583,84 @@ class ProviderService:
             return self._cells.get(token)
 
     # --- Tavily ----------------------------------------------------------------------
+
+    def exa_search(self, body: dict) -> tuple[int, dict]:
+        """One acquisition query. The only outbound search path in the whole study.
+
+        Exa returns ``costDollars`` per response, so the ledger settles in the currency the
+        vendor billed rather than converting a credit count by assumption.
+        """
+        if self._exa_key is None:
+            raise ProviderError(503, "provider has no Exa credential loaded")
+        validate_request("exa.search", body)
+        if str(body.get("type", "")) == "auto":
+            raise ProviderError(
+                400,
+                "type 'auto' is forbidden: the same query must address the same slice of "
+                "the web on every acquisition",
+            )
+        task_id = str(body.pop("_task_id", "") or "")
+        call_key = str(body.pop("_call_key", "") or sha256_hex(
+            json.dumps(body, sort_keys=True).encode("utf-8")))
+
+        call_id = self._calls.open_call(
+            provider="exa", op_class="search", call_key=call_key, work_key=task_id or None,
+        )
+        replay = self._replayed(call_id)
+        if replay is not None:
+            return replay
+        try:
+            attempt = self._calls.begin_attempt(call_id)
+        except CallNotReplayable as e:
+            raise ProviderError(409, str(e)) from e
+
+        amounts = {
+            "exa_requests": 1.0,
+            "exa_usd": self._cfg.exa_usd_worst_case,
+            "remote_calls": 1.0,
+        }
+        try:
+            group = self._calls.reserve(attempt, amounts, work_key=task_id or None)
+        except BudgetExceeded as e:
+            raise ProviderError(429, f"budget refused: {e.resource} exhausted") from e
+
+        headers = {"x-api-key": self._exa_key, "Content-Type": "application/json"}
+        self._calls.mark_sent(attempt, request_text=json.dumps(
+            {**body, "x-api-key": PROVIDER_KEY_PLACEHOLDER}, sort_keys=True))
+        try:
+            status, payload, elapsed = self._upstream(
+                self._cfg.exa_endpoint, headers, body, self._cfg.request_timeout_seconds,
+            )
+        except Exception as e:  # noqa: BLE001 - sent, then silence
+            self._calls.fail_unknown(attempt, group, error_class=type(e).__name__)
+            self._emit("EXA_FAILED_UNKNOWN", {"call_id": call_id, "error": type(e).__name__})
+            raise ProviderError(
+                504, f"exa upstream failed after send: {type(e).__name__}") from e
+
+        if status != 200:
+            self._calls.fail_after_response(
+                attempt, group, {"exa_requests": 1.0, "remote_calls": 1.0},
+                error_class=f"http_{status}")
+            self._emit("EXA_HTTP_ERROR", {"call_id": call_id, "status": status})
+            self._note_upstream_failure("exa", status)
+            return status, {"error": f"exa returned {status}",
+                            "retry": classify_status(status).value}
+
+        self._note_upstream_success("exa")
+        cost = _float_or(payload.get("costDollars", {}) or {}, "total",
+                         default=self._cfg.exa_usd_worst_case)
+        self._calls.store_response(
+            attempt, response_text=json.dumps(payload, sort_keys=True)[:200000],
+            provider_request_id=str(payload.get("requestId", "")),
+        )
+        self._calls.validate(attempt)
+        self._calls.commit(attempt, group, {
+            "exa_requests": 1.0,
+            "exa_usd": cost,
+            "remote_calls": 1.0,
+        })
+        self._emit("EXA_COMMITTED", {"call_id": call_id, "usd": cost, "elapsed_s": elapsed})
+        return 200, payload
 
     def tavily_search(self, body: dict) -> tuple[int, dict]:
         """One acquisition query. The only outbound Tavily path in the whole study."""
@@ -939,6 +1024,7 @@ def _finish_reason(payload: Mapping[str, Any]) -> str:
 
 
 _ROUTE_BY_PATH = {
+    "/v1/exa/search": "exa.search",
     "/v1/tavily/search": "tavily.search",
     "/v1/deepseek/chat": "deepseek.chat",
     "/v1/chat/completions": "chat.completions",

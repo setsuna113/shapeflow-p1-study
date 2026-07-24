@@ -516,6 +516,70 @@
           ]
         }
       }
+    },
+    "exa.search": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "query",
+        "type",
+        "numResults"
+      ],
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "description": "Pinned search strategy. 'auto' is absent on purpose: it would let the provider pick per query, so the same query could freeze two different worlds.",
+          "enum": [
+            "instant",
+            "fast",
+            "deep-lite",
+            "deep",
+            "deep-reasoning"
+          ]
+        },
+        "numResults": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contents": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "maxCharacters": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "includeHtmlTags": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "highlights": {
+              "type": "boolean"
+            }
+          }
+        },
+        "_task_id": {
+          "type": "string"
+        },
+        "_call_key": {
+          "type": "string"
+        }
+      }
     }
   }
 }

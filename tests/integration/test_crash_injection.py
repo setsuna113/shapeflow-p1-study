@@ -26,8 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from shapeflow_p1.acquire.tavily_client import TavilyCaptureClient
-from shapeflow_p1.campaign.acquire import acquire_all, tavily_params_from
+from shapeflow_p1.acquire.exa_client import ExaCaptureClient
+from shapeflow_p1.campaign.acquire import acquire_all, exa_params_from
 from shapeflow_p1.campaign.prepare import prepare_corpus
 from shapeflow_p1.campaign.runner import available_tasks, questions_for
 from shapeflow_p1.campaign.schedule import ArmSpec, cell_key
@@ -47,7 +47,7 @@ from shapeflow_p1.runtime.provider_server import (
 from shapeflow_p1.secrets import SecretRedactor
 
 from fixtures.fake_engine import FakeEngine
-from fixtures.fake_tavily import FakeTavily
+from fixtures.fake_exa import FakeExa
 from fixtures.scripted_author import ScriptedAuthor
 
 REPO = Path(__file__).resolve().parents[2]
@@ -189,11 +189,11 @@ async def _world(settings):
     judge = DeepSeekJudge(author, "deepseek-chat", PROVIDER_KEY_PLACEHOLDER)
     await prepare_corpus(settings, judge=judge, authored_at_utc="2026-07-24T00:00:00Z",
                          target_model="Qwen3-14B-AWQ", total=8, clusters=4)
-    params = tavily_params_from(settings)
-    fake = FakeTavily(pages_per_query=2)
+    params = exa_params_from(settings)
+    fake = FakeExa(pages_per_query=2)
     await acquire_all(
         settings,
-        client_factory=lambda t: TavilyCaptureClient(fake, params, PROVIDER_KEY_PLACEHOLDER),
+        client_factory=lambda t: ExaCaptureClient(fake, params),
         fetched_at_utc="2026-07-24T01:00:00Z")
 
 

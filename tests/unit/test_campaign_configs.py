@@ -135,8 +135,22 @@ def test_budget_caps_are_the_hash_locked_values(settings):
     assert caps["gpu_seconds"] == 150 * 3600.0
 
 
-def test_auto_parameters_is_absent_from_the_acquisition_config(settings):
-    assert "auto_parameters" not in settings.get("acquisition", "tavily")
+def test_a_provider_chosen_strategy_is_absent_from_the_acquisition_config(settings):
+    """`type: auto` is Exa's version of Tavily's `auto_parameters`: the provider picks a
+    strategy per query, so two acquisitions of one query can freeze two different worlds."""
+    block = settings.get("acquisition", "exa")
+    assert block["type"] != "auto"
+    assert "auto_parameters" not in block
+
+    from shapeflow_p1.acquire.exa_client import ExaParams
+
+    with pytest.raises(ValueError, match="pinnable"):
+        ExaParams(type="auto")
+
+
+def test_the_search_reservation_covers_the_pinned_result_count(settings):
+    assert settings.exa_usd_worst_case() >= settings.get(
+        "acquisition", "exa_pricing")["usd_per_request"]
 
 
 def test_replay_cannot_fall_back_to_a_live_search(settings):

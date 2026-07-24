@@ -380,21 +380,18 @@ def prepare(config: Path = _CFG,
 def acquire(config: Path = _CFG,
             protocol_sha: str = typer.Option(None, "--protocol-sha"),
             resume: bool = typer.Option(False, "--resume")) -> None:
-    """Steward-only: call Tavily once per task and freeze the world."""
-    from .acquire.tavily_client import TavilyCaptureClient
-    from .campaign.acquire import acquire_all, tavily_params_from
-    from .providers.provider_client import PROVIDER_KEY_PLACEHOLDER
-
+    """Steward-only: call the search provider once per task and freeze the world."""
+    from .acquire.exa_client import ExaCaptureClient
+    from .campaign.acquire import acquire_all, exa_params_from
     _assert_post_launch_flags(protocol_sha, resume)
     _require_role("steward")
     _require_approval()
     settings = _settings()
     client = _provider_client(settings, "steward")
-    params = tavily_params_from(settings)
+    params = exa_params_from(settings)
 
-    def factory(task_id: str) -> TavilyCaptureClient:
-        return TavilyCaptureClient(
-            client.tavily_transport(task_id=task_id), params, PROVIDER_KEY_PLACEHOLDER)
+    def factory(task_id: str) -> ExaCaptureClient:
+        return ExaCaptureClient(client.exa_transport(task_id=task_id), params)
 
     outcome = asyncio.run(acquire_all(settings, client_factory=factory, fetched_at_utc=_now()))
     typer.echo(f"acquired={outcome.tasks_acquired} skipped={outcome.tasks_skipped} "

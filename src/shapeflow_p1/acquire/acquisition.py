@@ -26,7 +26,7 @@ from ..providers.external_call_ledger import (
 )
 from .snapshot_store import SnapshotStore
 from .source_pool import QueryResponse, SourcePool, build_source_pool
-from .tavily_client import TavilyCaptureClient, TavilyHTTPError
+from .exa_client import ExaCaptureClient, ExaHTTPError
 
 __all__ = ["AcquisitionResult", "acquire_task"]
 
@@ -43,12 +43,12 @@ async def acquire_task(
     *,
     task_id: str,
     queries: Sequence[str],
-    client: TavilyCaptureClient,
+    client: ExaCaptureClient,
     budget: Budget,
     call_ledger: ExternalCallLedger,
     snapshot_store: SnapshotStore,
     fetched_at_utc: str,
-    credits_per_query: float = 1.0,
+    usd_per_query: float = 0.007,
 ) -> AcquisitionResult:
     """Acquire and freeze one task's source pool. Stops (blocked_budget) if a reservation is
     refused, keeping already-captured queries."""
@@ -59,7 +59,7 @@ async def acquire_task(
 
     for query in queries:
         call_id = call_ledger.open_call(
-            provider="tavily", op_class="search", call_key=client.query_snapshot_id(query),
+            provider="exa", op_class="search", call_key=client.query_snapshot_id(query),
             work_key=task_id,
         )
         try:
@@ -74,7 +74,7 @@ async def acquire_task(
             continue
         try:
             group = call_ledger.reserve(
-                attempt, {"tavily_requests": 1.0, "tavily_credits": credits_per_query},
+                attempt, {"exa_requests": 1.0, "exa_usd": usd_per_query},
                 work_key=task_id,
             )
         except BudgetExceeded:
@@ -82,13 +82,13 @@ async def acquire_task(
             break  # admission refused -> do not dispatch, stop cleanly
 
         # The request body carries the key; the FSM stores only its redacted form.
-        call_ledger.mark_sent(attempt, request_text=f"tavily search: {query}")
+        call_ledger.mark_sent(attempt, request_text=f"exa search: {query}")
         try:
             captured = await client.search(task_id, query)
-        except TavilyHTTPError as e:
+        except ExaHTTPError as e:
             # A response came back as an error; settle at zero extra (request already counted).
             call_ledger.fail_after_response(
-                attempt, group, {"tavily_requests": 1.0}, error_class=f"http_{e.status}")
+                attempt, group, {"exa_requests": 1.0}, error_class=f"http_{e.status}")
             failed += 1
             continue
         except Exception as e:  # timeout after send: unknown outcome, keep worst case
@@ -101,9 +101,8 @@ async def acquire_task(
             provider_request_id=captured.request_id,
         )
         call_ledger.validate(attempt)
-        actual_credits = float(captured.usage.get("credits", credits_per_query) or credits_per_query)
         call_ledger.commit(
-            attempt, group, {"tavily_requests": 1.0, "tavily_credits": actual_credits})
+            attempt, group, {"exa_requests": 1.0, "exa_usd": captured.cost_usd})
         responses.append(captured.response)
         ok += 1
 
