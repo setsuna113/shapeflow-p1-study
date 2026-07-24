@@ -60,7 +60,7 @@ class AwaitingModel:
         await asyncio.sleep(0)      # the crucial yield: suspend and be resumed by the executor
         from langchain_core.messages import AIMessage
         from open_deep_research.state import (
-            ClarifyWithUser, ConductResearch, ResearchComplete, ResearchQuestion, Summary,
+            ClarifyWithUser, ResearchQuestion, Summary,
         )
 
         if self._structured is ClarifyWithUser:

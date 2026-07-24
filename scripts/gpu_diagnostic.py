@@ -30,7 +30,6 @@ from shapeflow_p1.campaign.runner import CampaignRunner, RunnerConfig  # noqa: E
 from shapeflow_p1.campaign.schedule import ArmSpec, cell_key  # noqa: E402
 from shapeflow_p1.campaign.selector_client import SelectorModelCall  # noqa: E402
 from shapeflow_p1.campaign.settings import Settings  # noqa: E402
-from shapeflow_p1.experiment.budget import Budget  # noqa: E402
 from shapeflow_p1.experiment.ledger import Ledger  # noqa: E402
 from shapeflow_p1.object_store import ObjectStore  # noqa: E402
 from shapeflow_p1.providers.provider_client import ProviderClient, load_role_token  # noqa: E402
@@ -48,7 +47,8 @@ _PAGES = {
          "## Methodology\n\nMovements are counted at the seaward gate. Empty repositioning is "
          "excluded, which the 2023 revision changed and which accounts for part of the "
          "year-on-year rise.\n\n## Disputed totals\n\nThe Coastal Union reported 4,410 for the "
-         "same quarter, a discrepancy the Authority attributes to differing empty-container rules."),
+         "same quarter, a discrepancy the Authority attributes to differing empty-container "
+         "rules."),
         ("https://diag.invalid/freightboard",
          "# Regional Freight Board bulletin\n\n"
          "Board figures put Q1 2025 harbour throughput at 4,821 units, matching the Harbour "
