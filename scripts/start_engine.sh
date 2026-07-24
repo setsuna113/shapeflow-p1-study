@@ -13,6 +13,11 @@
 # supported". Pinning the backend is also the honest thing to do for the measurement: which
 # attention kernel served the run is part of the frozen stack, and `freeze-stack` records it
 # from this engine's own log.
+#
+# --enable-auto-tool-choice + --tool-call-parser are required to serve tool calls at all: the
+# ODR graph binds tools (tavily_search, ConductResearch, ResearchComplete, think_tool), and
+# without these vLLM answers 400 on every tool-bound request. They are serving-correctness
+# flags and do not touch the causal invariants (max-num-seqs 1, APC off, chunked prefill off).
 set -euo pipefail
 
 REPO="${SHAPEFLOW_REPO:-/storage/nvme/shapeflow-p1-study}"
@@ -44,4 +49,5 @@ exec setsid /usr/local/bin/sfsupervise vllm-causal sfinfer "$REPO" "$DATA_ROOT" 
       --max-model-len 16384 --gpu-memory-utilization 0.90 \
       --max-num-seqs 1 \
       --no-enable-prefix-caching \
-      --no-enable-chunked-prefill
+      --no-enable-chunked-prefill \
+      --enable-auto-tool-choice --tool-call-parser ${SHAPEFLOW_TOOL_PARSER:-hermes}
