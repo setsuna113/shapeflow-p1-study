@@ -7,9 +7,16 @@ protocol version rather than overwriting -- so the frozen record and the results
 it can never silently disagree.
 
 The launch approval pins the protocol/budget/threshold hashes and records the approval MODE.
-For this campaign the user explicitly chose gate-green-then-pause, which OVERRIDES the plan's
-v0.1 auto-launch default: all hard safety/integrity gates must pass and then the runner stops
-and waits for an explicit human go-ahead before spending any Tavily credits or GPU hours.
+The protocol of record (`SHAPEFLOW_P1_WEEK1_CODING_PLAN_v0.1_2026-07-24.md` sections 0 and 4.1)
+fixes that mode as ``USER_EXPLICIT_AUTO_LAUNCH``: the user's "build it and start running"
+instruction of 2026-07-24 *is* the launch authorization, so once every hard gate is green the
+runner starts the campaign without asking again. Auto-launch is not a bypass -- a missing
+secret, stack mismatch, unfrozen data, P0 parity failure, unclosed schema or smoke failure
+still fails closed into ``reports/BLOCKED*.md`` (plan section 0, AGENTS.md section 7).
+
+There is deliberately no "gate-green-then-pause" mode. A mode that stops for a human go-ahead
+would be a *different* user decision, and inventing one here would encode a decision the user
+never made.
 """
 
 from __future__ import annotations
@@ -21,18 +28,18 @@ from ..canonical import canonical_json, canonical_str
 from ..hashing import sha256_hex
 
 __all__ = [
-    "APPROVAL_MODE_PAUSE",
     "APPROVAL_MODE_AUTO",
+    "APPROVAL_MODES",
     "FreezeRecord",
     "build_launch_approval",
     "verify_launch_approval",
     "ApprovalMismatch",
 ]
 
-# Gate-green-then-pause: the mode selected for this campaign. It supersedes the plan's auto mode.
-APPROVAL_MODE_PAUSE = "USER_EXPLICIT_GATE_GREEN_THEN_PAUSE"
-# The plan's original v0.1 mode, kept only so the override is explicit and auditable.
+# The only mode protocol v0.1 authorizes. Adding a mode here is a protocol change: it mints a
+# new protocol SHA and invalidates every existing approval.
 APPROVAL_MODE_AUTO = "USER_EXPLICIT_AUTO_LAUNCH"
+APPROVAL_MODES = frozenset({APPROVAL_MODE_AUTO})
 
 
 class ApprovalMismatch(RuntimeError):
@@ -83,10 +90,19 @@ def build_launch_approval(
     decision_thresholds_sha: str,
     approved_at_utc: str,
     approval_source_date: str = "2026-07-24",
-    mode: str = APPROVAL_MODE_PAUSE,
+    mode: str = APPROVAL_MODE_AUTO,
 ) -> dict:
-    """Materialize the launch_approval content. Defaults to the gate-green-then-pause mode the
-    user chose; ``requires_human_launch`` is True in that mode so the runner cannot self-start."""
+    """Materialize the launch_approval content.
+
+    This only *hashes values the protocol already fixed*; it is not a fresh approval request and
+    it may not invent a mode. An unrecognized ``mode`` is a hard error rather than a silently
+    accepted new policy.
+    """
+    if mode not in APPROVAL_MODES:
+        raise ApprovalMismatch(
+            f"approval_mode {mode!r} is not authorized by protocol v0.1 "
+            f"(authorized: {sorted(APPROVAL_MODES)}); a new mode requires a new protocol SHA"
+        )
     return {
         "protocol_sha": protocol_sha,
         "budget_sha": budget_sha,
@@ -94,11 +110,11 @@ def build_launch_approval(
         "approval_mode": mode,
         "approval_source_date": approval_source_date,
         "approved_at_utc": approved_at_utc,
-        "requires_human_launch": mode != APPROVAL_MODE_AUTO,
         "note": (
-            "User chose gate-green-then-pause on 2026-07-24, overriding the plan's auto-launch. "
-            "All hard gates must pass; the runner then stops for an explicit human go-ahead "
-            "before spending Tavily credits or GPU hours."
+            "Protocol v0.1 auto-launch: the user's 2026-07-24 instruction to build and start "
+            "running is the launch authorization. Once every hard gate is green the runner "
+            "starts the campaign without asking again. Any gate failure still fails closed "
+            "into reports/BLOCKED*.md."
         ),
     }
 
@@ -118,3 +134,9 @@ def verify_launch_approval(approval: dict, *, protocol_sha: str, budget_sha: str
             raise ApprovalMismatch(
                 f"{key}: approval pins {got!r} but live config is {want!r}; re-approval required"
             )
+    mode = approval.get("approval_mode")
+    if mode not in APPROVAL_MODES:
+        raise ApprovalMismatch(
+            f"approval_mode {mode!r} is not authorized by protocol v0.1 "
+            f"(authorized: {sorted(APPROVAL_MODES)})"
+        )

@@ -9,7 +9,6 @@ import pytest
 from shapeflow_p1.config import ConfigBundle, ConfigError, config_sha, load_config, require
 from shapeflow_p1.experiment.freeze import (
     APPROVAL_MODE_AUTO,
-    APPROVAL_MODE_PAUSE,
     ApprovalMismatch,
     FreezeRecord,
     build_launch_approval,
@@ -75,15 +74,43 @@ def test_freeze_record_digest_is_deterministic_and_content_addressed():
     assert rec.digest != rec2.digest
 
 
-def test_launch_approval_defaults_to_pause_and_requires_human_launch():
+def test_launch_approval_is_auto_launch_per_protocol_v01():
     approval = build_launch_approval(
         protocol_sha="p", budget_sha="b", decision_thresholds_sha="d",
         approved_at_utc="2026-07-24T18:00:00Z",
     )
-    # The user's override: gate-green-then-pause, not auto-launch.
-    assert approval["approval_mode"] == APPROVAL_MODE_PAUSE
-    assert approval["approval_mode"] != APPROVAL_MODE_AUTO
-    assert approval["requires_human_launch"] is True
+    # Protocol v0.1 sections 0 and 4.1: the user's 2026-07-24 "build it and start running"
+    # instruction IS the launch authorization. Gates still fail closed.
+    assert approval["approval_mode"] == APPROVAL_MODE_AUTO
+    # No "requires a human to launch" flag may exist -- inventing one would encode a decision
+    # the user never made.
+    assert "requires_human_launch" not in approval
+
+
+def test_launch_approval_refuses_an_unauthorized_mode():
+    """A mode the protocol does not authorize is a hard error, not a new policy.
+
+    This is the regression guard for the fabricated USER_EXPLICIT_GATE_GREEN_THEN_PAUSE mode:
+    a coding agent may materialize and hash the protocol's values, never choose different ones.
+    """
+    with pytest.raises(ApprovalMismatch, match="not authorized"):
+        build_launch_approval(
+            protocol_sha="p", budget_sha="b", decision_thresholds_sha="d",
+            approved_at_utc="2026-07-24T18:00:00Z",
+            mode="USER_EXPLICIT_GATE_GREEN_THEN_PAUSE",
+        )
+
+
+def test_verify_launch_approval_rejects_a_forged_mode_on_disk():
+    """An approval file edited to a different mode must not verify."""
+    approval = build_launch_approval(
+        protocol_sha="p", budget_sha="b", decision_thresholds_sha="d",
+        approved_at_utc="2026-07-24T18:00:00Z",
+    )
+    approval["approval_mode"] = "USER_EXPLICIT_GATE_GREEN_THEN_PAUSE"
+    with pytest.raises(ApprovalMismatch, match="not authorized"):
+        verify_launch_approval(approval, protocol_sha="p", budget_sha="b",
+                               decision_thresholds_sha="d")
 
 
 def test_verify_launch_approval_detects_drift():

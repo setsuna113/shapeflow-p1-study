@@ -41,7 +41,17 @@ class DoctorReport:
 
     @property
     def ok(self) -> bool:
-        return all(c.status != FAIL for c in self.checks)
+        """Green means every check PASSed. A SKIP is not a pass.
+
+        Counting SKIP as success is how ``doctor: ok`` was obtained on a machine with no GPU,
+        no vLLM and no model -- every runtime check skipped, and the absence of evidence read
+        as evidence of correctness. A check that could not run has not been satisfied.
+        """
+        return bool(self.checks) and all(c.status == PASS for c in self.checks)
+
+    @property
+    def skipped(self) -> list[CheckResult]:
+        return [c for c in self.checks if c.status == SKIP]
 
     def add(self, result: CheckResult) -> None:
         self.checks.append(result)
@@ -120,15 +130,43 @@ def _object_nodes(node, path="<root>"):
             yield from _object_nodes(sub, f"{path}[{i}]")
 
 
+# Role -> the account that role must run as. The campaign never runs as root: the plan allows
+# root only for one-time unit/ACL installation (section 5.2).
+ROLE_USERS = {
+    "provider": "sfprovider",
+    "runner": "sfrunner",
+    "infer": "sfinfer",
+    "steward": "sfsteward",
+    "evaluator": "sfevaluator",
+}
+
+
 def check_identity(expected_role: Optional[str] = None) -> CheckResult:
-    """Record the effective identity. On Linux this is the UID/username the CLI enforces per role
-    (steward/runner/evaluator); off Linux it is informational."""
+    """Verify the effective identity against the role this process claims.
+
+    This used to return PASS unconditionally -- it recorded a uid and asserted nothing, so the
+    separation between provider (holds credentials), runner (never does) and evaluator (holds
+    the answer key) was documented but not enforced. With no expected role it now SKIPs, which
+    no longer counts as green.
+    """
     uid = getattr(os, "geteuid", lambda: -1)()
     user = os.environ.get("USER") or os.environ.get("USERNAME") or "?"
-    detail = f"uid={uid} user={user}"
-    if expected_role:
-        detail += f" expected_role={expected_role}"
-    return CheckResult("identity", PASS, detail)
+    if expected_role is None:
+        return CheckResult("identity", SKIP, f"uid={uid} user={user}; no role asserted")
+    want = ROLE_USERS.get(expected_role)
+    if want is None:
+        return CheckResult("identity", FAIL, f"unknown role {expected_role!r}")
+    if uid == 0:
+        return CheckResult(
+            "identity", FAIL,
+            f"running as root; role {expected_role!r} must run as {want} (root is permitted "
+            "only for one-time unit/ACL installation)",
+        )
+    if user != want:
+        return CheckResult(
+            "identity", FAIL, f"role {expected_role!r} must run as {want}, but user={user}"
+        )
+    return CheckResult("identity", PASS, f"uid={uid} user={user} role={expected_role}")
 
 
 def check_git_clean(repo: Path) -> CheckResult:
@@ -150,12 +188,52 @@ def check_git_clean(repo: Path) -> CheckResult:
     return CheckResult("git_clean", PASS, "working tree clean")
 
 
-def run_pure_checks(*, repo: Path, configs: dict[str, Path], schema_dir: Path) -> DoctorReport:
+def check_stack_manifest(repo: Path, stack_config: Path) -> CheckResult:
+    """Compare the live stack against a manifest a steward froze BEFORE approval.
+
+    Read-only, always. A doctor that wrote the manifest itself at launch would take whatever it
+    happened to observe -- including an already-drifted engine, driver or model -- and launder
+    it into a legitimate baseline, which inverts the purpose of the check.
+
+    **Unconditionally FAIL until the live verifier exists.** Passing on "a JSON file is present
+    with the right keys" is a gate in name only: a hand-written manifest with three arbitrary
+    strings satisfied it. Until this compares the manifest's digest, its schema, and each live
+    value (GPU UUID, driver, model Merkle root, vLLM package tree, attention backend, unit
+    flags) against the running host, the honest status is that the check has not been built --
+    not that the stack is fine. A gate that cannot fail is not a gate.
+    """
+    manifest = repo / "protocol" / "stack_manifest.json"
+    declared, _ = load_config(stack_config)
+    unresolved = [
+        f"{section}.{key}"
+        for section, block in declared.items()
+        if isinstance(block, dict)
+        for key, value in block.items()
+        if isinstance(value, str) and value.startswith("@")
+    ]
+    if not manifest.exists():
+        return CheckResult(
+            "stack_manifest", FAIL,
+            f"protocol/stack_manifest.json missing; {len(unresolved)} field(s) unresolved. "
+            "Run `shapeflow-p1 freeze-stack` as the steward before approval -- doctor will "
+            "not freeze it at launch.",
+        )
+    return CheckResult(
+        "stack_manifest", FAIL,
+        "NOT_IMPLEMENTED: live stack verification is Block 9. A present manifest is not "
+        "evidence -- its digest, schema and every live value (GPU UUID, driver, model Merkle "
+        "root, vLLM package tree, attention backend, unit flags) are still unchecked.",
+    )
+
+
+def run_pure_checks(
+    *, repo: Path, configs: dict[str, Path], schema_dir: Path, role: Optional[str] = None
+) -> DoctorReport:
     """The checks that run anywhere -- so the fail-closed invariants are enforced in dev too."""
     report = DoctorReport()
     report.add(check_configs(configs))
     report.add(check_schemas_closed(schema_dir))
-    report.add(check_identity())
+    report.add(check_identity(role))
     report.add(check_secret_present("tavily", env_var="TAVILY_API_KEY",
                                     file_env_var="TAVILY_API_KEY_FILE"))
     report.add(check_secret_present("deepseek", env_var="DEEPSEEK_API_KEY",
