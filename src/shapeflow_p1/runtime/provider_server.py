@@ -186,6 +186,9 @@ class ProviderConfig:
     vllm_base_url: str = "http://127.0.0.1:8000"
 
     served_model: str = ""
+    # Qwen3 reasoning is off in the frozen stack; the provider enforces it per request because
+    # vLLM only honours it through chat_template_kwargs.
+    disable_thinking: bool = True
     model_aliases: Mapping[str, OpClass] = field(
         default_factory=lambda: dict(DEFAULT_MODEL_ALIASES))
 
@@ -714,6 +717,15 @@ class ProviderService:
         outbound = dict(body)
         if self._cfg.served_model:
             outbound["model"] = self._cfg.served_model
+        if self._cfg.disable_thinking:
+            # Qwen3 emits <think>...</think> reasoning by default, which the frozen stack
+            # declares off (configs/stack.yaml model.enable_thinking: false). vLLM only honours
+            # that per request via chat_template_kwargs, so it is injected HERE, uniformly for
+            # every arm -- P0 and P1 alike. Without it, react calls burn their budget thinking
+            # and get truncated before they act, and selector calls never reach their JSON.
+            kwargs = dict(outbound.get("chat_template_kwargs") or {})
+            kwargs.setdefault("enable_thinking", False)
+            outbound["chat_template_kwargs"] = kwargs
         prompt_sha = sha256_hex(json.dumps(outbound.get("messages", []), sort_keys=True)
                                 .encode("utf-8"))
         self._calls.mark_sent(call_id, request_text=json.dumps(

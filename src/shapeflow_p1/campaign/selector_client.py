@@ -94,8 +94,14 @@ class SelectorModelCall:
             "max_tokens": capped,
         }
         if schema_name and self._guided:
-            # Constrains the grammar while it is generated, rather than validating afterwards.
-            body["guided_json"] = self._schema
+            # Constrain the grammar while it is generated, rather than validating afterwards.
+            # vLLM 0.24 honours `response_format: json_schema` but ignores a top-level
+            # `guided_json`, so the former is what actually bounds the output; the latter passed
+            # silently and the model emitted prose (and, with Qwen3, a <think> block) instead.
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": schema_name, "schema": self._schema},
+            }
 
         payload = await self._client.chat_completions(body, cell_token=self._cell_token)
         usage = dict(payload.get("usage") or {})
