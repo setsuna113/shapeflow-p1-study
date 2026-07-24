@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shapeflow-p1/schemas/freeze_record.schema.json",
+  "title": "FreezeRecord",
+  "description": "An outcome-free design lock written before any outcome is observed. It pins the champion, the thresholds, the holdout task ids, the randomization schedule and the software/data manifest hashes, so 'what was pre-registered' is a content hash rather than a promise. Any change after freeze mints a new protocol version instead of overwriting.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "protocol_sha", "champion_variant", "thresholds_sha", "budget_sha",
+               "holdout_task_ids", "randomization_schedule_sha", "software_manifest_sha",
+               "sample_size_plan", "freeze_sha256"],
+  "properties": {
+    "kind": { "type": "string", "minLength": 1 },
+    "protocol_sha": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "champion_variant": { "type": "object" },
+    "thresholds_sha": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "budget_sha": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "holdout_task_ids": { "type": "array", "items": { "type": "string" } },
+    "randomization_schedule_sha": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "software_manifest_sha": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sample_size_plan": { "type": "object" },
+    "freeze_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

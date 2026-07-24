@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shapeflow-p1/schemas/request_event.schema.json",
+  "title": "RequestEvent",
+  "description": "One model request as the telemetry proxy recorded it (plan §12.2). Fields marked optional carry data only when the doctor proved the frozen vLLM stack can export it reliably; a non-streaming response must not fabricate a first-token time, and per-request cached tokens must not be back-derived from a Prometheus histogram. The op class keeps P0/P1 costs separable and judge cost out of treatment work.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id", "attempt_id", "task_id", "arm_id", "variant_id", "op_class",
+    "proxy_ingress_ts", "upstream_dispatch_ts", "upstream_response_end_ts",
+    "prompt_tokens", "completion_tokens", "finish_reason", "retry_ordinal",
+    "terminal_status", "prompt_sha256"
+  ],
+  "properties": {
+    "run_id": { "type": "string" },
+    "attempt_id": { "type": "string" },
+    "task_id": { "type": "string" },
+    "arm_id": { "type": "string" },
+    "variant_id": { "type": "string" },
+    "node": { "type": ["string", "null"] },
+    "op_class": { "type": "string" },
+    "researcher_id": { "type": ["string", "null"] },
+    "query_id": { "type": ["string", "null"] },
+    "checkpoint_hash": { "type": ["string", "null"] },
+    "proxy_ingress_ts": { "type": "number" },
+    "upstream_dispatch_ts": { "type": "number" },
+    "upstream_response_end_ts": { "type": "number" },
+    "proxy_response_end_ts": { "type": ["number", "null"] },
+    "engine_enqueue_ts": { "type": ["number", "null"] },
+    "first_token_ts": {
+      "description": "Only when streaming and the stack exports it; never fabricated for a non-streaming response.",
+      "type": ["number", "null"]
+    },
+    "engine_end_ts": { "type": ["number", "null"] },
+    "prompt_tokens": { "type": "integer", "minimum": 0 },
+    "cached_prompt_tokens": {
+      "description": "Only when the stack reliably exports per-request cached tokens; never back-derived.",
+      "type": ["integer", "null"], "minimum": 0
+    },
+    "completion_tokens": { "type": "integer", "minimum": 0 },
+    "finish_reason": { "type": "string" },
+    "retry_ordinal": { "type": "integer", "minimum": 0 },
+    "terminal_status": { "type": "string" },
+    "prompt_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "output_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "gpu_power_w": { "type": ["number", "null"] },
+    "gpu_energy_j": { "type": ["number", "null"] },
+    "cpu_seconds": { "type": ["number", "null"] },
+    "rss_delta_bytes": { "type": ["integer", "null"] }
+  }
+}

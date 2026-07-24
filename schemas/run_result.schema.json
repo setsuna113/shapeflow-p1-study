@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shapeflow-p1/schemas/run_result.schema.json",
+  "title": "RunResult",
+  "description": "The per-task-arm outcome record: the quality scores, the isolated work, and the failure/fallback accounting, all under one frozen TruthPacket version. It records fallbacks and retries so a P1 that fell back to P0 still carries the cost it spent -- the all-offered total, never a free retry.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["task_id", "arm_id", "variant_id", "truth_packet_sha256", "quality", "work", "terminal_status"],
+  "properties": {
+    "task_id": { "type": "string" },
+    "arm_id": { "type": "string" },
+    "variant_id": { "type": "string" },
+    "replicate_id": { "type": "string" },
+    "truth_packet_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["weighted_required_atom_recall", "critical_atom_safety", "grounded_claim_precision",
+                   "citation_correctness", "required_facet_coverage", "critical_harm", "qualified_report"],
+      "properties": {
+        "weighted_required_atom_recall": { "type": "number" },
+        "critical_atom_safety": { "type": "number" },
+        "grounded_claim_precision": { "type": "number" },
+        "citation_correctness": { "type": "number" },
+        "citation_association": { "type": "number" },
+        "citation_completeness": { "type": "number" },
+        "required_facet_coverage": { "type": "number" },
+        "contradiction_handling": { "type": ["number", "null"] },
+        "critical_harm": { "type": "integer", "enum": [0, 1] },
+        "qualified_report": { "type": "integer", "enum": [0, 1] }
+      }
+    },
+    "work": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["isolated_service_seconds", "prompt_tokens", "completion_tokens"],
+      "properties": {
+        "isolated_service_seconds": { "type": "number", "minimum": 0 },
+        "queue_wait_seconds": { "type": "number", "minimum": 0 },
+        "prompt_tokens": { "type": "integer", "minimum": 0 },
+        "completion_tokens": { "type": "integer", "minimum": 0 },
+        "cached_prompt_tokens": { "type": "integer", "minimum": 0 },
+        "gpu_energy_j": { "type": ["number", "null"] },
+        "cpu_seconds": { "type": ["number", "null"] }
+      }
+    },
+    "fallbacks": { "type": "integer", "minimum": 0 },
+    "retries": { "type": "integer", "minimum": 0 },
+    "terminal_status": { "type": "string" }
+  }
+}
