@@ -78,6 +78,9 @@ class TaskScore:
     per_arm: dict = field(default_factory=dict)
     unavailable: list = field(default_factory=list)
     human_queue: list = field(default_factory=list)
+    #: arm key -> the atom ids that arm's claims matched. The C_VISIBLE projection needs to
+    #: know what the reducer retained, not just how the full-truth score came out.
+    matched_atoms_by_arm: dict = field(default_factory=dict)
 
     def content(self) -> dict:
         return {
@@ -163,6 +166,11 @@ def score_task(
     for output in sorted(outputs, key=lambda o: (o.arm_id, o.replicate_id)):
         try:
             claims = atomize_report(output.final_report)
+            if hasattr(citation_supports, "bind"):
+                # A citation label only means something inside the report that defined it,
+                # so the resolver is bound per arm rather than per task.
+                citation_supports.bind(
+                    output.final_report, {c.claim_id: c.text for c in claims})
             assessment, queue = build_assessment(
                 claims, candidates, judge=judge_relation,
                 citation_supports=citation_supports,
@@ -181,7 +189,13 @@ def score_task(
             continue
 
         scores = score_report(packet, assessment)
-        score.per_arm[f"{output.arm_id}:{output.replicate_id}"] = {
+        arm_key = f"{output.arm_id}:{output.replicate_id}"
+        score.matched_atoms_by_arm[arm_key] = sorted({
+            atom_id for c in assessment.claims
+            if c.support_status == "SUPPORTED"
+            for atom_id in c.matched_atom_ids
+        })
+        score.per_arm[arm_key] = {
             "variant_id": output.variant_id,
             "weighted_required_atom_recall": scores.weighted_required_atom_recall,
             "critical_atom_safety": scores.critical_atom_safety,
