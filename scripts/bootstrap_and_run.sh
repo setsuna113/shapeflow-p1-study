@@ -208,8 +208,21 @@ cat > "$REPORTS/LAUNCH_GATE_PASSED.json" <<JSON
 JSON
 
 echo
-echo "All ${TOTAL_STEPS} hard gates passed. Starting screening under systemd (protocol $APPROVED_SHA)."
-sed -i "s|@PROTOCOL_SHA@|$APPROVED_SHA|" /etc/systemd/system/shapeflow-p1-week1.service
-systemctl daemon-reload
-systemctl enable --now shapeflow-p1-week1.service
-systemctl --no-pager status shapeflow-p1-week1.service | head -20
+echo "All ${TOTAL_STEPS} hard gates passed. Starting screening (protocol $APPROVED_SHA)."
+# This host runs in a container where systemd is not PID 1. The launch used to be
+# `systemctl enable --now` unconditionally: the earlier `systemctl is-active` gate
+# short-circuited on the same absence, so every gate reported green and then the campaign
+# simply never started. sfsupervise is the documented substitute (plan §17.2) and was
+# already installed by install_host.sh; nothing used it for the coordinator.
+if [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ] && command -v systemctl >/dev/null 2>&1; then
+  sed -i "s|@PROTOCOL_SHA@|$APPROVED_SHA|" /etc/systemd/system/shapeflow-p1-week1.service
+  systemctl daemon-reload
+  systemctl enable --now shapeflow-p1-week1.service
+  systemctl --no-pager status shapeflow-p1-week1.service | head -20
+else
+  echo "systemd is not PID 1; supervising the campaign with sfsupervise instead."
+  setsid /usr/local/bin/sfsupervise week1 sfrunner "$REPO" "$DATA_ROOT" -- \
+    "$SF" run-screen --config "$CONFIG" --resume --protocol-sha "$APPROVED_SHA" \
+    >> "$REPO/logs/coordinator.log" 2>&1 &
+  echo "sfsupervise started (pid $!); log: $REPO/logs/coordinator.log"
+fi

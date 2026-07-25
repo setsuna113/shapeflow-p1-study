@@ -132,14 +132,30 @@ def _verify(settings, manifest, states, outputs, *, repo) -> list[dict]:
                 if v["cell"]["arm"]["arm_id"] not in ("P0",)}
     p0_cells = {k: v for k, v in committed.items() if v["cell"]["arm"]["arm_id"] == "P0"}
 
-    # 2. P1 strategies actually ran.
-    reduced = sum(v["counts"].get("page_batches_reduced", 0) for v in p1_cells.values())
-    closed = sum(v["counts"].get("close_reduced", 0) for v in p1_cells.values())
-    checks.append(_check("p1_strategy_invocations", (reduced + closed) > 0,
-                         f"{reduced} page batches reduced, {closed} closes reduced"))
+    # 2. Every P1 arm actually ran -- not "at least one of them did".
+    #    reduce_published_batch fires for any bound bundle, including arms whose page half is
+    #    the vendor strategy, so a single CPU control satisfied the old total and a
+    #    completely inert LLM arm passed alongside it.
+    inert = []
+    for arm_id, cells in _by_arm(p1_cells).items():
+        reduced = sum(v["counts"].get("page_batches_reduced", 0) for v in cells)
+        closed = sum(v["counts"].get("close_reduced", 0) for v in cells)
+        if (reduced + closed) == 0:
+            inert.append(arm_id)
+    checks.append(_check("p1_strategy_invocations", bool(p1_cells) and not inert,
+                         f"{len(_by_arm(p1_cells))} P1 arm(s) all reduced something"
+                         if p1_cells and not inert
+                         else f"arms that reduced nothing: {inert or 'no P1 cells at all'}"))
 
     # 3. The selector decoded. A P1 arm with zero decode did not select anything.
-    inference = _inference_events(settings)
+    try:
+        inference = _inference_events(settings)
+        ledger_error = ""
+    except LedgerUnreadable as e:
+        inference = []
+        ledger_error = str(e)
+    checks.append(_check("ledger_readable", not ledger_error,
+                         ledger_error or "the provider ledger was read"))
     selector_ops = {"PAGE_P1_SELECTOR_LOCAL", "PAGE_P1_SELECTOR_GLOBAL",
                     "COMPRESSOR_P1_SELECTOR"}
     selector_completions = sum(e["completion_tokens"] for e in inference
@@ -147,10 +163,14 @@ def _verify(settings, manifest, states, outputs, *, repo) -> list[dict]:
     checks.append(_check("selector_decode", selector_completions > 0,
                          f"{selector_completions} completion tokens across selector calls"))
 
-    # 4. Both boundaries produced checkpoints.
+    # 4. BOTH boundaries produced checkpoints. This was a set intersection, so H-only or
+    #    C-only passed -- and a canary whose close boundary never fired is exactly the run
+    #    that proves nothing about the close node.
     kinds = {c["kind"] for v in committed.values() for c in v["checkpoints"]}
-    checks.append(_check("checkpoints_present", {"HCheckpoint", "CCheckpoint"} & kinds != set(),
-                         f"checkpoint kinds seen: {sorted(kinds)}"))
+    wanted = {"HCheckpoint", "CCheckpoint"}
+    checks.append(_check("checkpoints_present", wanted <= kinds,
+                         f"checkpoint kinds seen: {sorted(kinds)}"
+                         + ("" if wanted <= kinds else f"; missing {sorted(wanted - kinds)}")))
 
     # 5. Publication was whole-batch: every reduced batch was published once, never in pieces.
     partials = [k for k, v in committed.items()
@@ -160,10 +180,15 @@ def _verify(settings, manifest, states, outputs, *, repo) -> list[dict]:
                          "every deferred batch reduced exactly once" if not partials
                          else f"mismatched batches in {partials}"))
 
-    # 6. P1 is not P0 with a different label. Compared per task, on the report bytes.
+    # 6. EVERY P1 arm is not P0 with a different label. One differing cell out of six used
+    #    to be enough, so five silently-inert arms passed behind the one that worked.
+    same_as_p0 = _arms_identical_to_p0(p0_cells, p1_cells)
     differing, compared = _p1_differs_from_p0(p0_cells, p1_cells)
-    checks.append(_check("p1_bytes_differ_from_p0", compared > 0 and differing > 0,
-                         f"{differing}/{compared} P1 cells differ from P0 on the same task"))
+    checks.append(_check("p1_bytes_differ_from_p0",
+                         compared > 0 and not same_as_p0,
+                         f"{differing}/{compared} P1 cells differ from P0 on the same task"
+                         + ("" if not same_as_p0
+                            else f"; arms identical to P0: {same_as_p0}")))
 
     # 7. Neither the answer key nor the steward's audit graph is reachable from here.
     from ..ops.acceptance import tree_isolation
@@ -178,16 +203,23 @@ def _verify(settings, manifest, states, outputs, *, repo) -> list[dict]:
                          "no replay miss" if not misses else f"replay miss in {misses}"))
 
     # 9. Every reservation is closed or explicitly unknown.
-    open_calls = _open_external_calls(settings)
-    checks.append(_check("reservations_closed", open_calls == 0,
-                         f"{open_calls} external call(s) still open"))
+    try:
+        open_calls = _open_external_calls(settings)
+        checks.append(_check("reservations_closed", open_calls == 0,
+                             f"{open_calls} external call(s) still open"))
+    except LedgerUnreadable as e:
+        checks.append(_check("reservations_closed", False, str(e)))
 
-    # 10. Fallbacks and failures are on the ledger rather than silently absorbed.
+    # 10. Fallbacks and failures are on the ledger rather than silently absorbed. This was
+    #     literally `_check(..., True, ...)`: it formatted the counts into a sentence and
+    #     passed unconditionally, having asserted nothing at all.
     fallbacks = sum(v["counts"].get("page_fallbacks", 0) for v in committed.values())
     close_failures = sum(v["counts"].get("close_failed", 0) for v in committed.values())
-    checks.append(_check("fallback_and_failures_accounted", True,
-                         f"{fallbacks} page fallback(s), {close_failures} close failure(s) "
-                         "recorded with their spend"))
+    accounted, accounting_detail = _fallbacks_are_on_the_ledger(
+        settings, expected=fallbacks + close_failures)
+    checks.append(_check("fallback_and_failures_accounted", accounted,
+                         f"{fallbacks} page fallback(s), {close_failures} close failure(s); "
+                         + accounting_detail))
 
     # 11. The CPU control decoded nothing. If it did, it is not a CPU control.
     cpu_cells = [v for v in committed.values()
@@ -203,21 +235,126 @@ def _verify(settings, manifest, states, outputs, *, repo) -> list[dict]:
     prose_cells = [v for v in committed.values()
                    if v["cell"]["arm"]["arm_id"] == "SHORT_PROSE"]
     prose_keys = {_work_key_of(v) for v in prose_cells}
-    prose_max = max((e["completion_tokens"] for e in inference
-                     if e["work_key"] in prose_keys), default=0)
+    prose_calls = [e for e in inference if e["work_key"] in prose_keys]
+    prose_max = max((e["completion_tokens"] for e in prose_calls), default=0)
     cap = int(settings.get("week1", "measurement", "selector_max_completion_tokens"))
-    checks.append(_check("short_prose_same_budget", bool(prose_cells) and prose_max <= cap,
-                         f"max {prose_max} completion tokens against a {cap} cap "
-                         f"(rendered budget {budget})"))
+    # An arm that issued no request at all had max(..., default=0) <= cap and passed. And
+    # the comparison was against the selector cap while the detail line quoted the rendered
+    # budget, which is the number the check is named for.
+    rendered = max((v["counts"].get("selected_tokens", 0) for v in prose_cells), default=0)
+    prose_ok = bool(prose_cells) and bool(prose_calls) and prose_max <= cap and (
+        rendered <= budget)
+    checks.append(_check("short_prose_same_budget", prose_ok,
+                         f"{len(prose_calls)} request(s), max {prose_max} completion tokens "
+                         f"against a {cap} cap, {rendered} rendered tokens against a "
+                         f"{budget} budget"))
 
-    # 13. The cap that bounded generation is a completion limit, not a schema bound.
-    checks.append(_check(
-        "generation_cap_is_a_completion_limit",
-        bool(settings.get("week1", "measurement", "guided_decoding")) and cap > 0,
-        f"max_tokens={cap} with guided decoding; schema maxItems bounds what is accepted, "
-        "not what is decoded",
-    ))
+    # 13. The cap that bounded generation is a completion limit, not a schema bound. This
+    #     read two config values and multiplied them out to a constant True; it never looked
+    #     at a request. It looks at the requests now.
+    capped, capping_detail = _requests_carry_a_completion_cap(settings, cap)
+    checks.append(_check("generation_cap_is_a_completion_limit", capped, capping_detail))
     return checks
+
+
+def _by_arm(cells: dict) -> dict:
+    grouped: dict = {}
+    for record in cells.values():
+        grouped.setdefault(record["cell"]["arm"]["arm_id"], []).append(record)
+    return grouped
+
+
+def _arms_identical_to_p0(p0_cells: dict, p1_cells: dict) -> list:
+    """P1 arms whose every compared cell is byte-identical to P0 on the same task."""
+    p0_by_task = {v["cell"]["task_id"]: v.get("final_report", "")
+                  for v in p0_cells.values()}
+    identical = []
+    for arm_id, records in sorted(_by_arm(p1_cells).items()):
+        compared = 0
+        same = 0
+        for record in records:
+            baseline = p0_by_task.get(record["cell"]["task_id"])
+            if baseline is None:
+                continue
+            compared += 1
+            if record.get("final_report", "") == baseline:
+                same += 1
+        if compared and same == compared:
+            identical.append(arm_id)
+    return identical
+
+
+def _fallbacks_are_on_the_ledger(settings: Settings, *, expected: int) -> tuple:
+    """Every fallback and failure the cells report has a matching ledger record."""
+    import sqlite3
+
+    path = settings.data_root / str(settings.get("week1", "paths", "provider_ledger"))
+    if not path.exists():
+        return False, f"no provider ledger at {path} to reconcile against"
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        failed = conn.execute(
+            "SELECT COUNT(*) FROM external_call_attempts WHERE state IN"
+            " ('FAILED_FINAL','FAILED_UNKNOWN')").fetchone()[0]
+        incidents = conn.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]
+        conn.close()
+    except sqlite3.Error as e:
+        return False, f"the ledger could not be reconciled: {e}"
+    if expected and not (failed or incidents):
+        return False, (f"{expected} fallback/failure(s) in the cells and none on the ledger; "
+                       "the cost of a fallback is not being recorded")
+    return True, f"{failed} failed attempt(s) and {incidents} incident(s) on the ledger"
+
+
+def _requests_carry_a_completion_cap(settings: Settings, cap: int) -> tuple:
+    """Read the requests that were actually sent, not the config that describes them."""
+    import sqlite3
+
+    path = settings.data_root / str(settings.get("week1", "paths", "provider_ledger"))
+    if not path.exists():
+        return False, f"no provider ledger at {path}; no request could be inspected"
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT a.request_object_ref FROM external_call_attempts a"
+            " JOIN external_calls c ON c.call_id = a.call_id"
+            " WHERE c.provider='vllm' AND a.request_object_ref IS NOT NULL"
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        return False, f"the ledger could not be read: {e}"
+    if not rows:
+        return False, "no inference request was recorded, so no cap could be observed"
+
+    from ..object_store import ObjectStore
+
+    store = ObjectStore(settings.data_root
+                        / str(settings.get("week1", "paths", "provider_root")) / "objects")
+    uncapped = 0
+    seen = 0
+    for row in rows:
+        try:
+            body = json.loads(store.get_bytes(row["request_object_ref"]).decode("utf-8"))
+        except Exception:  # noqa: BLE001 - an unreadable request is not an observed cap
+            continue
+        seen += 1
+        limit = body.get("max_tokens")
+        if not isinstance(limit, int) or limit <= 0 or limit > cap:
+            uncapped += 1
+    if not seen:
+        return False, "no inference request body could be read back"
+    if uncapped:
+        return False, f"{uncapped}/{seen} inference request(s) carried no usable max_tokens"
+    return True, f"{seen} inference request(s) all carried max_tokens <= {cap}"
+
+
+class LedgerUnreadable(RuntimeError):
+    """The canary could not read the ledger it verifies against.
+
+    Its own absence used to be reported as zero open reservations and zero selector
+    decode -- the two ledger-derived checks then passed on a host with no ledger at all.
+    """
 
 
 def _work_key_of(record: dict) -> str:
@@ -268,16 +405,21 @@ def _inference_events(settings: Settings) -> list[dict]:
 
     path = settings.data_root / str(settings.get("week1", "paths", "provider_ledger"))
     if not path.exists():
-        return []
+        # Not "no calls". A canary that cannot read the ledger has not verified anything
+        # about what was dispatched, and returning [] made every ledger-derived check read
+        # the absence of evidence as evidence of absence.
+        raise LedgerUnreadable(f"no provider ledger at {path}")
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT op_class, work_key, usage_json FROM external_calls WHERE provider='vllm'"
+            "SELECT c.op_class, c.work_key, a.usage_json FROM external_calls c"
+            " JOIN external_call_attempts a ON a.call_id = c.call_id"
+            " WHERE c.provider='vllm' AND a.state='COMMITTED'"
         ).fetchall()
         conn.close()
-    except sqlite3.Error:
-        return []
+    except sqlite3.Error as e:
+        raise LedgerUnreadable(f"{path} is unreadable: {e}") from e
     events = []
     for row in rows:
         usage = json.loads(row["usage_json"] or "{}")
@@ -294,16 +436,16 @@ def _open_external_calls(settings: Settings) -> int:
 
     path = settings.data_root / str(settings.get("week1", "paths", "provider_ledger"))
     if not path.exists():
-        return 0
+        raise LedgerUnreadable(f"no provider ledger at {path}")
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         count = conn.execute(
-            "SELECT COUNT(*) FROM external_calls WHERE state NOT IN"
+            "SELECT COUNT(*) FROM external_call_attempts WHERE state NOT IN"
             " ('COMMITTED','FAILED_FINAL','FAILED_UNKNOWN')").fetchone()[0]
         conn.close()
         return int(count)
-    except sqlite3.Error:
-        return 0
+    except sqlite3.Error as e:
+        raise LedgerUnreadable(f"{path} is unreadable: {e}") from e
 
 
 def _listable(path: Path) -> bool:

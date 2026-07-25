@@ -169,3 +169,39 @@ def test_a_failed_phase_is_recorded_not_erased(store):
     assert record.state == "FAILED"
     assert json.dumps(record.detail).count("stack mismatch") == 1
     assert not store.is_complete(Phase.DOCTOR_PASSED)
+
+
+# --- the spine has to be walkable by the commands that walk it -------------------------------
+
+
+def test_the_gpu_smoke_phase_is_unreachable_without_the_gates_before_it(tmp_path):
+    """The exact shape of the bug: only three phases were ever recorded, and the first legal
+    edge out of NEW is DOCTOR_PASSED. A *passing* canary crashed on success -- begin() raised
+    -- while a failing one exited cleanly, and run-screen could not start at all."""
+    from shapeflow_p1.campaign.phases import IllegalPhaseTransition, PhaseStore
+    from shapeflow_p1.experiment.ledger import Ledger
+    from shapeflow_p1.experiment.state_machine import Phase
+
+    ledger = Ledger(str(tmp_path / "l.sqlite"))
+    phases = PhaseStore(ledger, protocol_sha="p")
+    with pytest.raises(IllegalPhaseTransition):
+        phases.begin(Phase.GPU_SMOKE_PASSED)
+    ledger.close()
+
+
+def test_the_recorded_gates_make_the_smoke_and_screen_phases_reachable(tmp_path):
+    from shapeflow_p1.campaign.phases import PhaseStore
+    from shapeflow_p1.experiment.ledger import Ledger
+    from shapeflow_p1.experiment.state_machine import Phase
+
+    ledger = Ledger(str(tmp_path / "l.sqlite"))
+    phases = PhaseStore(ledger, protocol_sha="p")
+    for phase in (Phase.DOCTOR_PASSED, Phase.ACQUISITION_COMPLETE, Phase.SNAPSHOTS_FROZEN,
+                  Phase.P0_PARITY_PASSED):
+        phases.begin(phase)
+        phases.complete(phase, {})
+    phases.begin(Phase.GPU_SMOKE_PASSED)
+    phases.complete(Phase.GPU_SMOKE_PASSED, {})
+    phases.begin(Phase.SCREEN_RUNNING)
+    assert phases.current() is Phase.GPU_SMOKE_PASSED
+    ledger.close()

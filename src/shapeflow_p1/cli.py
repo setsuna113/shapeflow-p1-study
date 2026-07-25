@@ -96,6 +96,32 @@ def _require_approval() -> None:
         _fail(f"refusing to run: the approval does not bind this configuration.\n{e}")
 
 
+def _record_phase(phase_name: str, detail: dict) -> None:
+    """Record a completed campaign phase.
+
+    Only three phases were ever written -- GPU_SMOKE_PASSED, SCREEN_RUNNING and
+    SCREEN_COMPLETE -- and the state machine's first legal edge from NEW is DOCTOR_PASSED.
+    So with the earlier gates unrecorded, `begin(GPU_SMOKE_PASSED)` raised
+    IllegalPhaseTransition: a *passing* canary crashed on success while a failing one exited
+    cleanly, and `run-screen` could not start at all.
+    """
+    from .campaign.phases import PhaseStore
+    from .experiment.ledger import Ledger
+    from .experiment.state_machine import Phase
+
+    settings = _settings()
+    path = settings.path("provider_ledger")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ledger = Ledger(str(path))
+    try:
+        phases = PhaseStore(ledger, protocol_sha=settings.shas["week1"])
+        phase = Phase(phase_name)
+        phases.begin(phase)
+        phases.complete(phase, detail)
+    finally:
+        ledger.close()
+
+
 def _provider_client(settings, role: str = "runner"):
     from .providers.provider_client import ProviderClient, load_role_token
 
@@ -130,6 +156,8 @@ def doctor(
             _fail(f"doctor: FAILED -- {len(skipped)} check(s) could not run. A check that did "
                   "not run has not been satisfied; it is not a pass.")
         _fail("doctor: FAILED")
+    _record_phase("DOCTOR_PASSED", {"role": role or "unspecified",
+                                    "checks": len(report.checks)})
     typer.echo("doctor: ok")
 
 
@@ -394,6 +422,12 @@ def acquire(config: Path = _CFG,
         return ExaCaptureClient(client.exa_transport(task_id=task_id), params)
 
     outcome = asyncio.run(acquire_all(settings, client_factory=factory, fetched_at_utc=_now()))
+    if not outcome.incomplete and not outcome.blocked_credential:
+        _record_phase("ACQUISITION_COMPLETE", {
+            "acquired": outcome.tasks_acquired, "skipped": outcome.tasks_skipped,
+            "campaign_sha256": outcome.campaign_sha256, "usd": round(outcome.spend_usd, 4)})
+        _record_phase("SNAPSHOTS_FROZEN", {
+            "campaign_sha256": outcome.campaign_sha256})
     typer.echo(f"acquired={outcome.tasks_acquired} skipped={outcome.tasks_skipped} "
                f"queries ok/empty/failed={outcome.queries_ok}/{outcome.queries_empty}/"
                f"{outcome.queries_failed} root={outcome.campaign_sha256[:12]}")
@@ -445,6 +479,7 @@ def test_p0_parity(config: Path = _CFG) -> None:
     if result.returncode != 0:
         typer.echo(result.stderr[-4000:], err=True)
         _fail("P0 parity failed; all GPU screening is barred")
+    _record_phase("P0_PARITY_PASSED", {"probe": "tests/integration/parity_probe.py"})
     typer.echo("p0 parity: ok")
 
 

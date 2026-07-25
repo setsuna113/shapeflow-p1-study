@@ -5,17 +5,26 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# The sentinel the coordinator actually watches: $DATA_ROOT/runner/STOP_REQUESTED
+# (configs/week1.yaml runtime.stop_sentinel). This script used to touch $REPO/runs/
+# STOP_REQUESTED, which nothing reads, and then wait for $REPO/runs/STOPPED_CLEAN, which
+# nothing writes -- so every graceful stop burned its full 120s timeout and then killed or
+# refused to kill.
+DATA_ROOT="${SHAPEFLOW_DATA_ROOT:-/storage/nvme/shapeflow-data}"
+STOP_REQUESTED="$DATA_ROOT/runner/STOP_REQUESTED"
+STOPPED_CLEAN="$DATA_ROOT/runner/STOPPED_CLEAN"
 RUN_PGID="${SHAPEFLOW_RUN_PGID:-}"
 
 echo "stop_safely: requesting graceful shutdown at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # 1. Signal the coordinator to stop admitting new work (it watches for this sentinel).
-touch "$REPO/runs/STOP_REQUESTED" 2>/dev/null || true
+mkdir -p "$(dirname "$STOP_REQUESTED")" 2>/dev/null || true
+touch "$STOP_REQUESTED" 2>/dev/null || true
 
 # 2. Give the current attempt a bounded window to reach a terminal ledger state and flush.
 TIMEOUT="${STOP_TIMEOUT_SECONDS:-120}"
 for _ in $(seq "$TIMEOUT"); do
-  if [ -f "$REPO/runs/STOPPED_CLEAN" ]; then
+  if [ -f "$STOPPED_CLEAN" ]; then
     echo "stop_safely: coordinator confirmed clean stop"
     exit 0
   fi

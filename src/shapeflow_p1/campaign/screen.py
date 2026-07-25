@@ -12,6 +12,7 @@ the one you cannot get when you need it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,12 @@ from ..providers.provider_client import ProviderClient, load_role_token
 from .runner import CampaignRunner, RunnerConfig, available_tasks, questions_for, write_status
 from .selector_client import SelectorModelCall
 from .settings import Settings
+
+
+def _now_utc() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 __all__ = ["run_screening", "open_run_ledger", "provider_client_for"]
 
@@ -52,7 +59,46 @@ async def run_screening(
     run_id: Optional[str] = None,
     arms_block: Optional[str] = None,
 ) -> dict:
-    """Execute the screening split in paired blocks, resuming whatever is already committed."""
+    """Execute the screening split in paired blocks, resuming whatever is already committed.
+
+    Holds the GPU lease for the run's lifetime. ops/gpu_lease.py has been correct since it
+    was written -- an flock keyed by GPU UUID, released by the kernel on a crash -- and had
+    no production caller at all, so the only exclusivity on a shared four-GPU host was an
+    `nvidia-smi` process count in start_engine.sh, which is a race rather than a lease.
+    """
+    lease = _gpu_lease(settings)
+    with contextlib.ExitStack() as stack:
+        if lease is not None:
+            stack.enter_context(lease)
+        return await _run_screening_leased(
+            settings, repo=repo, max_cells=max_cells, run_id=run_id, arms_block=arms_block)
+
+
+def _gpu_lease(settings: Settings):
+    """The lease for the device this run will use, or None when no UUID is pinned.
+
+    The UUID comes from the environment the engine was started with (CUDA_VISIBLE_DEVICES is
+    set to a UUID by start_engine.sh, never an index -- plan §5.2 is explicit that an index
+    is not a device identity).
+    """
+    from ..ops.gpu_lease import GpuLease
+
+    uuid = (os.environ.get("SHAPEFLOW_GPU_UUID")
+            or os.environ.get("CUDA_VISIBLE_DEVICES") or "").strip()
+    if not uuid.startswith("GPU-"):
+        return None
+    lock_file = settings.data_root / str(settings.get("week1", "runtime", "gpu_lease_file"))
+    return GpuLease(uuid, lock_dir=lock_file.parent)
+
+
+async def _run_screening_leased(
+    settings: Settings,
+    *,
+    repo: Path,
+    max_cells: Optional[int] = None,
+    run_id: Optional[str] = None,
+    arms_block: Optional[str] = None,
+) -> dict:
     ledger, store = open_run_ledger(settings)
     client = provider_client_for(settings, "runner")
     token = client.token
@@ -136,6 +182,17 @@ async def run_screening(
             "cells": body["cells_total"], "blocks": body["blocks_total"],
             "schedule_sha256": schedule_sha,
         })
+    if runner.stop_requested():
+        # The counterpart to the stop sentinel. stop_safely.sh waits for this file and
+        # nothing had ever written it, so every graceful stop burned its whole timeout and
+        # then fell through to killing a process group.
+        clean = stop_sentinel.parent / "STOPPED_CLEAN"
+        clean.parent.mkdir(parents=True, exist_ok=True)
+        clean.write_text(json.dumps({
+            "run_id": run_id, "stopped_at_utc": _now_utc(),
+            "cells_committed": body["cells_committed"],
+            "cells_total": body["cells_total"],
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     ledger.close()
     body["ok"] = body["blocks_complete"] > 0
     body["run_id"] = run_id

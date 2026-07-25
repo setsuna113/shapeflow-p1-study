@@ -80,10 +80,41 @@ def _states(manifest, value="COMMITTED"):
     return {cell_key(c): value for c in manifest.cells}
 
 
+def _provider_ledger(settings, *, max_tokens=768):
+    """A real provider ledger with one committed inference attempt.
+
+    The ledger-derived checks read it rather than a stub, because their whole failure mode
+    was reading an absent ledger as "nothing was dispatched" and passing.
+    """
+    import json
+
+    from shapeflow_p1.experiment.ledger import Ledger
+    from shapeflow_p1.object_store import ObjectStore
+
+    path = settings.data_root / str(settings.get("week1", "paths", "provider_ledger"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ledger = Ledger(str(path))
+    store = ObjectStore(
+        settings.data_root / str(settings.get("week1", "paths", "provider_root")) / "objects")
+    ref = store.put_bytes(json.dumps({"model": "m", "max_tokens": max_tokens}).encode())
+    with ledger.transaction() as cur:
+        cur.execute(
+            "INSERT INTO external_calls(call_id, provider, op_class, call_key, work_key,"
+            " state, attempt_count, created_at, updated_at)"
+            " VALUES ('c1','vllm','PAGE_P1_SELECTOR_LOCAL','k','WK-H_ID','COMMITTED',1,1,1)")
+        cur.execute(
+            "INSERT INTO external_call_attempts(attempt_id, call_id, attempt_ordinal, state,"
+            " request_object_ref, usage_json, opened_at)"
+            " VALUES ('a1','c1',0,'COMMITTED',?,'{\"completion_tokens\": 120}',1)",
+            (ref.key,))
+    ledger.close()
+
+
 def _run(settings, monkeypatch, inference):
     import shapeflow_p1.campaign.canary as canary
 
     manifest = _manifest()
+    _provider_ledger(settings)
     monkeypatch.setattr(canary, "_inference_events", lambda _s: inference)
     monkeypatch.setattr(canary, "_open_external_calls", lambda _s: 0)
     monkeypatch.setattr(canary, "_patched_graph_check",
@@ -237,3 +268,91 @@ def _status(checks: list[dict], name: str) -> str:
 
 def test_verify_is_the_public_entry_point():
     assert callable(_verify)
+
+
+# --- the checks that used to pass no matter what ---------------------------------------------
+
+
+def test_the_fallback_check_can_actually_fail(settings, monkeypatch, proved_repo):
+    """It was `_check(..., True, ...)`: it formatted counts into a sentence and passed."""
+    manifest, canary = _run(settings, monkeypatch, _good_inference())
+    outputs = _outputs(manifest)
+    first = next(iter(outputs.values()))
+    first["counts"]["page_fallbacks"] = 3          # a fallback the ledger knows nothing about
+    checks = canary._verify(settings, manifest, _states(manifest), outputs, repo=proved_repo)
+    assert _status(checks, "fallback_and_failures_accounted") == "FAIL"
+
+
+def test_the_generation_cap_check_reads_requests_not_config(settings, monkeypatch,
+                                                            proved_repo):
+    """It multiplied two config values into a constant True and never saw a request."""
+    manifest, canary = _run(settings, monkeypatch, _good_inference())
+    # Re-write the recorded request without a cap.
+    import json
+
+    from shapeflow_p1.object_store import ObjectStore
+
+    store = ObjectStore(settings.data_root
+                        / str(settings.get("week1", "paths", "provider_root")) / "objects")
+    ref = store.put_bytes(json.dumps({"model": "m"}).encode())
+    from shapeflow_p1.experiment.ledger import Ledger
+
+    ledger = Ledger(str(settings.data_root
+                        / str(settings.get("week1", "paths", "provider_ledger"))))
+    with ledger.transaction() as cur:
+        cur.execute("UPDATE external_call_attempts SET request_object_ref=?", (ref.key,))
+    ledger.close()
+
+    checks = canary._verify(settings, manifest, _states(manifest), _outputs(manifest),
+                            repo=proved_repo)
+    assert _status(checks, "generation_cap_is_a_completion_limit") == "FAIL"
+
+
+def test_one_checkpoint_kind_is_not_both(settings, monkeypatch, proved_repo):
+    """It was a set intersection, so an H-only run passed a check named 'both boundaries'."""
+    manifest, canary = _run(settings, monkeypatch, _good_inference())
+    outputs = _outputs(manifest)
+    for record in outputs.values():
+        record["checkpoints"] = [c for c in record["checkpoints"]
+                                 if c["kind"] != "CCheckpoint"]
+    checks = canary._verify(settings, manifest, _states(manifest), outputs, repo=proved_repo)
+    assert _status(checks, "checkpoints_present") == "FAIL"
+
+
+def test_an_arm_that_is_byte_identical_to_p0_fails(settings, monkeypatch, proved_repo):
+    """One differing cell out of six used to be enough for the whole check."""
+    manifest, canary = _run(settings, monkeypatch, _good_inference())
+    outputs = _outputs(manifest)
+    p0 = next(v for v in outputs.values() if v["cell"]["arm"]["arm_id"] == "P0")
+    for record in outputs.values():
+        if record["cell"]["arm"]["arm_id"] != "P0":
+            record["final_report"] = p0["final_report"]
+    checks = canary._verify(settings, manifest, _states(manifest), outputs, repo=proved_repo)
+    assert _status(checks, "p1_bytes_differ_from_p0") == "FAIL"
+
+
+def test_an_arm_that_reduced_nothing_fails_even_beside_one_that_did(settings, monkeypatch,
+                                                                    proved_repo):
+    """reduce_published_batch fires for any bound bundle, so one working control satisfied
+    the old total while a completely inert LLM arm passed behind it."""
+    manifest, canary = _run(settings, monkeypatch, _good_inference())
+    outputs = _outputs(manifest)
+    for record in outputs.values():
+        if record["cell"]["arm"]["arm_id"] not in ("P0", "CPU_LEXICAL"):
+            record["counts"]["page_batches_reduced"] = 0
+            record["counts"]["close_reduced"] = 0
+            record["counts"]["page_batches_deferred"] = 0
+    checks = canary._verify(settings, manifest, _states(manifest), outputs, repo=proved_repo)
+    assert _status(checks, "p1_strategy_invocations") == "FAIL"
+
+
+def test_an_unreadable_ledger_is_a_failure_not_a_zero(settings, monkeypatch, proved_repo):
+    import shapeflow_p1.campaign.canary as canary_module
+
+    manifest, canary = _run(settings, monkeypatch, _good_inference())
+    monkeypatch.setattr(canary_module, "_inference_events",
+                        lambda _s: (_ for _ in ()).throw(
+                            canary_module.LedgerUnreadable("gone")))
+    checks = canary._verify(settings, manifest, _states(manifest), _outputs(manifest),
+                            repo=proved_repo)
+    assert _status(checks, "ledger_readable") == "FAIL"

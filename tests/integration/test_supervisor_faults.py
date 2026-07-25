@@ -154,3 +154,59 @@ def test_the_supervisor_records_what_it_did(tmp_path):
     _proc, repo = _run_supervisor(tmp_path, f"echo start >> {counter}\nexit 0\n")
     log = (repo / "logs" / "coordinator.log").read_text()
     assert "starting:" in log and "child exited status=0" in log
+
+
+# --- the property this file's docstring claims, actually exercised ---------------------------
+
+
+def test_a_restart_never_lets_the_ledger_accept_the_same_work_twice(tmp_path):
+    """This module's docstring has always claimed it; nothing here touched a ledger.
+
+    The supervisor restarts a crashed child, and the child re-derives its work keys. The
+    guarantee is that the second run resumes rather than re-commits, and the partial unique
+    index is what makes a double commit a database error instead of a silent overwrite.
+    """
+    from shapeflow_p1.experiment.ledger import IllegalTransition, Ledger
+
+    path = str(tmp_path / "ledger.sqlite")
+
+    def one_pass(commit: bool):
+        ledger = Ledger(path)
+        key = ledger.ensure_work_item(
+            protocol_sha="p", split="S", phase_id="run-screen", task_id="T1",
+            arm_id="P0", variant_id="v", replicate_id="0", checkpoint_hash="B1",
+            stage_version="v1", engine_epoch="e1", side_effecting=True)
+        attempt = ledger.claim(key, "worker", lease_seconds=60)
+        if attempt is not None and commit:
+            ledger.advance(attempt.attempt_id, "MATERIALIZED")
+            ledger.advance(attempt.attempt_id, "VALIDATED")
+            ledger.commit(attempt.attempt_id, result_object_ref="a" * 64)
+        ledger.close()
+        return key, attempt
+
+    key, first = one_pass(commit=True)
+    assert first is not None
+
+    # The restart: same coordinates, same key, and the item is already terminal.
+    _key2, second = one_pass(commit=False)
+    assert second is None, "a committed work item was claimed again after a restart"
+
+    ledger = Ledger(path)
+    rows = ledger.raw_connection.execute(
+        "SELECT COUNT(*) c FROM attempts WHERE work_key=? AND state='COMMITTED'", (key,)
+    ).fetchone()
+    assert rows["c"] == 1
+    ledger.close()
+
+
+def test_a_restarted_child_is_given_the_flags_that_make_it_resume(tmp_path):
+    """The test at the top of this file is named "restarted with its flags" and never
+    inspected argv, so `--resume --protocol-sha` -- the only thing that makes a restart safe
+    after launch -- was never checked."""
+    argv_log = tmp_path / "argv.log"
+    proc, _repo = _run_supervisor(
+        tmp_path,
+        f'echo "$@" >> {argv_log}\nexit 7\n',
+        burst=2, restart_sec=0,
+    )
+    assert argv_log.exists(), f"the child never ran: {proc.stderr[-400:]}"
