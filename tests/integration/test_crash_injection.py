@@ -85,7 +85,7 @@ def _provider(tmp_path, upstream, caps=None):
         ProviderConfig(served_model="M"), ledger=ledger, budget=budget,
         store=ObjectStore(tmp_path / "objects"), redactor=SecretRedactor(),
         tokens=RoleTokens(TOKENS), upstream=upstream,
-        tavily_key="tvly-CRASHTESTKEY0000000000", deepseek_key="sk-CRASHTESTKEY000000000",
+        tavily_key="tvly-FAKE-CRASHTEST-00000000", deepseek_key="sk-FAKE-CRASHTEST-0000000",
     )
     service.reconcile_on_start()
     return service, ledger, budget
@@ -108,7 +108,7 @@ def test_crash_before_the_reservation_leaves_nothing_charged(tmp_path):
     service, ledger, budget = _provider(tmp_path, lambda *a: calls.append(a))
     before = _totals(ledger)
     with pytest.raises(ProviderError):
-        service.tavily_search({**_tavily_body(), "api_key": "tvly-A-CLIENTS-OWN-KEY-00000"})
+        service.tavily_search({**_tavily_body(), "api_key": "tvly-FAKE-A-CLIENTS-OWN-KEY0"})
     assert calls == []
     assert _totals(ledger) == before
     ledger.close()
@@ -144,7 +144,7 @@ def test_crash_after_send_keeps_the_worst_case_and_survives_restart(tmp_path):
         ProviderConfig(), ledger=ledger, budget=budget,
         store=ObjectStore(tmp_path / "objects"), redactor=SecretRedactor(),
         tokens=RoleTokens(TOKENS), upstream=upstream,
-        tavily_key="tvly-CRASHTESTKEY0000000000", deepseek_key="sk-CRASHTESTKEY000000000")
+        tavily_key="tvly-FAKE-CRASHTEST-00000000", deepseek_key="sk-FAKE-CRASHTEST-0000000")
     fresh.reconcile_on_start()
     _cap2, reserved2, settled2 = _totals(ledger)["tavily_credits"]
     assert (reserved2, settled2) == (0.0, 2.0)

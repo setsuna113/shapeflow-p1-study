@@ -33,11 +33,11 @@ echo "== unit + property tests =="
 
 echo "== secret scan (real credentials must not appear; FAKE placeholders allowed) =="
 # Mirrors .gitleaks.toml patterns. Excludes gitignored dirs and the __pycache__.
-hits=$(grep -rEn 'tvly-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{12,}' \
+hits=$(grep -rEn 'tvly-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{12,}|(EXA_API_KEY|x-api-key)["'"'"'[:space:]:=]{1,4}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
         --include='*.py' --include='*.md' --include='*.toml' --include='*.json' \
         --include='*.yaml' --include='*.sh' \
         src tests schemas scripts configs protocol ./*.md ./*.toml 2>/dev/null \
-      | grep -v 'FAKEFAKEFAKE' || true)
+      | grep -vE '(tvly|sk|exa)-[A-Z0-9-]*FAKE[A-Z0-9-]*' || true)
 if [ -n "$hits" ]; then
   echo "SECRET SCAN FAILED:"; echo "$hits"; exit 1
 fi

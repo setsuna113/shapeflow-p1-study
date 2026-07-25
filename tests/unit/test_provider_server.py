@@ -25,8 +25,8 @@ from shapeflow_p1.runtime.provider_server import (
 )
 from shapeflow_p1.secrets import SecretRedactor
 
-FAKE_TAVILY = "tvly-FAKEKEYFORTESTS0000000000"
-FAKE_DEEPSEEK = "sk-FAKEDEEPSEEKKEY000000000000"
+FAKE_TAVILY = "tvly-FAKE-KEY-FOR-TESTS-00000"
+FAKE_DEEPSEEK = "sk-FAKE-DEEPSEEK-KEY-00000000"
 
 TOKENS = {
     "runner": "runner-token-0000000000000000",
@@ -141,7 +141,7 @@ def test_a_client_supplied_key_is_refused(tmp_path):
     """A client that could send its own key would have had one in memory."""
     service, *_ = _service(tmp_path)
     body = _tavily_body()
-    body["api_key"] = "tvly-SOMEONE-ELSES-KEY-000000"
+    body["api_key"] = "tvly-FAKE-SOMEONE-ELSES-KEY0"
     with pytest.raises(ProviderError) as excinfo:
         service.tavily_search(body)
     assert excinfo.value.status == 400

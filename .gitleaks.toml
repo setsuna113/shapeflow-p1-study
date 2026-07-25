@@ -13,6 +13,12 @@ regex = '''tvly-[A-Za-z0-9_\-]{16,}'''
 tags = ["key", "tavily"]
 
 [[rules]]
+id = "exa-api-key"
+description = "Exa API key (a bare UUID; scoped to the contexts an Exa key appears in)"
+regex = '''(?i)(exa[_-]?api[_-]?key|x-api-key)["'\s:=]{1,4}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'''
+tags = ["key", "exa"]
+
+[[rules]]
 id = "deepseek-api-key"
 description = "DeepSeek / OpenAI-compatible secret key"
 regex = '''sk-[A-Za-z0-9_\-]{16,}'''
@@ -32,10 +38,14 @@ tags = ["url"]
 
 [allowlist]
 description = "Placeholders and the redaction test corpus"
-# Deliberate fake secrets used to PROVE redaction works must not trip the scan.
+# Deliberate fake secrets used to PROVE redaction works must not trip the scan. The
+# convention is narrow on purpose: an uppercase token containing FAKE, which a real
+# credential does not look like. The allowlist used to name three literals while the
+# fixtures used eight different strings, so the local gate's secret scan had never passed
+# on this repository -- it reported the repo's own test doubles as leaked keys, every time,
+# which is how a gate stops being read.
 regexes = [
-  '''tvly-FAKEFAKEFAKEFAKEFAKE''',
-  '''sk-FAKEFAKEFAKEFAKEFAKE''',
+  '''(tvly|sk|exa)-[A-Z0-9-]*FAKE[A-Z0-9-]*''',
 ]
 paths = [
   '''\.env\.example$''',

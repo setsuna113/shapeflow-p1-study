@@ -34,8 +34,8 @@ from shapeflow_p1.runtime.provider_server import (
 )
 from shapeflow_p1.secrets import SecretRedactor
 
-FAKE_TAVILY = "tvly-INTEGRATIONFAKEKEY000000"
-FAKE_DEEPSEEK = "sk-INTEGRATIONFAKEDEEPSEEK00"
+FAKE_TAVILY = "tvly-FAKE-INTEGRATION-000000"
+FAKE_DEEPSEEK = "sk-FAKE-INTEGRATION-DEEPSEEK"
 
 TOKENS = {
     "runner": "itest-runner-token-000000000",
