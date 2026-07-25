@@ -51,10 +51,20 @@ class CloseStrategyConfig:
     close_mode: str              # dedicated_selector | prefix_preserving | fused_with_fallback
     token_budget: int
     chunk_max_tokens: int = 320
+    #: Which chunker runs over the compressor-visible view. The variant registry has always
+    #: declared one per C arm; this node never had a field to put it in, so every C arm
+    #: chunked the same way and the axis did not exist here.
+    chunker: str = "paragraph_sentence_v1"
 
     def __post_init__(self) -> None:
         if self.node not in (VISIBLE, REGISTRY, "C_FUSED_EXT"):
             raise ValueError(f"unknown close node {self.node!r}")
+        from .pipeline import CLOSE_CHUNKERS
+
+        if self.chunker not in CLOSE_CHUNKERS:
+            raise ValueError(
+                f"close chunker {self.chunker!r} has no implementation "
+                f"(have {sorted(CLOSE_CHUNKERS)})")
 
 
 class CloseSelectionStrategy:

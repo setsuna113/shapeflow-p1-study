@@ -203,7 +203,18 @@ def spans_from_page(text: str, *, content_hash: str, occurrence_id: str, chunker
 #: `visible_view` were declared as chunker names in configs/variants.yaml and read by
 #: nothing: the close path never looked at cfg.chunker, so every C arm chunked identically
 #: and the chunker axis did not exist at that node.
-CLOSE_CHUNKERS = {"paragraph_sentence_v1", "fixed_token_v1", "markdown_structure_v1"}
+#:
+#: Each entry takes one token budget, because the variant declares one. `fixed_token_v1`
+#: expresses that as a sliding window with overlap, so the budget is translated here rather
+#: than passed through under a name it does not have.
+CLOSE_CHUNKERS: dict[str, Callable] = {
+    "paragraph_sentence_v1": lambda text, tok, budget: paragraph_sentence_v1(
+        text, tokenizer=tok, max_tokens=budget),
+    "markdown_structure_v1": lambda text, tok, budget: markdown_structure_v1(
+        text, tokenizer=tok, max_tokens=budget),
+    "fixed_token_v1": lambda text, tok, budget: fixed_token_v1(
+        text, tokenizer=tok, window=budget, overlap=max(1, budget // 8)),
+}
 
 
 def spans_from_visible_view(view_bytes: bytes, *, view_hash: str, messages: Sequence[dict],
@@ -226,7 +237,7 @@ def spans_from_visible_view(view_bytes: bytes, *, view_hash: str, messages: Sequ
         if chunker not in CLOSE_CHUNKERS:
             raise ValueError(
                 f"unknown close chunker {chunker!r} (have {sorted(CLOSE_CHUNKERS)})")
-        for chunk in CHUNKERS[chunker](text, tokenizer, max_tokens=max_tokens):
+        for chunk in CLOSE_CHUNKERS[chunker](text, tokenizer, max_tokens):
             start = msg["byte_start"] + len(text[:chunk.char_start].encode("utf-8"))
             end = msg["byte_start"] + len(text[:chunk.char_end].encode("utf-8"))
             spans.append(build_visible_message_span(

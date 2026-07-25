@@ -176,7 +176,7 @@ class StrategyFactory:
             variant_id=spec.variant_id, node=spec.node,
             contract=spec.contract if spec.contract.startswith("P1_") else "P1_ID",
             aggregation=spec.aggregation, close_mode=spec.close_mode,
-            token_budget=self._token_budget,
+            token_budget=self._token_budget, chunker=spec.chunker,
         )
         if spec.contract == "CPU_LEXICAL":
             selector = CpuLexicalAsyncSelector()
