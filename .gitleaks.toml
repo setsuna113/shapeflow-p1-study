@@ -50,4 +50,7 @@ regexes = [
 paths = [
   '''\.env\.example$''',
   '''\.gitleaks\.toml$''',
+  # Scanner metadata, like the config above: it records which findings were reviewed and
+  # dismissed, so its own contents are descriptions of secrets rather than secrets.
+  '''\.gitleaksignore$''',
 ]

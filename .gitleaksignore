@@ -6,16 +6,14 @@
 # the fixtures in the working tree to the FAKE convention, but the older commits still contain
 # the strings they were renamed from.
 #
-# Every entry below was checked against the historical blob before being listed. They are
-# synthetic test doubles that never authenticated anything:
+# Every entry below was checked against the historical blob before being listed. All are
+# synthetic test doubles that never authenticated anything. Described rather than quoted,
+# because writing the literals here made this very file trip the scan:
 #
-#   tvly-CRASHTESTKEY0000000000      crash-injection provider fixture
-#   sk-CRASHTESTKEY000000000         crash-injection provider fixture
-#   tvly-A-CLIENTS-OWN-KEY-00000     asserts a caller-supplied key is refused
-#   tvly-SOMEONE-ELSES-KEY-000000    asserts a foreign key is refused
-#   Zx91ppQvNn02bLkeRt77 and friends  the redaction corpus in test_secrets.py, which must look
-#                                     like credentials because proving they get redacted is the
-#                                     entire point of that test
+#   test_crash_injection.py   provider fixtures whose bodies read CRASHTESTKEY, plus two that
+#                             exist to assert a caller-supplied or foreign key is refused
+#   test_secrets.py           the redaction corpus, which must look like credentials because
+#                             proving it gets redacted is the entire point of that test
 #
 # Pinned by fingerprint rather than allowlisted by path or rule, deliberately: a path allowlist
 # for tests/ would silently accept a real key pasted into a test tomorrow, whereas these
