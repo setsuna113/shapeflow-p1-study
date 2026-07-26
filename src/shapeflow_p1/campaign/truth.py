@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..canonical import canonical_json
-from ..evaluation.judge_client import DeepSeekJudge, JudgeUnavailable
+from ..evaluation.judge_client import DeepSeekJudge, JudgeTruncated, JudgeUnavailable
 from ..evaluation.truth_builder import CandidateAtom, assemble_truth_packet
 from ..evidence.chunkers import (
     fixed_token_v1,
@@ -550,8 +550,16 @@ async def build_truth_for_task(
     model_gap_suggestions_ignored = 0
     responses = []
 
-    truth_batches = _excerpt_batches(spans, max_prompt_chars=max_prompt_chars)
-    for batch in truth_batches:
+    # A stack, not a list, so a batch whose *answer* does not fit can be split and its halves
+    # pushed back. Batching is sized by prompt characters, which bounds the input but says
+    # nothing about the output: a span-dense batch can be well under the prompt budget and
+    # still ask for more atoms than the completion cap can hold. Retrying the identical request
+    # cannot fix that -- the same spans ask for the same answer -- so every attempt truncated
+    # and the whole task was abandoned after paying for four of them.
+    pending = list(reversed(_excerpt_batches(spans, max_prompt_chars=max_prompt_chars)))
+    split_batches = 0
+    while pending:
+        batch = pending.pop()
         excerpts = "\n".join(f"{s['span_id']}: {s['text']}" for s in batch)
         try:
             response = await judge.judge(
@@ -564,6 +572,21 @@ async def build_truth_for_task(
                 ),
                 validate=_checker(),
             )
+        except JudgeTruncated as e:
+            if len(batch) < 2:
+                # One span whose atoms do not fit is a real limit, not a batching mistake.
+                # Splitting further is impossible and dropping it would silently shorten the
+                # answer key, so the task stops here.
+                raise JudgeUnavailable(
+                    f"truth for {task_id} unavailable: a single span still overflows the "
+                    f"output cap ({e}); it cannot be split further and omitting it would "
+                    "make an omission outside the surviving spans look correct"
+                ) from e
+            middle = len(batch) // 2
+            pending.append(batch[middle:])
+            pending.append(batch[:middle])
+            split_batches += 1
+            continue
         except JudgeUnavailable as e:
             # No packet rather than an incomplete one: an answer key that silently omitted one
             # batch would make omissions outside the surviving batches look correct.
@@ -600,6 +623,10 @@ async def build_truth_for_task(
             })
         # A real SUCCESS id suggested by the model still cannot become an unresolved gap.
         model_gap_suggestions_ignored += len(response.data.get("known_gaps") or ())
+
+    # How many responses came from extraction, fixed before the conflict pass appends
+    # its own. Adaptive splitting means this is no longer the initial batch count.
+    extraction_batches = len(responses)
 
     candidates: list[CandidateAtom] = []
     for entry in accumulated.values():
@@ -665,7 +692,7 @@ async def build_truth_for_task(
         *[
             (
                 "truth_extraction"
-                if index < len(truth_batches) else "conflict_reconciliation",
+                if index < extraction_batches else "conflict_reconciliation",
                 response,
             )
             for index, response in enumerate(responses)
@@ -700,11 +727,15 @@ async def build_truth_for_task(
         "returned_model": ",".join(returned_models),
         "system_fingerprint": ",".join(fingerprints),
         "span_count": len(spans),
-        "span_batches": len(truth_batches),
+        # Batches actually judged, which exceeds the initial packing when a batch had to be
+        # split because its answer overflowed the completion cap. Recorded with the split count
+        # so a packet built from adapted batching is distinguishable from one that was not.
+        "span_batches": len(responses),
+        "span_batches_split_for_output_cap": split_batches,
         "judge_calls_total": len(all_responses),
         "judge_calls_by_stage": {
-            "truth_extraction": len(truth_batches),
-            "conflict_reconciliation": len(responses) - len(truth_batches),
+            "truth_extraction": extraction_batches,
+            "conflict_reconciliation": len(responses) - extraction_batches,
             "exact_span_binding": exact_span_binding_response_count,
             "cross_chunker_binding": cross_chunker_binding_response_count,
         },

@@ -438,3 +438,111 @@ async def test_truth_artifact_records_extraction_exact_and_cross_chunker_judgmen
         "query_text": "permit database",
         "status": "TIMEOUT",
     }]
+
+
+async def test_a_batch_whose_answer_overflows_the_cap_is_split_not_abandoned(
+    tmp_path, monkeypatch,
+):
+    """A truncated answer means the batch was too big, so retrying it identically cannot help.
+
+    Batching is sized by prompt characters, which bounds the input and says nothing about the
+    output: a span-dense batch can sit well inside the prompt budget and still ask for more
+    atoms than the completion cap holds. On the run host that abandoned a whole task after
+    paying for four identical attempts, each of which truncated for the same reason.
+    """
+    import shapeflow_p1.campaign.truth as truth_module
+    import json
+
+    from shapeflow_p1.canonical import canonical_json
+    from shapeflow_p1.evaluation.judge_client import (
+        JudgeAttempt,
+        JudgeResponse,
+        JudgeTruncated,
+    )
+    from shapeflow_p1.hashing import sha256_hex
+
+    spans = [
+        {"span_id": f"{i:064x}", "text": f"Fact number {i} is established.",
+         "source_occurrence_ids": ["o1"], "char_start": 0, "char_end": 30}
+        for i in range(4)
+    ]
+    monkeypatch.setattr(truth_module, "_excerpt_spans", lambda _s, _t: spans)
+    monkeypatch.setattr(truth_module, "_query_attempts", lambda _s, _t: [])
+
+    class OverflowingJudge:
+        """Truncates on any batch larger than two spans; answers otherwise."""
+
+        def __init__(self):
+            self.batch_sizes: list[int] = []
+
+        async def judge(self, system, user, *, validate=None):
+            if "verify one proposed atomic fact" in system:
+                return JudgeResponse(
+                    data={"relation": "entail"}, requested_model="m", returned_model="m",
+                    usage={}, request_id="r", system_fingerprint="f",
+                    attempts=(JudgeAttempt(0, "p", {}, 200, "accepted"),))
+            if "identify genuine contradictions" in system:
+                return JudgeResponse(
+                    data={"contradictions": []}, requested_model="m", returned_model="m",
+                    usage={}, request_id="r", system_fingerprint="f",
+                    attempts=(JudgeAttempt(0, "p", {}, 200, "accepted"),))
+            size = sum(1 for line in user.splitlines() if line.startswith("0"))
+            self.batch_sizes.append(size)
+            if size > 2:
+                raise JudgeTruncated("every one of 4 attempts hit the 8000 token output cap")
+            return JudgeResponse(
+                data={"atoms": [{
+                    "atom_id": f"a{size}", "facet_id": "f",
+                    "text": "Fact number 0 is established.", "critical": False,
+                    "supporting_span_ids": [spans[0]["span_id"]],
+                }], "contradictions": [], "negative_evidence": [], "known_gaps": []},
+                requested_model="m", returned_model="m", usage={}, request_id="r",
+                system_fingerprint="f",
+                attempts=(JudgeAttempt(0, "p", {}, 200, "accepted"),))
+
+    class FakeSettings:
+        shas = {"judge": "j" * 64}
+        claim_scope = "FORMATIVE_ONLY"
+        repo = Path(__file__).resolve().parents[2]
+
+        def path(self, name):
+            return {
+                "truth_packets": tmp_path / "truth",
+                "frozen_corpus_for_runner": tmp_path / "frozen",
+                "acquisition": tmp_path / "acquisition",
+            }[name]
+
+        def get(self, *keys):
+            return {("week1", "odr", "max_content_length"): 50_000}[keys]
+
+    settings = FakeSettings()
+    pool_dir = settings.path("frozen_corpus_for_runner") / "pools"
+    pool_dir.mkdir(parents=True)
+    # The pool digest is re-derived on load, so it has to be the real hash of the body.
+    pool_body = {"occurrences": [], "snapshots": {}}
+    pool_body["pool_sha256"] = sha256_hex(canonical_json(pool_body))
+    (pool_dir / "T1.json").write_text(json.dumps(pool_body), encoding="utf-8")
+    acquisition_body = {
+        "task_id": "T1", "acquisition_spec_sha256": "s" * 64,
+        "fetched_at_utc": "2026-07-25T00:00:00Z", "tavily_params": {},
+        "queries": [], "occurrences": [], "snapshots": [],
+    }
+    acquisition_body["acquisition_digest"] = sha256_hex(canonical_json(acquisition_body))
+    acquisition_body["merkle_root"] = "m" * 64
+    acquisition_path = settings.path("acquisition") / "T1.json"
+    acquisition_path.parent.mkdir(parents=True)
+    acquisition_path.write_text(json.dumps(acquisition_body), encoding="utf-8")
+
+    judge = OverflowingJudge()
+    result = await truth_module.build_truth_for_task(
+        settings, judge=judge, task_id="T1",
+        question="How many facts are established?", required_facets=["f"],
+        semantic_verifier=None, max_prompt_chars=100_000,
+    )
+
+    assert judge.batch_sizes[0] == 4, "the first attempt should use the packed batch"
+    assert max(judge.batch_sizes[1:]) <= 2, "the oversized batch was not split"
+    artifact = json.loads(result.path.read_text(encoding="utf-8"))
+    assert artifact["provenance"]["span_batches_split_for_output_cap"] >= 1
+    # And the packet is complete: splitting must not drop the spans it re-batched.
+    assert artifact["provenance"]["span_batches"] > 1
