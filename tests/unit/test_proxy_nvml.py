@@ -54,7 +54,6 @@ async def test_causal_gate_serializes_and_work_is_non_overlapping():
     events: list[RequestEvent] = []
 
     async def upstream(body):
-        start = clock.t
         # simulate work; because the gate is exclusive, two of these cannot interleave
         clock.advance(2.0)
         return UpstreamResult(response={}, prompt_tokens=1, completion_tokens=1)

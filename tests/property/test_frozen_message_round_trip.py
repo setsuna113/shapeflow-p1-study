@@ -20,8 +20,6 @@ protects the pairing, the rendering protects the treatment.
 
 from __future__ import annotations
 
-import json
-
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 

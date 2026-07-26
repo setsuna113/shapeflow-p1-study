@@ -75,6 +75,15 @@ class TrialKind(str, Enum):
     H_E2E = "H_E2E"
     C_ONLY_E2E = "C_ONLY_E2E"
     HXC_NESTED = "HXC_NESTED"
+    #: Fork at close, run only the reducer, substitute that arm's note into the anchor's
+    #: frozen note vector at exactly its slot, and run only the final report. A distinct
+    #: estimand rather than a flavour of ``C_ONLY_E2E``, because the supervisor's mediated
+    #: response is deliberately *blocked*: re-entering the supervisor would re-run
+    #: SUPERVISOR_CONTINUE, which can spawn a fresh researcher with real search -- upstream
+    #: work after the fork, differing between arms. Naming it separately stops any artifact
+    #: from claiming an end-to-end run it did not perform; the full-graph C arms remain as
+    #: the secondary sensitivity that bounds the blocked path.
+    C_FROZEN_CONTINUATION = "C_FROZEN_CONTINUATION"
 
 
 class ForkCapabilityError(RuntimeError):
@@ -244,6 +253,8 @@ def plan_forks(
         raise ValueError("an H E2E treatment must fork at an H checkpoint")
     if trial_kind is TrialKind.C_ONLY_E2E and boundary_kind != "C":
         raise ValueError("a C-only E2E treatment must fork at a C checkpoint")
+    if trial_kind is TrialKind.C_FROZEN_CONTINUATION and boundary_kind != "C":
+        raise ValueError("a frozen-continuation treatment must fork at a C checkpoint")
     if (
         len(execution_binding_sha256) != 64
         or any(ch not in "0123456789abcdef" for ch in execution_binding_sha256)
@@ -398,6 +409,7 @@ def _validate_execution(spec: ForkSpec, result: ForkExecution) -> None:
             "every model request; this execution is not a paired replicate"
         )
     if spec.trial_kind in (TrialKind.COMPONENT, TrialKind.C_ONLY_E2E,
+                            TrialKind.C_FROZEN_CONTINUATION,
                             TrialKind.HXC_NESTED) and result.upstream_research_calls:
         raise ForkCapabilityError(
             f"{spec.trial_kind.value} replay performed {result.upstream_research_calls} "
@@ -416,6 +428,7 @@ def assert_comparable_executions(
     for spec, result in zip(plan.forks, executions, strict=True):
         _validate_execution(spec, result)
     if plan.trial_kind in (TrialKind.COMPONENT, TrialKind.C_ONLY_E2E,
+                           TrialKind.C_FROZEN_CONTINUATION,
                            TrialKind.HXC_NESTED):
         starts = {r.start_checkpoint_digest for r in executions}
         if starts != {plan.checkpoint_digest}:

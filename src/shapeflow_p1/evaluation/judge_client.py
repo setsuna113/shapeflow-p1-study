@@ -236,7 +236,21 @@ class DeepSeekJudge:
             prompt_sha = sha256_hex(canonical_json(body["messages"]))
             status, payload = await self._transport(body)
 
-            def record(outcome: str, *, reason: str = "", finish: str = "") -> JudgeAttempt:
+            # This attempt's values are bound as defaults rather than captured. Every call is
+            # made inside this iteration, so late binding is harmless today -- but a closure
+            # over loop variables that records *which attempt* something happened on is one
+            # refactor away from silently attributing every attempt to the last one.
+            def record(
+                outcome: str,
+                *,
+                reason: str = "",
+                finish: str = "",
+                index: int = index,
+                prompt_sha: str = prompt_sha,
+                sampling=sampling,
+                status: int = status,
+                payload: dict = payload,
+            ) -> JudgeAttempt:
                 return JudgeAttempt(
                     ordinal=index, prompt_sha256=prompt_sha, sampling=sampling.content(),
                     status=status, outcome=outcome,

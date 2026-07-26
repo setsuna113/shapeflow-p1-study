@@ -73,7 +73,6 @@ class AwaitingModel:
             return ResearchQuestion(research_brief="Research the harbour totals.")
         if self._structured is Summary:
             return Summary(summary="Harbour 4821; Union 4410.", key_excerpts="4821 / 4410")
-        key = id(self._structured)
         tools = self._config.get("tools", [])
         if "ConductResearch" in tools:
             n = self._turns.get("sup", 0)

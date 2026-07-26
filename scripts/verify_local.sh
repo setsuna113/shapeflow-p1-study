@@ -28,6 +28,25 @@ for m in pkgutil.walk_packages(shapeflow_p1.__path__, "shapeflow_p1."):
 print(f"imported {ok} submodules cleanly")
 PYEOF
 
+echo "== shell syntax =="
+# The launch gate, the host installer and the supervisor are shell. A syntax error in any of
+# them is only discovered on the run host, as root, mid-launch.
+for script in scripts/*.sh; do
+  bash -n "$script" || { echo "SHELL SYNTAX FAILED: $script"; exit 1; }
+done
+
+echo "== whitespace =="
+git diff --check HEAD -- . || { echo "WHITESPACE ERRORS"; exit 1; }
+
+echo "== lint (defect rules) =="
+# Deliberately not the full rule set. The repository carries several hundred stylistic
+# diagnostics (UP007 Optional -> | None, UP035, I001) whose mass rewrite right before a freeze
+# would be a large untested diff for no correctness gain. These families are the ones that
+# catch defects rather than style, and they pass today -- so this gate is real and enforced,
+# instead of aspirational and skipped. Run `ruff check .` for the full picture.
+"$PY" -m ruff check . --select E9,F63,F7,F82,F811,F841,B006,B023,S102,S307,S608 \
+  || { echo "LINT FAILED"; exit 1; }
+
 echo "== unit + property tests =="
 "$PY" -m pytest tests -q -p no:cacheprovider
 

@@ -71,6 +71,15 @@ ATTEMPT_TERMINAL = frozenset({"COMMITTED", "FAILED_FINAL", "FAILED_UNKNOWN"})
 #: Legal forward transitions of one physical attempt. Enforced by compare-and-swap, not by
 #: convention: an unconditional ``UPDATE ... WHERE attempt_id=?`` would happily move a
 #: settled attempt back to SENT, and two threads racing on one row would both "succeed".
+#: Columns of ``external_call_attempts`` that a state transition may write. Mirrors the schema
+#: in ``experiment/ledger.py``; the identity columns (attempt_id, call_id, attempt_ordinal,
+#: state) are set at insert or by the transition itself and are deliberately absent.
+_ATTEMPT_COLUMNS = frozenset({
+    "request_object_ref", "response_object_ref", "provider_request_id", "requested_model",
+    "returned_model", "system_fingerprint", "usage_json", "telemetry_json", "error_class",
+    "opened_at", "proxy_ingress_at", "dispatched_at", "response_end_at", "settled_at",
+})
+
 _LEGAL_ATTEMPT: dict[str, frozenset[str]] = {
     "INTENT": frozenset({"BUDGET_RESERVED", "FAILED_FINAL"}),
     "BUDGET_RESERVED": frozenset({"SENT", "FAILED_FINAL", "FAILED_UNKNOWN"}),
@@ -160,9 +169,18 @@ class ExternalCallLedger:
             raise IllegalCallTransition(
                 f"attempt {attempt.attempt_id} cannot move {current} -> {state}"
             )
+        # Values are parameterized; the column *names* are interpolated, because SQL has no
+        # placeholder for an identifier. Every current caller passes literals, but this is the
+        # money path -- so the identifiers are checked against the schema rather than trusted,
+        # which makes the interpolation provably safe instead of safe-by-inspection.
+        unknown = sorted(set(cols) - _ATTEMPT_COLUMNS)
+        if unknown:
+            raise IllegalCallTransition(
+                f"refusing to update unknown external_call_attempts columns: {unknown}"
+            )
         assignments = "".join(f", {k}=?" for k in cols)
         cur.execute(
-            f"UPDATE external_call_attempts SET state=?{assignments} WHERE attempt_id=?"
+            f"UPDATE external_call_attempts SET state=?{assignments} WHERE attempt_id=?"  # noqa: S608 - identifiers checked against _ATTEMPT_COLUMNS above; values are parameterized
             " AND state=?",
             [state, *cols.values(), attempt.attempt_id, current],
         )

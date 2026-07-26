@@ -139,8 +139,20 @@ filterwarnings = ["error::DeprecationWarning:shapeflow_p1.*"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# The pinned upstream graph is not ours to restyle, and .build/ is a materialized copy of it.
+# Linting them buried our own findings under ~700 vendor diagnostics, which is why nothing was
+# enforcing this gate at all.
+extend-exclude = ["vendor", ".build"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "S"]
 # S101 (assert) is fine in tests; invariant asserts in src are deliberate and reviewed.
 ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+# The isolation and supervisor tests must actually run setfacl/getfacl/flock and drop
+# privileges -- proving those boundaries is the point, and S603/S607 describe exactly the
+# thing being tested. S108 is a literal /tmp path in a fixture, not a temp-file race.
+"tests/**" = ["S603", "S607", "S108", "S105", "S106"]
+# scripts/ is checked by `bash -n`, not ruff; gpu_diagnostic.py shells out on purpose.
+"scripts/**" = ["S603", "S607"]
