@@ -322,7 +322,10 @@ def select(results: list[CandidateResult], rule: dict, pricing: dict, cells: int
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--batches-per-task", type=int, default=3)
-    ap.add_argument("--out", default=str(REPO / "reports" / "JUDGE_CALIBRATION.json"))
+    # Defaults into the steward's own tree, not the repo: reports/ is root-owned on the run
+    # host, so writing there is the last thing this does and the one thing it cannot do. A
+    # crash at that point discards a completed measurement run.
+    ap.add_argument("--out", default=None)
     ap.add_argument("--acquire", action="store_true",
                     help="fetch the held-out worlds first (they are not acquired up front)")
     args = ap.parse_args()
@@ -399,10 +402,20 @@ async def main() -> int:
         "decision": decision,
         "limitations_recorded_not_gated": rule["limitations_recorded_not_gated"],
     }
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
-    print(json.dumps(decision, indent=2))
+    # Print the whole report before writing it. The measurements are the expensive part; the
+    # file is a convenience, and a run that measured everything and then failed to write must
+    # not lose the numbers with it.
+    print("=== CALIBRATION REPORT ===", flush=True)
+    print(json.dumps(report, indent=2, sort_keys=True), flush=True)
+
+    out = Path(args.out) if args.out else (
+        settings.path("steward_root") / "judge_calibration.json")
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"written: {out}")
+    except OSError as e:
+        print(f"WARNING: report not written ({e}); the measurements are above", file=sys.stderr)
     return 0
 
 
