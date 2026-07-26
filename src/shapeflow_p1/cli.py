@@ -538,6 +538,69 @@ def report(
     typer.echo(render_markdown(decision))
 
 
+@app.command("authorize-budget-raise")
+def authorize_budget_raise(
+    config: Path = _CFG,
+    reason: str = typer.Option(..., "--reason", help="why the original ceiling was wrong"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Provider-only: apply raised caps from the frozen budget config, on the record.
+
+    ``Budget.ensure_account`` refuses to widen a ceiling, and that refusal is correct -- a cap
+    that drifted upward as a side effect of loading a config would let a round spend past what
+    its approval was granted against. So a raise cannot happen implicitly, and editing
+    ``budget_v1.yaml`` alone changes nothing about what this ledger will allow.
+
+    This is the explicit act that applies one. It requires a verified approval, so the wider
+    ceiling is bound to a protocol version someone froze deliberately; it records an incident
+    per resource carrying the old value, the new value and how much was already spent; and it
+    refuses to lower anything, because a call that moved caps in both directions would just be
+    an ordinary write with a longer name.
+    """
+    from .experiment.budget import Budget
+    from .experiment.ledger import Ledger
+
+    _require_role("provider")
+    binding = _require_approval()
+    settings = _settings()
+    ledger_path = settings.path("provider_ledger")
+    if not ledger_path.exists():
+        _fail(f"no provider ledger at {ledger_path}")
+
+    caps = settings.budget_caps()
+    ledger = Ledger(str(ledger_path))
+    try:
+        budget = Budget(ledger)
+        current = {
+            r["resource"]: (r["cap"], r["settled_total"])
+            for r in ledger.raw_connection.execute(
+                "SELECT resource, cap, settled_total FROM budget_accounts")
+        }
+        changes = []
+        for resource, cap in sorted(caps.items()):
+            have = current.get(resource)
+            if have is None or cap <= have[0]:
+                continue
+            changes.append((resource, have[0], cap, have[1]))
+        if not changes:
+            typer.echo("no cap in the frozen config is above the ledger; nothing to raise")
+            return
+        for resource, was, now, spent in changes:
+            typer.echo(f"  {resource}: {was} -> {now}   (already spent {spent})")
+        if dry_run:
+            typer.echo("dry run; nothing was changed")
+            return
+        for resource, _was, now, _spent in changes:
+            budget.authorize_cap_raise(
+                resource, now,
+                authorization=f"approval binding {binding.digest[:12]}",
+                reason=reason,
+            )
+    finally:
+        ledger.close()
+    typer.echo(f"raised {len(changes)} cap(s) under binding {binding.digest[:12]}")
+
+
 @app.command("freeze-corpus-attempt")
 def freeze_corpus_attempt(
     config: Path = _CFG,

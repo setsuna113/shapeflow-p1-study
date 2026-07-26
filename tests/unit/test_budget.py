@@ -322,3 +322,70 @@ def test_a_v1_database_keeps_every_row_it_already_paid_for(tmp_path):
     reservation = lg.raw_connection.execute(
         "SELECT attempt_id FROM budget_reservations WHERE reservation_id='r1'").fetchone()
     assert reservation["attempt_id"] == attempt["attempt_id"]
+
+
+# --- an authorized cap raise leaves evidence -------------------------------------------------
+
+
+def _capped_budget(tmp_path):
+    from shapeflow_p1.experiment.budget import Budget
+    from shapeflow_p1.experiment.ledger import Ledger
+
+    ledger = Ledger(str(tmp_path / "l.sqlite"))
+    budget = Budget(ledger)
+    budget.ensure_account("deepseek_usd", 10.0)
+    return ledger, budget
+
+
+def test_a_config_edit_alone_cannot_widen_a_ceiling(tmp_path):
+    """The guard that matters: loading a bigger number must not spend against it."""
+    from shapeflow_p1.experiment.budget import BudgetCapRaised
+
+    _ledger, budget = _capped_budget(tmp_path)
+    with pytest.raises(BudgetCapRaised):
+        budget.ensure_account("deepseek_usd", 200.0)
+    assert budget.available("deepseek_usd") == 10.0
+
+
+def test_an_authorized_raise_applies_and_records_what_changed(tmp_path):
+    ledger, budget = _capped_budget(tmp_path)
+    result = budget.authorize_cap_raise(
+        "deepseek_usd", 200.0,
+        authorization="approval binding abc123", reason="measured cost exceeds the ceiling")
+
+    assert result["previous_cap"] == 10.0 and result["cap"] == 200.0 and result["changed"]
+    assert budget.available("deepseek_usd") == 200.0
+
+    row = ledger.raw_connection.execute(
+        "SELECT severity, kind, detail FROM incidents WHERE kind='budget_cap_raised'").fetchone()
+    assert row is not None, "the ceiling moved with no incident recording it"
+    # Old value, new value and the authorization must all be recoverable from the record.
+    assert "10.0 -> 200.0" in row["detail"]
+    assert "abc123" in row["detail"]
+    assert "measured cost exceeds the ceiling" in row["detail"]
+
+
+def test_a_raise_will_not_quietly_lower_a_cap(tmp_path):
+    """Accepting both directions here would make an audited raise an ordinary write."""
+    _ledger, budget = _capped_budget(tmp_path)
+    with pytest.raises(ValueError, match="tightening goes"):
+        budget.authorize_cap_raise(
+            "deepseek_usd", 1.0, authorization="a", reason="b")
+    assert budget.available("deepseek_usd") == 10.0
+
+
+def test_a_raise_must_name_its_authorization_and_reason(tmp_path):
+    _ledger, budget = _capped_budget(tmp_path)
+    for authorization, reason in (("", "r"), ("a", "")):
+        with pytest.raises(ValueError, match="authorization and its reason"):
+            budget.authorize_cap_raise(
+                "deepseek_usd", 200.0, authorization=authorization, reason=reason)
+
+
+def test_raising_to_the_same_value_records_nothing(tmp_path):
+    ledger, budget = _capped_budget(tmp_path)
+    result = budget.authorize_cap_raise(
+        "deepseek_usd", 10.0, authorization="a", reason="b")
+    assert result["changed"] is False
+    assert ledger.raw_connection.execute(
+        "SELECT COUNT(*) c FROM incidents WHERE kind='budget_cap_raised'").fetchone()["c"] == 0

@@ -138,6 +138,67 @@ class Budget:
                 cur.execute("ROLLBACK;")
                 raise
 
+    def authorize_cap_raise(
+        self, resource: str, cap: float, *, authorization: str, reason: str
+    ) -> dict:
+        """Raise one cap deliberately, leaving evidence that the ceiling moved.
+
+        ``ensure_account`` refuses to raise, and that refusal is right: a cap that drifted
+        upward as a side effect of loading a config would let a round spend past what its
+        approval was granted against, with nothing in the ledger showing it had changed.
+
+        A raise is nonetheless sometimes the correct answer -- a ceiling set before anything was
+        measured can turn out to be unable to buy the artifact the campaign exists to produce.
+        So it is available, but only as an explicit act that names its authorization and records
+        an incident carrying the old and new values. The distinction being preserved is not
+        "caps never rise", it is "a cap never rises without a trace".
+
+        Refuses to *lower* here: that is ``ensure_account``'s job, and accepting both directions
+        through one call is how an audited raise becomes an ordinary write.
+        """
+        if not authorization or not reason:
+            raise ValueError("a cap raise must record its authorization and its reason")
+        with self._ledger.lock:
+            cur = self._conn().cursor()
+            cur.execute("BEGIN IMMEDIATE;")
+            try:
+                row = cur.execute(
+                    "SELECT cap, reserved_total, settled_total FROM budget_accounts"
+                    " WHERE resource=?", (resource,),
+                ).fetchone()
+                # These raise out to the handler below, which is what rolls back. Rolling back
+                # here as well left no transaction for it to undo and turned a clear refusal
+                # into "cannot rollback - no transaction is active".
+                if row is None:
+                    raise BudgetCapRaised(resource, 0.0, cap)
+                previous = float(row["cap"])
+                if cap < previous:
+                    raise ValueError(
+                        f"{resource} cap {cap} is below the current {previous}; tightening goes "
+                        "through ensure_account, not through an authorized raise"
+                    )
+                if cap == previous:
+                    cur.execute("COMMIT;")
+                    return {"resource": resource, "previous_cap": previous, "cap": cap,
+                            "changed": False}
+                cur.execute(
+                    "UPDATE budget_accounts SET cap=?, updated_at=? WHERE resource=?",
+                    (cap, self._now(), resource),
+                )
+                cur.execute("COMMIT;")
+            except BaseException:
+                cur.execute("ROLLBACK;")
+                raise
+        self._ledger.record_incident(
+            severity="WARNING", kind="budget_cap_raised",
+            detail=(
+                f"{resource}: {previous} -> {cap}; spent={row['settled_total']}; "
+                f"authorization={authorization}; reason={reason}"
+            ),
+        )
+        return {"resource": resource, "previous_cap": previous, "cap": cap, "changed": True,
+                "settled": float(row["settled_total"])}
+
     def available(self, resource: str) -> float:
         with self._ledger.lock:
             row = self._conn().execute(
