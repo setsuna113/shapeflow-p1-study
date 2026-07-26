@@ -119,6 +119,16 @@ chown -R sfprovider:sfprovider "$DATA_ROOT/provider"; chmod 0700 "$DATA_ROOT/pro
 readonly_acl() {
   # Existing bytes plus defaults for files created later under a service UMask of 0077.
   # Named users receive r-X only; the owner keeps rwX. No shared directory grants write.
+  #
+  # BOTH applications are recursive, and the second one used to not be. A default ACL is
+  # inherited from a file's *immediate* parent, so setting defaults only on the top directory
+  # leaves every pre-existing subdirectory without one -- and the object store is three levels
+  # deep (objects/<ab>/<cd>/<sha>.zst). New blobs therefore landed with no ACL whatsoever, and
+  # `getfacl` on them showed nothing to be masked: the grant was not weakened, it was absent.
+  # Observed on the run host with 1465 frozen page blobs the runner could not read.
+  #
+  # `setfacl -R -m d:...` applies default entries to directories only, which is exactly right:
+  # files have no default ACL to set.
   local path="$1"; shift
   local -a access_args=()
   local -a default_args=("d:u::rwx" "d:g::---" "d:m::rwx" "d:o::---")
@@ -127,7 +137,7 @@ readonly_acl() {
     default_args+=("d:u:$reader:r-x")
   done
   setfacl -R -m "$(IFS=,; echo "${access_args[*]}")" "$path"
-  setfacl -m "$(IFS=,; echo "${default_args[*]}")" "$path"
+  setfacl -R -m "$(IFS=,; echo "${default_args[*]}")" "$path"
 }
 
 # Approval history is outside the Git execution tree: the steward appends, while every role
@@ -316,8 +326,12 @@ done
 # python3 is already a hard dependency of every service on this host, so use it and request the
 # mode directly.
 new_probe_at_mode() {  # <owner-uid> <path> <octal-mode>
+  # The parent directories are created by the same identity, with the same mkdir(parents=True)
+  # the object store uses, because *where* a file is created decides which default ACL it
+  # inherits. Probing only the top of a granted tree passed while the object store -- three
+  # levels down at objects/<ab>/<cd>/<sha>.zst -- produced files with no ACL at all.
   runuser -u "$1" -- python3 -c \
-    'import os,sys; os.close(os.open(sys.argv[1], os.O_CREAT|os.O_WRONLY|os.O_EXCL, int(sys.argv[2], 8)))' \
+    'import os,sys; p=sys.argv[1]; os.makedirs(os.path.dirname(p), exist_ok=True); os.close(os.open(p, os.O_CREAT|os.O_WRONLY|os.O_EXCL, int(sys.argv[2], 8)))' \
     "$2" "$3"
 }
 # The real publication sequence: create restricted, widen to 0640 before publishing, exactly as
@@ -362,7 +376,7 @@ for directory in \
   "$DATA_ROOT/runner/runs" \
   "$DATA_ROOT/runner/object_store" \
   "$DATA_ROOT/runner/checkpoints"; do
-  probe="$directory/.runner-evaluator-read-probe-$$"
+  probe="$directory/.probe-$$/ab/cd/.runner-evaluator-read-probe"
   denied="$directory/.evaluator-write-denied-probe-$$"
   new_shared_probe sfrunner "$probe"
   runuser -u sfevaluator -- cat "$probe" >/dev/null \
@@ -372,10 +386,10 @@ for directory in \
     echo "FATAL: sfevaluator can write runner publication directory $directory" >&2
     exit 1
   fi
-  rm -f "$probe"
+  rm -rf "$(dirname "$(dirname "$(dirname "$probe")")")"
 done
 
-probe="$DATA_ROOT/runner/frozen_corpus/.steward-publication-read-probe-$$"
+probe="$DATA_ROOT/runner/frozen_corpus/objects/.probe-$$/ab/cd/.steward-publication-read-probe"
 new_shared_probe sfsteward "$probe"
 runuser -u sfrunner -- cat "$probe" >/dev/null \
   || { echo "FATAL: sfrunner cannot read newly published frozen corpus bytes" >&2; exit 1; }
