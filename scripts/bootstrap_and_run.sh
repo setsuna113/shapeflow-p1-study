@@ -156,7 +156,14 @@ step "materialize the pinned submodule and verify the patched-tree hash"
 
 step "uv sync --frozen"
 command -v uv >/dev/null 2>&1 || blocked "NO_UV" "uv not installed"
-uv sync --frozen --all-extras || blocked "UV_SYNC" "uv sync --frozen failed; do not relax --frozen"
+# open_deep_research is a path install of .build/, which the previous step just rewrote, and its
+# version string never changes -- so uv has no way to notice the bytes moved and will happily
+# keep a stale copy installed. Observed on the run host: the patched tree hashed correctly on
+# disk while the *installed* package was still the previous round's. The next step catches that
+# and blocks, but it blocks on a condition that is trivially avoidable, so force this one
+# package to be reinstalled from the tree that was just materialized.
+uv sync --frozen --all-extras --reinstall-package open_deep_research \
+  || blocked "UV_SYNC" "uv sync --frozen failed; do not relax --frozen"
 
 step "the installed ODR is the patched tree"
 "$REPO/.venv/bin/python" - <<'PY' || blocked "IMPORT_ORIGIN" "the installed ODR is not the patched tree"
