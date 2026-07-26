@@ -255,6 +255,45 @@ screen:
   # block is not a paired observation and is never spliced with another one.
   require_complete_blocks: true
 
+# The PRIMARY C estimand. C treatment fires after all research, so it cannot have changed
+# anything upstream -- every upstream difference between two full-graph C arms is pure noise
+# the estimate must average away, and ~32 formative tasks cannot do that. So the headline C
+# effect is a same-checkpoint fork, and the full-graph C_* arms in screen_arms above are
+# demoted to a secondary sensitivity that bounds the mediation path this phase blocks.
+#
+# Naming it C_FROZEN_CONTINUATION rather than C_ONLY_E2E is deliberate. Re-entering the
+# supervisor would re-run SUPERVISOR_CONTINUE, which can spawn a fresh researcher with real
+# search -- upstream work after the fork, differing between arms. So the supervisor's realized
+# plan is held fixed: only this child's note changes, and only final_report_generation runs.
+# Both arms still reach a terminal report; the blocked path is named, not hidden.
+#
+# This block is hash-locked like every other: changing an arm, the allowlist or terminal_mode
+# changes week1_sha and invalidates the launch approval.
+c_fork:
+  split: FORMATIVE_SCREEN
+  estimand: C_FROZEN_CONTINUATION
+  # One full-graph P0 cell per task supplies the trajectory, every close checkpoint, the
+  # continuation envelope, and the upstream work constant every arm of that anchor carries.
+  anchor_variant: P0
+  # P0 is the same-boundary baseline and is mandatory; a fork set of P0 alone measures nothing.
+  arms: [P0, C01, C_TYPED_STABLE, C02, C03, C00-CPU, C00-PROSE]
+  # REPORT runs to a final report. CLOSE_ONLY is the fail-closed degradation if the report
+  # re-entry cannot be validated on the actual graph -- it is config-visible precisely so it
+  # cannot be flipped after seeing results.
+  terminal_mode: REPORT
+  # The only op classes a fork arm may issue. The provider refuses anything else before
+  # dispatch, so a leaked researcher call costs nothing rather than being found afterwards.
+  # Widening this is a binding change, deliberately not a runtime flag.
+  allowed_op_classes: [COMPRESSOR_P0, COMPRESSOR_P1_SELECTOR, FINAL_WRITER]
+  # Bounds the phase against the same GPU budget as the screen. Each arm is two model calls,
+  # so this is far cheaper per boundary than a full-graph cell -- the anchor is the cost.
+  max_boundaries_per_task: 2
+  # Arms run back to back with their anchor. get_today_str() is datetime.now() and is
+  # formatted into both the compressor and the final-report prompt, and the shared upstream
+  # constant belongs to one engine boot; a boundary spread across either is void.
+  require_same_utc_date: true
+  require_same_engine_epoch: true
+
 runtime:
   lease_seconds: 1800
   heartbeat_seconds: 60
