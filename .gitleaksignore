@@ -1,0 +1,32 @@
+# Known-benign findings, pinned by exact fingerprint (commit:file:rule:line).
+#
+# gitleaks scans git *history*, while scripts/verify_local.sh greps the working tree. That gap
+# is why commit 90795cf ("let the local gate's secret scan pass on this repository") made the
+# local scan pass while the launch gate's gitleaks step still blocked on every run: it renamed
+# the fixtures in the working tree to the FAKE convention, but the older commits still contain
+# the strings they were renamed from.
+#
+# Every entry below was checked against the historical blob before being listed. They are
+# synthetic test doubles that never authenticated anything:
+#
+#   tvly-CRASHTESTKEY0000000000      crash-injection provider fixture
+#   sk-CRASHTESTKEY000000000         crash-injection provider fixture
+#   tvly-A-CLIENTS-OWN-KEY-00000     asserts a caller-supplied key is refused
+#   tvly-SOMEONE-ELSES-KEY-000000    asserts a foreign key is refused
+#   Zx91ppQvNn02bLkeRt77 and friends  the redaction corpus in test_secrets.py, which must look
+#                                     like credentials because proving they get redacted is the
+#                                     entire point of that test
+#
+# Pinned by fingerprint rather than allowlisted by path or rule, deliberately: a path allowlist
+# for tests/ would silently accept a real key pasted into a test tomorrow, whereas these
+# entries stop matching the moment the content, file or line changes.
+1276268f83c0c3d257ed2e755051070cc880ec82:tests/integration/test_crash_injection.py:tavily-api-key:88
+1276268f83c0c3d257ed2e755051070cc880ec82:tests/integration/test_crash_injection.py:tavily-api-key:111
+1276268f83c0c3d257ed2e755051070cc880ec82:tests/integration/test_crash_injection.py:tavily-api-key:146
+1276268f83c0c3d257ed2e755051070cc880ec82:tests/integration/test_crash_injection.py:deepseek-api-key:88
+1276268f83c0c3d257ed2e755051070cc880ec82:tests/integration/test_crash_injection.py:deepseek-api-key:146
+24a96124a7cdf28f5414b17ee9613a8be34a07b0:tests/unit/test_provider_server.py:tavily-api-key:144
+52deb9afc831f3cb8c3c3e7c3ffb6c77f0c26b79:tests/unit/test_secrets.py:generic-api-key:21
+52deb9afc831f3cb8c3c3e7c3ffb6c77f0c26b79:tests/unit/test_secrets.py:generic-api-key:42
+52deb9afc831f3cb8c3c3e7c3ffb6c77f0c26b79:tests/unit/test_secrets.py:api-key-query-param:42
+52deb9afc831f3cb8c3c3e7c3ffb6c77f0c26b79:tests/unit/test_secrets.py:authorization-bearer:34
