@@ -808,8 +808,25 @@ def build_truth(config: Path = _CFG) -> None:
         sampling=settings.judge_sampling(),
     )
     evaluator_tasks = settings.path("evaluator_root") / "tasks"
-    built = 0
+    packets = settings.path("truth_packets")
+    built = skipped = 0
     for task_id in acquired_task_ids(settings):
+        # An existing packet is already-frozen truth, so it is skipped rather than rebuilt --
+        # the same rule `acquire` applies to an already-frozen world.
+        #
+        # Rebuilding is not merely wasteful, it cannot succeed: a packet is write-once, and the
+        # build is not reproducible run to run (batching adapts to what truncates, a retry
+        # advances the judge's seed, and only calls with byte-identical bodies replay from the
+        # ledger). So a second pass re-derived a *different* artifact and the write-once guard
+        # refused it -- correctly. The consequence was that any interrupted build could never be
+        # resumed: every later run died on the first task that had already succeeded, and 44
+        # unbuilt packets stayed unbuilt behind it.
+        #
+        # Skipping keeps the guard meaningful. It still fires if something rewrites a packet in
+        # place; it no longer fires merely because the work was done.
+        if (packets / f"{task_id}.json").exists():
+            skipped += 1
+            continue
         record = json.loads(
             (evaluator_tasks / f"{task_id}.json").read_text(encoding="utf-8"))
         asyncio.run(build_truth_for_task(
@@ -818,7 +835,7 @@ def build_truth(config: Path = _CFG) -> None:
             required_facets=record["authored_facets"],
         ))
         built += 1
-    typer.echo(f"truth packets built: {built}")
+    typer.echo(f"truth packets built: {built} (skipped {skipped} already frozen)")
 
 
 @app.command("freeze-analysis-design")

@@ -546,3 +546,63 @@ async def test_a_batch_whose_answer_overflows_the_cap_is_split_not_abandoned(
     assert artifact["provenance"]["span_batches_split_for_output_cap"] >= 1
     # And the packet is complete: splitting must not drop the spans it re-batched.
     assert artifact["provenance"]["span_batches"] > 1
+
+
+def test_build_truth_skips_a_task_whose_packet_is_already_frozen(tmp_path, monkeypatch):
+    """An interrupted truth build has to be resumable.
+
+    A packet is write-once and the build is not reproducible run to run -- batching adapts to
+    what truncates, a retry advances the judge's seed, and only byte-identical request bodies
+    replay from the ledger. So re-deriving an existing packet yields a *different* artifact and
+    the write-once guard refuses it, correctly. Before this, that meant every resumed run died
+    on the first task that had already succeeded, leaving the rest permanently unbuilt.
+    """
+    import shapeflow_p1.cli as cli_module
+
+    packets = tmp_path / "truth"
+    evaluator_tasks = tmp_path / "evaluator" / "tasks"
+    packets.mkdir(parents=True)
+    evaluator_tasks.mkdir(parents=True)
+    for task_id in ("T-done", "T-todo"):
+        (evaluator_tasks / f"{task_id}.json").write_text(json.dumps({
+            "original_question": "q", "authored_facets": ["f"]}), encoding="utf-8")
+    (packets / "T-done.json").write_text("{}", encoding="utf-8")
+
+    built: list[str] = []
+
+    class FakeSettings:
+        def path(self, name):
+            return {"truth_packets": packets,
+                    "evaluator_root": tmp_path / "evaluator"}[name]
+
+        def judge_model(self):
+            return "deepseek-v4-flash"
+
+        def judge_max_retries(self):
+            return 1
+
+        def judge_sampling(self):
+            return None
+
+    async def fake_build(_settings, *, judge, task_id, question, required_facets):
+        built.append(task_id)
+
+    monkeypatch.setattr(cli_module, "_require_role", lambda _r: None)
+    monkeypatch.setattr(cli_module, "_settings", lambda: FakeSettings())
+    monkeypatch.setattr(cli_module, "_provider_client", lambda *_a, **_k: _FakeClient())
+    monkeypatch.setattr(
+        "shapeflow_p1.campaign.acquire.acquired_task_ids",
+        lambda _s: ["T-done", "T-todo"])
+    monkeypatch.setattr("shapeflow_p1.campaign.truth.build_truth_for_task", fake_build)
+    monkeypatch.setattr(
+        "shapeflow_p1.evaluation.judge_client.DeepSeekJudge",
+        lambda *_a, **_k: object())
+
+    cli_module.build_truth(config=None)
+
+    assert built == ["T-todo"], "the already-frozen packet was rebuilt instead of skipped"
+
+
+class _FakeClient:
+    def deepseek_transport(self, **_kw):
+        return None
