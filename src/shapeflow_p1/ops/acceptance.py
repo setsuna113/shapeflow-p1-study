@@ -112,17 +112,33 @@ def run_acceptance(settings: Settings, *, repo: Path) -> dict:
     return {"ok": _ok(gates), "gates": [g.as_dict() for g in gates]}
 
 
-#: Phrases a report may not contain, and what is wrong with each. These are not style
-#: preferences: every one of them was written about this study while the artifact that
-#: would justify it did not exist. A verdict that survives an adversarial reader cannot
-#: contain a sentence whose evidence nobody can produce.
-UNSUPPORTED_CLAIMS: dict[str, str] = {
-    "Block C/D 完成": "no block is complete while the component screen re-runs the full graph",
-    "Block C/D complete": "no block is complete while the component screen re-runs the full graph",
-    "campaign runner 完成": "the campaign runner cannot start: PhaseStore rejects its first phase",
-    "campaign runner complete": "the campaign runner cannot start: PhaseStore rejects its first phase",
-    "leased GPU": "the GPU is borrowed on a shared host; nothing is leased",
-    "662 tests all green": "cite the count the suite actually collects, from a run you did",
+#: Phrases a report may not contain, keyed by a short rule id, with what is wrong with each.
+#: These are not style preferences: every one of them was written about this study while the
+#: artifact that would justify it did not exist. A verdict that survives an adversarial reader
+#: cannot contain a sentence whose evidence nobody can produce.
+#:
+#: Keyed by id, because the failure detail names the *rule* and never quotes the phrase. A
+#: scanner that writes the string it searches for into its own report under reports/ poisons
+#: itself: the next run finds its own output, and the gate can never pass again no matter what
+#: is fixed. That is exactly what happened here.
+UNSUPPORTED_CLAIMS: dict[str, tuple[tuple[str, ...], str]] = {
+    "block_cd_complete": (
+        ("Block C/D 完成", "Block C/D complete"),
+        "no block is complete while the component screen re-runs the full graph",
+    ),
+    "runner_complete": (
+        ("campaign runner 完成", "campaign runner complete"),
+        "the campaign runner cannot start: PhaseStore rejects its first phase",
+    ),
+    "gpu_exclusivity": (
+        ("leased GPU", "leased gpu"),
+        "the GPU is borrowed on a shared host: the flock excludes our own second worker, "
+        "not a foreign process, so nothing is leased in the sense a reader would assume",
+    ),
+    "stale_test_count": (
+        ("662 tests all green",),
+        "cite the count the suite actually collects, from a run you did",
+    ),
 }
 
 
@@ -139,11 +155,12 @@ def check_report_claims(repo: Path) -> Gate:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for phrase in UNSUPPORTED_CLAIMS:
-            if phrase in text:
-                found.append(f"{path.relative_to(repo)}: {phrase!r}")
+        for rule_id, (phrases, _why) in UNSUPPORTED_CLAIMS.items():
+            if any(phrase in text for phrase in phrases):
+                # The rule id, never the phrase -- see the note on UNSUPPORTED_CLAIMS.
+                found.append(f"{path.relative_to(repo)}: {rule_id}")
     if found:
-        return Gate("report_claims", FAIL, "; ".join(found[:6]))
+        return Gate("report_claims", FAIL, "; ".join(sorted(found)[:6]))
     return Gate("report_claims", PASS, "no unsupported claims in reports/")
 
 

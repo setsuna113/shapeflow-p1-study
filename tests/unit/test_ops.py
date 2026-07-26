@@ -101,8 +101,37 @@ def test_a_report_that_claims_a_finished_block_fails_the_gate(tmp_path):
     )
     gate = check_report_claims(tmp_path)
     assert gate.status == "FAIL"
-    assert "Block C/D 完成" in gate.detail
-    assert "leased GPU" in gate.detail
+    assert "block_cd_complete" in gate.detail
+    assert "gpu_exclusivity" in gate.detail
+    assert "stale_test_count" in gate.detail
+    assert "WEEK1_P1_FINAL.md" in gate.detail
+
+
+def test_the_gate_does_not_write_the_phrase_it_searches_for(tmp_path):
+    """A scanner whose own output lands under reports/ must not quote the banned string.
+
+    The failure detail is written to reports/ACCEPTANCE.json, which the next run scans. When
+    the detail quoted the phrase, that file became a permanent finding and the gate could never
+    pass again however the reports were fixed -- observed on the run host, where it blocked the
+    launch on its own previous output.
+    """
+    import json
+
+    from shapeflow_p1.ops.acceptance import UNSUPPORTED_CLAIMS, check_report_claims
+
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "NOTES.md").write_text(
+        "ran on a leased GPU\n", encoding="utf-8")
+    gate = check_report_claims(tmp_path)
+    assert gate.status == "FAIL"
+
+    banned = [p for phrases, _why in UNSUPPORTED_CLAIMS.values() for p in phrases]
+    serialized = json.dumps(gate.as_dict(), ensure_ascii=False)
+    for phrase in banned:
+        assert phrase not in serialized, (
+            f"the gate's own output contains {phrase!r}; writing it under reports/ would make "
+            "the next run fail on this file forever"
+        )
 
 
 def test_a_report_of_what_actually_happened_passes(tmp_path):
