@@ -1,0 +1,104 @@
+# The judge selection rule — frozen BEFORE any calibration data exists (plan §13, review 2026-07-26).
+#
+# Why this file is committed before the harness runs: choosing a measurement instrument after
+# inspecting how it scores is a garden of forking paths. The previous attempt to switch the judge
+# rested on one arithmetic puzzle -- a model that gets a pursuit problem right is not thereby
+# shown to atomize evidence, bind exact spans, or adjudicate a contradiction. So the rule is
+# fixed here, mechanically, and the harness only fills in numbers.
+#
+# Verifiable by commit order: this file lands in its own commit, with no calibration artifact in
+# the tree. If a later commit changes any threshold below, that is a protocol change and says so.
+version: v0.1
+
+# --- what is being chosen between -----------------------------------------------------------
+#
+# reasoning_effort accepts low|medium|high|max|xhigh (verified against the live API, which 400s
+# on an unknown variant). Reasoning tokens are billed *inside* completion_tokens, so thinking and
+# the JSON answer share max_tokens -- which is the suspected cause of the observed
+# "every one of 4 attempts hit the 8000 token output cap" failure. Both are varied together
+# because raising effort without raising the cap makes truncation strictly worse.
+candidates:
+  - {id: flash-none-8k,  model: deepseek-v4-flash, reasoning_effort: null, max_tokens: 8000}
+  - {id: flash-none-32k, model: deepseek-v4-flash, reasoning_effort: null, max_tokens: 32000}
+  - {id: pro-high-32k,   model: deepseek-v4-pro,   reasoning_effort: high, max_tokens: 32000}
+  - {id: pro-max-32k,    model: deepseek-v4-pro,   reasoning_effort: max,  max_tokens: 32000}
+
+# What is running today. If the rule does not positively select something else, this stays.
+incumbent: flash-none-8k
+
+# --- material ---------------------------------------------------------------------------------
+held_out:
+  # RESERVE is not the honest holdout (that corpus was deliberately never authored, see
+  # configs/task_source.yaml). It is a substitution reserve, and decision.yaml excludes it from
+  # every analysis -- so calibrating on it cannot inform anything the study later concludes.
+  split: RESERVE
+  n_tasks: 3
+  # Acquired into a calibration-only namespace; the campaign corpus root is not touched.
+  namespace: calibration/judge_v1
+
+# --- admissibility: a candidate that fails any of these is not eligible, whatever it scores ----
+admissibility:
+  # Measured AFTER truth.py's adaptive batch splitting, not before. The 8000 -> 32000 change was
+  # never derived from data; this measures the residual failure rate that splitting cannot fix.
+  json_valid_non_truncated_min: 0.99
+  # Same input, repeated. A judge whose verdict moves under resampling adds variance to every
+  # downstream estimate, and two calls to one judge are one rater asked twice, not two raters.
+  repeat_decision_stability_min: 0.95
+  # judge.yaml requires exact span binding. This checks it mechanically rather than trusting it:
+  # the cited span_id must exist in the offered set AND the quoted excerpt must appear verbatim
+  # inside that span's text. A fabricated or drifting citation fails here.
+  span_binding_validity_min: 0.98
+
+# --- selection among the admissible ------------------------------------------------------------
+selection:
+  # Yield at fixed validity. Validity alone is trivially maximized by binding almost nothing, so
+  # the ranking metric is how much real, correctly-bound evidence a candidate recovers once it
+  # has already cleared the validity floor above.
+  primary: accepted_atoms_per_task
+  primary_direction: maximize
+  # Below this, two candidates are considered equal and cost decides. Prevents a rounding-level
+  # yield difference from buying a 3x more expensive judge.
+  primary_epsilon_relative: 0.05
+  tie_breaker: projected_total_usd
+  tie_breaker_direction: minimize
+
+# --- what happens when the rule selects nothing --------------------------------------------------
+fallback:
+  on_no_admissible_candidate: KEEP_INCUMBENT
+  status: JUDGE_CALIBRATION_INCONCLUSIVE
+  # This clause exists so an unattended run can never deadlock on the question. It is defensible
+  # because the judge is arm-blind and applied identically to every arm: a fixed imperfect judge
+  # still supports the within-study comparison, and limits only external claims.
+  rationale: >-
+    A fixed judge, even an imperfect one, supports the within-study comparison because it is
+    applied identically to every arm. Selecting no judge would stop the study; selecting one
+    after seeing outcome data would invalidate it.
+
+# --- recorded, never gated -----------------------------------------------------------------------
+# These are real threats that this design cannot resolve, so they are reported as limitations
+# rather than turned into thresholds. Inventing a cutoff for them would manufacture an arbitrary
+# exclusion and dress a judgement call as a measurement.
+limitations_recorded_not_gated:
+  # P0 and P1 differ systematically in length, citation density and failure shape. An arm-blind
+  # judge can still be differentially biased by style -- "it cannot see the arm label" is not a
+  # defence, and claiming otherwise was an error in the 2026-07-26 review.
+  - style_differential_bias
+  # The same model family authors the truth candidates and judges the reports, so a shared
+  # preference is not removed by choosing a stronger model.
+  - shared_model_preference
+  # No human labels exist yet, so binding *recall* is not measurable here. Only validity
+  # (precision-like) and yield are. Human audit remains PENDING and is what settles recall.
+  - binding_recall_requires_human_audit
+
+# --- consequences for existing artifacts ---------------------------------------------------------
+on_change:
+  # Never delete. freeze-corpus-attempt seals the round as a recorded failure, spends stay on the
+  # books, and the ledger is copied through the backup API first.
+  seal_previous_attempt_as: FAILED_AUTHORING_ATTEMPT
+  rebuild: ALL_48_PACKETS
+  reason: >-
+    judge.yaml's own rule: a judge model changed underneath a frozen stage silently mixes two
+    raters. The 9 packets already built under the incumbent are preserved for audit, not reused.
+on_no_change:
+  # Nothing changed underneath them, so they remain valid and the build resumes.
+  reuse_existing_packets: true
