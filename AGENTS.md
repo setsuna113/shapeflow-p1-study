@@ -76,9 +76,9 @@ Protocol of record: `SHAPEFLOW_P1_WEEK1_CODING_PLAN_v0.1_2026-07-24.md` (parent 
 
 ## 6. Statistics
 
-- Thresholds in `configs/decision.yaml` are protocol v0.1 and are hash-locked by
-  `protocol/launch_approval.json`. They are **not** tunable defaults. Changing any of
-  them mints a new protocol SHA and invalidates the existing approval.
+- Thresholds in `configs/decision.yaml` are protocol v0.1 and are hash-locked by the external
+  append-only approval store named by `SHAPEFLOW_APPROVAL_FILE`. They are **not** tunable
+  defaults. Changing any of them mints a new execution binding and invalidates the approval.
 - Quality guards are co-primary via intersection-union — all must pass; a good average
   never compensates a failed guard.
 - Holdout opens **once**, after an outcome-free tracked freeze. Repeated seeds are

@@ -20,6 +20,12 @@ model:
   forbid: [deepseek-reasoner, deepseek-chat]
   temperature: 0.0
   top_p: 1.0
+  # These fields are sent on every truth/report judgment and are part of the frozen policy.
+  # A retry advances the seed by its attempt ordinal, which is also recorded per response.
+  seed: 20260725
+  max_tokens: 8000
+  enable_thinking: false
+  send_thinking_switch: false
   response_format: json_object
 
 retry:
@@ -49,14 +55,15 @@ blinding:
   same_judge_calls_are_not_independent_raters: true
 
 prompts:
-  atomize_version: judge_atomize_v1
-  truth_version: judge_truth_v1
-  report_version: judge_report_v1
-  # Filled by `shapeflow-p1 freeze-stack` from the rendered prompt bytes; a change to any prompt
-  # mints a new protocol SHA rather than silently re-judging under different instructions.
-  atomize_prompt_sha256: "@STEWARD_FREEZES@"
-  truth_prompt_sha256: "@STEWARD_FREEZES@"
-  report_prompt_sha256: "@STEWARD_FREEZES@"
+  atomize_version: rule_atomize_v1
+  truth_version: judge_truth_v2_full_world
+  report_version: relation_v1
+  # The actual code-derived digests are frozen in stack_manifest.json under evaluation.*.
+  # Keeping another writable placeholder here falsely implied freeze-stack mutated this tracked
+  # config. These stable references are config identity; the manifest carries the resolved hash.
+  atomize_prompt_sha256: "stack_manifest:evaluation.atomize_prompt_sha256"
+  truth_prompt_sha256: "stack_manifest:evaluation.truth_prompt_sha256"
+  report_prompt_sha256: "stack_manifest:evaluation.report_prompt_sha256"
 
 truth_packet:
   # An atom enters accepted truth only if it binds to at least one exact source span. A fact the

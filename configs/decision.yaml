@@ -1,6 +1,6 @@
 # Decision thresholds — protocol v0.1 (plan §15.2).
 #
-# These are NOT tunable defaults. They are hash-locked by protocol/launch_approval.json
+# These are NOT tunable defaults. They are hash-locked by the external append-only approval
 # (decision_thresholds_sha) and adopted as-is from the plan. The automatic policy freeze may
 # only COPY these margins; it may never select or modify them after seeing mini results.
 # Changing any value mints a new protocol SHA and invalidates the existing approval.
@@ -27,12 +27,109 @@ quality_ni_margin:
   qualified_report_rate_pp: -5
   critical_harm_risk_pp_max: 3
   terminal_failure_risk_pp_max: 2
+  # A strict-P1 fallback is an adverse reliability outcome even when the P0 recovery succeeds.
+  # Its paired treatment-minus-P0 UCB must clear a frozen guard; it cannot be reported only as
+  # an implementation detail after seeing the fallback rate.
+  fallback_risk_pp_max: 2
 
 utility:
   minimum_meaningful_work_reduction: 0.10
   preferred_strong_reduction: 0.20
 
+# Primary decisions are made only on the exact core-factorial arms frozen before outcomes are
+# observed.  The other 6 H and 3 C implementations are useful secondary mechanism/robustness
+# comparisons, but selecting the largest LCB after inspecting them would introduce winner's
+# curse and an unadjusted multiple-comparisons claim.
+champion_selection:
+  rule: exact_preregistered_core_factorial_primary_arm_only
+  primary_arm_by_node:
+    WEBPAGE_P1: H_MARKDOWN_ID
+    C_VISIBLE: C_ID
+    H_PLUS_C_VISIBLE: H_PLUS_C
+  secondary_policy: SECONDARY_EXPLORATORY_NO_MULTIPLICITY_ADJUSTED_CLAIM
+  simplicity_order_by_node:
+    WEBPAGE_P1: [H02]
+    C_VISIBLE: [C01]
+    H_PLUS_C_VISIBLE: [H02+C01]
+
+# A P1-vs-P0 work/quality pass does not by itself identify the structured ID path as the
+# mechanism. Positive P1 claims additionally require the matched-analysis producer's
+# multiplicity-controlled composite over both frozen controls (LLM-vs-CPU and
+# ID-vs-short-prose). Missing members, failed realized-input comparability, or an invalid
+# composite fail closed to NOT_ESTABLISHED rather than relabeling generic compression as P1.
+structured_increment:
+  required_for_positive_p1_claim: true
+  schema_version: structured_increment_gate_v3
+  # These are the strict final-report NI guards for each matched control. They are tested as an
+  # intersection-union family: every guard must pass, so no within-component multiplicity
+  # adjustment is needed. The six *positive* mechanism hypotheses below are a separate Holm
+  # family. Effects are left (primary ID arm) minus right (control).
+  strict_quality_noninferiority:
+    higher_is_better_min_effect:
+      weighted_required_atom_recall: -0.05
+      grounded_claim_precision: -0.03
+      citation_correctness: -0.03
+      citation_association: -0.03
+      required_facet_coverage: -0.05
+      qualified_report: -0.05
+    lower_is_better_max_effect:
+      critical_harm: 0.03
+  multiplicity_family:
+    family_id: h_c_hc_llm_and_structured_increment_v2
+    method: holm_one_sided_across_six_primary_tests
+    familywise_alpha: 0.05
+    member_contrast_ids:
+      [H_LLM_VS_CPU, H_ID_VS_PROSE, C_LLM_VS_CPU, C_ID_VS_PROSE, HC_LLM_VS_CPU, HC_ID_VS_PROSE]
+  control_estimands:
+    # CPU runs the same ID/aggregator/renderer/preflight path. Since CPU is expected to be
+    # cheaper, demanding LLM work superiority would be nonsensical. LLM earns an increment
+    # only by a Holm-adjusted strict-quality gain while capping its added total service work.
+    LLM_vs_CPU:
+      primary_hypothesis: strict_weighted_required_atom_recall_superiority
+      effect_orientation: percentage_points_left_llm_minus_right_cpu
+      adjusted_lcb_min_pp: 2.0
+      service_work_cost_guard: paired_left_llm_over_right_cpu
+      service_work_increase_ucb_max: 0.10
+      all_strict_quality_ni_guards_required: true
+    # Prose uses another publication path and is a whole-mechanism control. Structured
+    # pointers earn an increment only when they retain strict quality and save meaningful
+    # complete service work relative to generic short prose.
+    structured_selection_vs_prose:
+      primary_hypothesis: complete_service_work_saving_superiority
+      effect_orientation: fraction_work_saved_left_id_relative_to_right_prose
+      adjusted_lcb_min: 0.10
+      all_strict_quality_ni_guards_required: true
+      # The all-offered primary estimand compares two executable bounded policies. Budget
+      # truncation is allowed on both paths and is not a semantic repair. Every prose attempt
+      # must nevertheless carry a closed, recomputable trace and semantic repair is forbidden.
+      prose_control_integrity_required: true
+      # Raw-contract nonadherence never deletes a block. Quality is re-evaluated with dirty ID
+      # output worst-case and dirty prose best-case; service-work superiority becomes
+      # NOT_ESTIMABLE because compliant-prose counterfactual work was not observed.
+      raw_contract_adherence_sensitivity_required_for_pointer_only_attribution: true
+  compound_claim:
+    label: H_C_AND_JOINT_HC_STRUCTURED_BOUNDED_POLICY_INCREMENT_EVIDENCE
+    requires_both_control_types: true
+    component_claims_reported_separately: true
+    joint_attribution_status: IDENTIFIED_BY_PREREGISTERED_JOINT_MATCHED_CONTROLS
+  by_node:
+    WEBPAGE_P1:
+      primary_arm_id: H_MARKDOWN_ID
+      required_contrast_ids: [H_LLM_VS_CPU, H_ID_VS_PROSE]
+      decision_use: REQUIRED_FOR_POSITIVE_P1_MECHANISM_ATTRIBUTION
+    C_VISIBLE:
+      primary_arm_id: C_ID
+      required_contrast_ids: [C_LLM_VS_CPU, C_ID_VS_PROSE]
+      decision_use: REQUIRED_FOR_POSITIVE_P1_MECHANISM_ATTRIBUTION
+    H_PLUS_C_VISIBLE:
+      primary_arm_id: H_PLUS_C
+      required_contrast_ids: [HC_LLM_VS_CPU, HC_ID_VS_PROSE]
+      decision_use: REQUIRED_FOR_POSITIVE_P1_MECHANISM_ATTRIBUTION
+      joint_matched_control_status: IMPLEMENTED
+
 coverage:
+  # Reserved for a future boundary-randomized invocation study. The current task-level
+  # formative eligibility family cannot create a CONDITIONAL verdict and does not read this.
   conditional_task_exposure_coverage_lcb_min: 0.30
 
 operational_guards:
@@ -43,10 +140,161 @@ operational_guards:
   terminal_failure_increase_ucb_max_pp: 2
   critical_harm_increase_ucb_max_pp: 3
 
+# The repository currently has only an operational-evidence consumer, not the live concurrent
+# APC/batching producer. A hand-written JSON object must therefore never upgrade MECHANISM_ONLY
+# to KEEP. Mint a new protocol/config hash only after the producer and its raw-block receipt are
+# implemented and validated.
+operational_evidence_producer:
+  implementation_status: NOT_IMPLEMENTED
+  required_receipt_schema: operational_evidence_producer_receipt_v1
+  required_measurement_mode: LIVE_CONCURRENT_BATCHING_WITH_APC
+  require_raw_block_index_sha256: true
+  require_raw_measurements_sha256: true
+  require_implementation_sha256: true
+
 thesis:
   e2e_speedup_lcb_min: 1.5
 
+# Joint task outcomes answer whether a mean saving hides tasks that save little, lose quality,
+# or become both slower and worse. These are task-level descriptive/Pareto summaries; source-
+# topic cluster bootstrap is still used for uncertainty and they do not replace the primary
+# all-offered ITT confidence bounds.
+task_level_joint_outcomes:
+  schema_version: task_level_joint_outcomes_policy_v1
+  quality_view: strict
+  service_work_saving_thresholds: [0.10, 0.25, 0.33]
+  higher_is_better_ni_margins:
+    weighted_required_atom_recall: -0.05
+    grounded_claim_precision: -0.03
+    citation_correctness: -0.03
+    citation_association: -0.03
+    required_facet_coverage: -0.05
+    qualified_report: -0.05
+  lower_is_better_increase_max:
+    critical_harm: 0.03
+  pareto_definition: positive_complete_work_saving_and_all_task_level_quality_guards_pass
+  adverse_joint_definition: negative_complete_work_saving_and_any_task_level_quality_guard_fails
+
+e2e_analysis:
+  schema_version: e2e_analysis_design_v1
+  n_boot: 2000
+  seed_namespace: e2e-effects-v1
+  primary_quality_view: fallback_assisted
+  primary_quality_metric: weighted_required_atom_recall
+  # Exact semantic corners, not caller-selected aliases. Analysis verifies both arm_id and the
+  # actual page/close variants frozen in each cell before estimating an interaction.
+  core_factorial:
+    p0: {arm_id: P0, page_variant: P0, close_variant: P0}
+    h: {arm_id: H_MARKDOWN_ID, page_variant: H02, close_variant: P0}
+    c: {arm_id: C_ID, page_variant: P0, close_variant: C01}
+    hc: {arm_id: H_PLUS_C, page_variant: H02, close_variant: C01}
+  quality_views: [strict, fallback_assisted, worst_case, best_case]
+  quality_metrics:
+    - weighted_required_atom_recall
+    - critical_atom_safety
+    - grounded_claim_precision
+    - citation_correctness
+    - citation_association
+    - citation_completeness
+    - required_facet_coverage
+    - contradiction_handling
+    - critical_harm
+    - qualified_report
+    - grounded_negative_recall
+    - unresolved_gap_reporting_recall
+  work_endpoints:
+    - service_work_seconds
+    - e2e_latency_seconds
+    - prompt_tokens
+    - completion_tokens
+    - cached_prompt_tokens
+  # Recomputed from each arm's frozen event stream. Differences are mediated E2E outcomes;
+  # exact query/trajectory/checkpoint equality is never an acceptance condition.
+  trajectory_endpoints:
+    - event_count
+    - query_count
+    - unique_query_count
+    - query_redundancy
+    - retrieved_result_count
+    - unique_source_occurrence_count
+    - retrieval_empty_rate
+    - research_rounds
+    - tool_calls_observed
+    - model_tool_decision_count
+    - conduct_research_calls
+    - think_calls
+    - research_complete_calls
+    - h_checkpoint_count
+    - c_checkpoint_count
+    - fallback_count
+    - failure_count
+
 eligibility_learner:
+  analysis_scope: EXPLORATORY_TASK_LEVEL_PRETREATMENT_FORMATIVE_ONLY
   max_depth: 2
   min_independent_tasks_per_leaf: 8
   bootstrap_rule_stability_min: 0.70
+  # Frozen before treatment.  The shallow rule is trained only on FORMATIVE_SCREEN and may
+  # later be applied, without refitting, to FORMATIVE_POWER_PILOT.
+  training_splits: [FORMATIVE_SCREEN]
+  heldout_splits: [FORMATIVE_POWER_PILOT]
+  excluded_splits: [RESERVE]
+  feature_extractor_version: frozen_task_features_v3_pretreatment_task_and_pool
+  feature_names:
+    - candidate_evidence_tokens
+    - source_count
+    - span_count
+    - span_length_q50
+    - span_length_q90
+    - table_list_fraction
+    - redundancy
+    - raw_content_available_fraction
+    - question_token_count
+    - authored_facet_count
+    - fixed_query_count
+    - declared_stratum_evidence_volume_low
+    - declared_stratum_evidence_volume_medium
+    - declared_stratum_evidence_volume_high
+    - declared_stratum_facets_1_2
+    - declared_stratum_facets_3_4
+    - declared_stratum_facets_5_plus
+    - declared_stratum_single_source_fact
+    - declared_stratum_multi_source_synthesis
+    - declared_stratum_source_conflict
+    - declared_stratum_negative_evidence
+    - declared_stratum_citation_dense
+    - declared_stratum_table_list_heavy
+    - declared_stratum_high_redundancy
+    - declared_stratum_raw_content_missing
+  quality_view: strict
+  # NI alone would call "both arms failed equally" non-inferior. A useful task must produce a
+  # qualified strict report on every replicate before relative quality/work comparisons count.
+  absolute_treatment_requirements:
+    qualified_report_min: 1.0
+  # Exact target family. Each task label requires every comparator to pass every strict
+  # quality guard and the complete service-work saving threshold. HC_JOINT_CHOICE therefore
+  # cannot relabel an H-only benefit as a joint-policy benefit.
+  targets:
+    H_STANDALONE:
+      treatment_semantic: h
+      comparator_semantics: [p0]
+      comparator_logic: ALL
+    C_STANDALONE:
+      treatment_semantic: c
+      comparator_semantics: [p0]
+      comparator_logic: ALL
+    C_INCREMENT_GIVEN_H:
+      treatment_semantic: hc
+      comparator_semantics: [h]
+      comparator_logic: ALL
+    H_INCREMENT_GIVEN_C:
+      treatment_semantic: hc
+      comparator_semantics: [c]
+      comparator_logic: ALL
+    HC_JOINT_CHOICE:
+      treatment_semantic: hc
+      comparator_semantics: [p0, h, c]
+      comparator_logic: ALL
+  eligible_success_threshold: 0.50
+  cluster_cv_folds: 4
+  stability_bootstraps: 500

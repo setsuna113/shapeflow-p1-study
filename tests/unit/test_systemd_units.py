@@ -13,6 +13,9 @@ Two failure modes here are silent by construction, which is why they get tests:
 from __future__ import annotations
 
 import configparser
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +23,9 @@ import yaml
 
 SYSTEMD = Path(__file__).resolve().parents[2] / "systemd"
 STACK = Path(__file__).resolve().parents[2] / "configs" / "stack.yaml"
+INSTALL_HOST = Path(__file__).resolve().parents[2] / "scripts" / "install_host.sh"
+BOOTSTRAP = Path(__file__).resolve().parents[2] / "scripts" / "bootstrap_and_run.sh"
+SUPERVISOR = Path(__file__).resolve().parents[2] / "scripts" / "sfsupervise.sh"
 UNITS = sorted(SYSTEMD.glob("*.service.template"))
 
 
@@ -33,6 +39,51 @@ def _parse(path: Path) -> configparser.ConfigParser:
 
 def test_there_is_at_least_one_unit():
     assert UNITS
+
+
+def _provider_launchers() -> dict[str, str]:
+    """Every place the provider is actually started, by name.
+
+    The unit is not enough on this host: systemd is not PID 1 there, so install_host.sh renders
+    the units "for the record, not started" and the real launch goes through sfsupervise --
+    which passes no environment of its own. Both paths must inject the same credentials or the
+    provider comes up unable to acquire.
+    """
+    unit = SYSTEMD / "shapeflow-api-provider.service.template"
+    start_provider = Path(__file__).resolve().parents[2] / "scripts" / "start_provider.sh"
+    return {
+        "systemd unit": unit.read_text(encoding="utf-8"),
+        "scripts/start_provider.sh": start_provider.read_text(encoding="utf-8"),
+    }
+
+
+@pytest.mark.parametrize("name", sorted(_provider_launchers()))
+def test_every_provider_launcher_injects_the_mandatory_exa_credential(name: str):
+    """provider_main.build_service calls load_exa_key unconditionally.
+
+    Acquisition moved from Tavily to Exa, but neither the unit nor any start script was
+    updated, so a deployed provider raised "no Exa credential" on startup and nothing could be
+    acquired. Tavily is deliberately not asserted here: it is optional now, and requiring it
+    would re-encode the assumption that broke this.
+    """
+    body = _provider_launchers()[name]
+    assert "EXA_API_KEY_FILE" in body, (
+        f"{name} does not inject EXA_API_KEY_FILE; the provider will refuse to start"
+    )
+    assert "DEEPSEEK_API_KEY_FILE" in body
+
+
+@pytest.mark.parametrize("name", sorted(_provider_launchers()))
+def test_no_provider_launcher_embeds_a_credential_value(name: str):
+    """Paths only. A key in a unit file or a start script would land in the repository."""
+    body = _provider_launchers()[name]
+    for line in body.splitlines():
+        if "API_KEY" not in line or line.lstrip().startswith("#"):
+            continue
+        # Accept `NAME_FILE=<path>` and bare `NAME=` forms; reject an assigned literal value.
+        assert "_FILE" in line or line.rstrip().endswith("="), (
+            f"{name} appears to assign a credential value directly: {line.strip()!r}"
+        )
 
 
 @pytest.mark.parametrize("unit", UNITS, ids=lambda p: p.name)
@@ -56,6 +107,34 @@ def test_units_are_hardened_and_bind_locally(unit: Path):
     cp = _parse(unit)
     assert cp.get("Service", "NoNewPrivileges", fallback="") == "true"
     assert cp.get("Service", "UMask", fallback="") == "0077"
+
+
+def test_install_host_grants_evaluator_write_only_below_judgments():
+    """The evaluator must emit scores without gaining write access to frozen truth."""
+    text = INSTALL_HOST.read_text(encoding="utf-8")
+    truth_owner = 'chown -R sfsteward:sfevaluator "$DATA_ROOT/evaluator"'
+    judgment_owner = (
+        'chown -R sfevaluator:sfevaluator "$DATA_ROOT/evaluator/judgments"')
+    assert truth_owner in text
+    assert judgment_owner in text
+    assert text.index(truth_owner) < text.index(judgment_owner)
+    assert (
+        'find "$DATA_ROOT/evaluator/judgments" -type d -exec chmod 0700 {} +'
+        in text
+    )
+    assert (
+        'find "$DATA_ROOT/evaluator/judgments" -type f -exec chmod 0400 {} +'
+        in text
+    )
+    assert 'chmod 0770 "$DATA_ROOT/evaluator"' not in text
+    assert "command -v \"$command\"" in text
+    assert 'readonly_acl "$DATA_ROOT/runner/$published" sfevaluator' in text
+    assert (
+        'readonly_acl "$DATA_ROOT/runner/frozen_corpus" sfrunner sfevaluator'
+        in text
+    )
+    assert 'readonly_acl "$DATA_ROOT/steward/acquisition" sfevaluator' in text
+    assert 'default_args+=("d:u:$reader:r-x")' in text
 
 
 def test_the_two_vllm_layers_are_mutually_exclusive():
@@ -114,3 +193,41 @@ def test_no_unit_still_references_the_removed_single_vllm_service():
     for unit in UNITS:
         text = unit.read_text(encoding="utf-8")
         assert "shapeflow-vllm.service" not in text, f"{unit.name} references the removed unit"
+
+
+def test_causal_engine_mints_and_runner_reads_a_per_boot_epoch():
+    causal = _parse(SYSTEMD / "shapeflow-vllm-causal.service.template")
+    runner = _parse(SYSTEMD / "shapeflow-p1-week1.service.template")
+    start_pre = causal.get("Service", "ExecStartPre")
+    assert "write_engine_epoch.py" in start_pre
+    assert "/run/shapeflow-vllm-causal/engine_epoch" in start_pre
+    assert "SHAPEFLOW_ENGINE_EPOCH_FILE=/run/shapeflow-vllm-causal/engine_epoch" in (
+        runner.get("Service", "Environment"))
+
+
+def test_coordinator_unit_receives_the_approved_execution_binding():
+    install = INSTALL_HOST.read_text(encoding="utf-8")
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+    supervisor = SUPERVISOR.read_text(encoding="utf-8")
+    runner_text = (
+        SYSTEMD / "shapeflow-p1-week1.service.template").read_text(encoding="utf-8")
+    assert "SHAPEFLOW_EXECUTION_BINDING_SHA" in install
+    assert 's|--protocol-sha [^[:space:]]+|--protocol-sha $APPROVED_BINDING_SHA|' in bootstrap
+    assert "verified_execution_binding(Path('.')).digest" in bootstrap
+    assert "SHAPEFLOW_APPROVAL_FILE=@DATA_ROOT@/approvals/launch_approval.json" in runner_text
+    assert "SHAPEFLOW_APPROVAL_FILE=" in supervisor
+    assert 'readonly_acl "$DATA_ROOT/approvals" sfrunner sfevaluator' in install
+
+
+def test_engine_epoch_writer_uses_systemd_invocation_id_and_replaces_on_restart(tmp_path):
+    script = Path(__file__).resolve().parents[2] / "scripts" / "write_engine_epoch.py"
+    target = tmp_path / "run" / "engine_epoch"
+    first = "a" * 32
+    second = "b" * 32
+    for expected in (first, second):
+        subprocess.run(
+            [sys.executable, str(script), str(target)],
+            check=True,
+            env={**os.environ, "INVOCATION_ID": expected},
+        )
+        assert target.read_text(encoding="ascii").strip() == expected

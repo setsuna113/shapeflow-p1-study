@@ -13,6 +13,7 @@ from shapeflow_p1.protocol import (
     compute_binding,
     protocol_sha,
     verify_approval_file,
+    verified_execution_binding,
 )
 
 REPO = Path(__file__).resolve().parents[2]
@@ -55,9 +56,9 @@ def test_the_binding_covers_every_input_that_changes_the_result():
     assert binding.patched_tree_sha
 
 
-def test_a_missing_approval_is_an_error_not_a_default():
+def test_a_missing_approval_is_an_error_not_a_default(tmp_path):
     with pytest.raises(ApprovalError, match="nothing authorises"):
-        verify_approval_file(REPO, REPO / "protocol" / "does_not_exist.json")
+        verify_approval_file(REPO, tmp_path / "does_not_exist.json")
 
 
 def test_an_approval_that_pins_a_stale_variant_registry_is_rejected(tmp_path):
@@ -140,6 +141,43 @@ def test_an_approval_bound_to_the_live_head_verifies(tmp_path):
     assert verify_approval_file(REPO, approval).digest == binding.digest
 
 
+def test_launcher_claim_must_equal_the_independently_verified_binding(tmp_path, monkeypatch):
+    import shapeflow_p1.protocol as protocol_module
+
+    from shapeflow_p1.protocol import read_head_commit
+
+    monkeypatch.setattr(protocol_module, "_require_clean_execution_tree", lambda _repo: None)
+    binding = compute_binding(REPO, approved_commit=read_head_commit(REPO))
+    approval = tmp_path / "launch_approval.json"
+    approval.write_text(json.dumps({
+        "approval_mode": "USER_EXPLICIT_AUTO_LAUNCH",
+        "approved_commit": binding.approved_commit,
+        "binding": binding.content(),
+        "binding_sha256": binding.digest,
+    }), encoding="utf-8")
+    assert verified_execution_binding(
+        REPO, expected_digest=binding.digest, approval_path=approval
+    ).digest == binding.digest
+    with pytest.raises(ApprovalError, match="execution binding mismatch"):
+        verified_execution_binding(
+            REPO, expected_digest="0" * 64, approval_path=approval)
+
+
+def test_execution_binding_refuses_dirty_source_bytes(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import shapeflow_p1.protocol as protocol_module
+
+    monkeypatch.setattr(
+        protocol_module,
+        "_git",
+        lambda *_args: SimpleNamespace(
+            returncode=0, stdout=" M src/shapeflow_p1/campaign/runner.py\n", stderr=""),
+    )
+    with pytest.raises(ApprovalError, match="execution tree has tracked or untracked changes"):
+        protocol_module._require_clean_execution_tree(tmp_path)
+
+
 def test_recording_an_approval_appends_rather_than_overwrites(tmp_path, monkeypatch):
     """One mutable path can only show the current answer. What a past run was checked
     against then has no artifact behind it."""
@@ -155,6 +193,9 @@ def test_recording_an_approval_appends_rather_than_overwrites(tmp_path, monkeypa
     # git state is exercised by its own tests above; here the subject is the chain.
     monkeypatch.setattr(protocol, "read_vendor_pin", lambda _repo: "a" * 40)
     monkeypatch.setattr(protocol, "read_head_commit", lambda _repo: "b" * 40)
+    monkeypatch.setattr(protocol, "_require_clean_execution_tree", lambda _repo: None)
+    approval = tmp_path / "approval-store" / "launch_approval.json"
+    monkeypatch.setenv("SHAPEFLOW_APPROVAL_FILE", str(approval))
 
     first = write_approval_file(repo, approved_at_utc="2026-07-24T00:00:00Z")
     week1 = repo / "configs" / "week1.yaml"
@@ -167,8 +208,74 @@ def test_recording_an_approval_appends_rather_than_overwrites(tmp_path, monkeypa
     assert first.digest != second.digest
     chain = approval_chain(repo)
     assert [c["binding_sha256"] for c in chain] == [first.digest, second.digest]
-    assert all((repo / "protocol" / "approvals" / c["file"]).exists() for c in chain)
+    history = approval.parent / "history"
+    assert all((history / c["file"]).exists() for c in chain)
     # The first approval is still readable after the second is recorded.
     assert json.loads(
-        (repo / "protocol" / "approvals" / chain[0]["file"]).read_text(encoding="utf-8")
+        (history / chain[0]["file"]).read_text(encoding="utf-8")
     )["binding_sha256"] == first.digest
+
+
+def test_external_approval_has_a_non_self_referential_live_path(tmp_path, monkeypatch):
+    """Approve clean code HEAD, write elsewhere, then verify that exact clean tree."""
+    import shutil
+    import subprocess
+
+    from shapeflow_p1 import protocol
+    from shapeflow_p1.protocol import verified_execution_binding, write_approval_file
+
+    repo = tmp_path / "repo"
+    (repo / "protocol").mkdir(parents=True)
+    (repo / "patches").mkdir()
+    shutil.copytree(REPO / "configs", repo / "configs")
+    shutil.copy(REPO / PROTOCOL_DOCUMENT, repo / PROTOCOL_DOCUMENT)
+    shutil.copy(REPO / "protocol" / "stack_manifest.json",
+                repo / "protocol" / "stack_manifest.json")
+    shutil.copy(REPO / "patches" / "patched_tree.sha256",
+                repo / "patches" / "patched_tree.sha256")
+    (repo / "code.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+                   check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "ShapeFlow Test"],
+                   check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "approved code"], check=True)
+
+    approval = tmp_path / "external-approvals" / "launch_approval.json"
+    monkeypatch.setenv("SHAPEFLOW_APPROVAL_FILE", str(approval))
+    monkeypatch.setattr(protocol, "read_vendor_pin", lambda _repo: "a" * 40)
+    binding = write_approval_file(repo, approved_at_utc="2026-07-25T00:00:00Z")
+
+    assert approval.is_file()
+    assert subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        check=True, capture_output=True, text=True,
+    ).stdout == ""
+    assert verified_execution_binding(repo).digest == binding.digest
+
+    # Code bytes differing from approved HEAD fail even if no bound config changed.
+    (repo / "code.py").write_text("VALUE = 2\n", encoding="utf-8")
+    with pytest.raises(ApprovalError, match="execution tree has tracked or untracked changes"):
+        verified_execution_binding(repo)
+    (repo / "code.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    # A clean, newly committed config is still a different execution and cannot use the old
+    # external approval.
+    week1 = repo / "configs" / "week1.yaml"
+    week1.write_text(
+        week1.read_text(encoding="utf-8").replace(
+            "id: week1_formative_v1", "id: week1_formative_v2"),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(repo), "add", "configs/week1.yaml"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "change config"], check=True)
+    with pytest.raises(ApprovalError, match="approval does not bind"):
+        verified_execution_binding(repo)
+
+
+def test_approval_artifact_inside_repo_is_refused(tmp_path):
+    from shapeflow_p1.protocol import verify_approval_file
+
+    with pytest.raises(ApprovalError, match="self-referential approval"):
+        verify_approval_file(REPO, REPO / "protocol" / "launch_approval.json")

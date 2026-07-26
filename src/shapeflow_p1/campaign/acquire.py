@@ -48,6 +48,7 @@ from ..acquire.snapshot_store import CanonicalSnapshot, SnapshotStore
 from ..acquire.source_pool import QueryResponse, SourceOccurrence, SourcePool, build_source_pool
 from ..acquire.exa_client import ExaHTTPError, ExaParams, ExaPricing
 from ..canonical import canonical_json
+from ..fsmode import chmod_shared
 from ..hashing import sha256_hex
 from ..object_store import ObjectStore
 from .prepare import load_sealed_registry
@@ -432,6 +433,10 @@ def _write_json_atomic(path: Path, body: dict) -> None:
             fh.write(json.dumps(body, indent=2, sort_keys=True) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
+        # The steward writes the frozen world; the runner and evaluator read it. mkstemp's
+        # 0600 would zero the inherited ACL mask -- and this failure would land *after*
+        # acquisition had already been paid for. See shapeflow_p1.fsmode.
+        chmod_shared(tmp)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)

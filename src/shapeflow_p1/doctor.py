@@ -303,10 +303,20 @@ def check_stack_manifest(repo: Path, stack_config: Path) -> CheckResult:
     # engine running *now* chose the backend the manifest froze -- an engine restarted onto a
     # different backend is caught here.
     engine_log = _engine_log(repo)
+    backend = ""
     if engine_log:
         backend = attention_backend_from_log(engine_log)
-        if backend:
-            observation.values["attention_backend"] = backend
+    if backend:
+        observation.values["attention_backend"] = backend
+    # These are live code-derived measurement identities.  Recompute them on every doctor run
+    # so a prompt/parser change cannot pass merely because the model/runtime stack still does.
+    from .campaign.evaluate import relation_prompt_sha256
+    from .campaign.truth import truth_prompt_sha256
+    from .evaluation.atomizer import atomize_protocol_sha256
+
+    observation.values["atomize_prompt_sha256"] = atomize_protocol_sha256()
+    observation.values["truth_prompt_sha256"] = truth_prompt_sha256()
+    observation.values["report_prompt_sha256"] = relation_prompt_sha256()
     layer = declared.get("isolation", {}).get("causal", {})
     expected_flags = [
         f"--max-num-seqs", str(layer.get("max_num_seqs", 1)),

@@ -45,12 +45,13 @@ else it becomes ``FAILED_FINAL``.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Iterator, Optional, Sequence
+from typing import Callable, Iterator, Optional
 
 from ..hashing import derive_id
 
@@ -276,9 +277,12 @@ CREATE TABLE IF NOT EXISTS external_call_attempts (
     returned_model      TEXT,
     system_fingerprint  TEXT,
     usage_json          TEXT,
+    telemetry_json      TEXT,
     error_class         TEXT,
     opened_at           REAL NOT NULL,
+    proxy_ingress_at    REAL,
     dispatched_at       REAL,
+    response_end_at     REAL,
     settled_at          REAL,
     UNIQUE(call_id, attempt_ordinal)
 );
@@ -330,7 +334,7 @@ CREATE TABLE IF NOT EXISTS schema_versions (
 #: Bumped when the physical layout of the external-call tables changes. ``CREATE TABLE IF
 #: NOT EXISTS`` silently keeps an old shape, so the migration below is what actually moves
 #: a database forward -- and it moves rows, never deletes them.
-EXTERNAL_CALL_SCHEMA_VERSION = 2
+EXTERNAL_CALL_SCHEMA_VERSION = 3
 
 
 class Ledger:
@@ -406,12 +410,38 @@ class Ledger:
     # --- runs / configs ---------------------------------------------------------------
 
     def create_run(self, run_id: str, protocol_sha: str, meta_json: str = "{}") -> None:
+        try:
+            requested_meta = json.loads(meta_json)
+        except json.JSONDecodeError as exc:
+            raise LedgerError(f"run {run_id!r} meta_json is invalid JSON: {exc}") from exc
+        canonical_meta = json.dumps(
+            requested_meta, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         with self._tx() as cur:
             cur.execute(
                 "INSERT OR IGNORE INTO runs(run_id, protocol_sha, created_at, meta_json)"
                 " VALUES (?,?,?,?)",
-                (run_id, protocol_sha, self._now(), meta_json),
+                (run_id, protocol_sha, self._now(), canonical_meta),
             )
+            cur.execute(
+                "SELECT protocol_sha, meta_json FROM runs WHERE run_id=?", (run_id,))
+            existing = cur.fetchone()
+            if existing is None:  # pragma: no cover - INSERT/SELECT is one transaction
+                raise LedgerError(f"run {run_id!r} disappeared during creation")
+            try:
+                existing_meta = json.dumps(
+                    json.loads(existing["meta_json"]),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+            except json.JSONDecodeError as exc:
+                raise LedgerError(
+                    f"run {run_id!r} has corrupt stored meta_json: {exc}") from exc
+            if existing["protocol_sha"] != protocol_sha or existing_meta != canonical_meta:
+                raise LedgerError(
+                    f"run_id {run_id!r} is already bound to a different execution: "
+                    f"protocol_sha={existing['protocol_sha']!r}, meta_json={existing_meta}"
+                )
 
     def register_config(self, config_sha: str, kind: str, canonical: str) -> None:
         with self._tx() as cur:
@@ -440,10 +470,13 @@ class Ledger:
         """Derive the logical identity. Deliberately excludes run_id and any timestamp so
         the same logical work resolves to the same key across restarts.
 
-        ``engine_epoch`` is included: a cell run before an engine restart and one run after
-        it are not the same observation, and a paired block completed across the boundary
-        compares two arms served by two engines.
+        ``engine_epoch`` is deliberately *not* part of assignment identity.  The schedule
+        assigned one cell, and a coordinator restart must find that same cell rather than mint
+        a duplicate just because vLLM rebooted.  The actual serving epoch is recorded at
+        execution in ``cell_epochs`` and the frozen block is marked invalid if epochs differ.
+        The argument remains for database/API compatibility with pre-migration callers.
         """
+        del engine_epoch
         return derive_id(
             "work_item",
             {
@@ -455,7 +488,6 @@ class Ledger:
                 "variant_id": variant_id,
                 "replicate_id": replicate_id,
                 "checkpoint_hash": checkpoint_hash,
-                "engine_epoch": engine_epoch,
                 "stage_version": stage_version,
             },
         )
@@ -629,6 +661,7 @@ class Ledger:
         disposition: str,
         error_class: str = "",
         reason: str = "",
+        result_object_ref: str = "",
     ) -> str:
         """End an attempt in failure. ``disposition`` is FAILED_RETRYABLE / FAILED_FINAL /
         FAILED_UNKNOWN. Returns the work item's resulting state.
@@ -648,8 +681,12 @@ class Ledger:
             from_state = wi["state"]
             cur.execute(
                 "UPDATE attempts SET state=?, ended_at=?, terminal_status=?, error_class=?"
+                ", result_object_ref=COALESCE(NULLIF(?,''), result_object_ref)"
                 " WHERE attempt_id=?",
-                (disposition, self._now(), disposition, error_class, attempt_id),
+                (
+                    disposition, self._now(), disposition, error_class,
+                    result_object_ref, attempt_id,
+                ),
             )
 
             if disposition == "FAILED_RETRYABLE":
@@ -760,6 +797,24 @@ class Ledger:
             ).fetchone()
         return row["result_object_ref"] if row else None
 
+    def terminal_ref(self, work_key: str) -> Optional[str]:
+        """Artifact for any terminal assignment, including a recorded failure."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT result_object_ref FROM attempts WHERE work_key=?"
+                " AND state IN ('COMMITTED','FAILED_FINAL','FAILED_UNKNOWN')"
+                " AND result_object_ref IS NOT NULL AND result_object_ref != ''"
+                " ORDER BY attempt_ordinal DESC LIMIT 1",
+                (work_key,),
+            ).fetchone()
+            if row is None:
+                row = self._conn.execute(
+                    "SELECT object_ref AS result_object_ref FROM artifacts WHERE work_key=?"
+                    " ORDER BY created_at DESC LIMIT 1",
+                    (work_key,),
+                ).fetchone()
+        return row["result_object_ref"] if row else None
+
     def pending_keys(self, *, limit: int = 1000) -> list[str]:
         with self._lock:
             rows = self._conn.execute(
@@ -798,6 +853,22 @@ class Ledger:
                 (self._now(), severity, kind, detail, work_key),
             )
 
+    def latest_incident(self, *, severity: str, kind: str) -> Optional[dict]:
+        """The most recent incident of one kind, or ``None``.
+
+        Incidents were write-only: the provider recorded a FATAL ``provider_unauthorized`` and
+        then had no way to ask whether one existed, so a restart reset the in-memory breaker
+        and the next run bought the same rejection again. A credential the upstream refuses
+        fails identically every time, so this state has to outlive the process that learned it.
+        """
+        with self.lock:
+            row = self._conn.execute(
+                "SELECT at, severity, kind, detail, work_key FROM incidents"
+                " WHERE severity=? AND kind=? ORDER BY id DESC LIMIT 1",
+                (severity, kind),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     # --- corpus attempts --------------------------------------------------------------
 
     def record_corpus_attempt(
@@ -828,8 +899,20 @@ class Ledger:
 
     def record_engine_epoch(self, work_key: str, engine_epoch: str) -> None:
         with self._tx() as cur:
+            existing = cur.execute(
+                "SELECT engine_epoch FROM cell_epochs WHERE work_key=?",
+                (work_key,),
+            ).fetchone()
+            if existing is not None:
+                recorded = str(existing["engine_epoch"])
+                if recorded != str(engine_epoch):
+                    raise LedgerError(
+                        f"work item {work_key} already ran under engine epoch "
+                        f"{recorded!r}, refusing to rewrite it as {engine_epoch!r}"
+                    )
+                return
             cur.execute(
-                "INSERT OR IGNORE INTO cell_epochs(work_key, engine_epoch, recorded_at)"
+                "INSERT INTO cell_epochs(work_key, engine_epoch, recorded_at)"
                 " VALUES (?,?,?)",
                 (work_key, engine_epoch, self._now()),
             )
@@ -906,6 +989,18 @@ def _migrate_before_schema(conn: sqlite3.Connection) -> None:
     if call_cols and "call_key" not in call_cols:
         # v1: one mutable row per logical call. Renamed, never dropped.
         conn.execute("ALTER TABLE external_calls RENAME TO external_calls_v1")
+    # v3 makes the primary work interval durable. CREATE TABLE IF NOT EXISTS cannot add columns
+    # to a live v2 ledger, so add them before the schema script. Each ALTER is idempotent under
+    # the column check and old rows remain explicitly unavailable rather than acquiring guessed
+    # timestamps.
+    attempt_cols = _columns(conn, "external_call_attempts")
+    for name, sql_type in (
+        ("telemetry_json", "TEXT"),
+        ("proxy_ingress_at", "REAL"),
+        ("response_end_at", "REAL"),
+    ):
+        if attempt_cols and name not in attempt_cols:
+            conn.execute(f"ALTER TABLE external_call_attempts ADD COLUMN {name} {sql_type}")
 
 
 def _migrate_after_schema(conn: sqlite3.Connection, now: float) -> None:

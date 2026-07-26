@@ -32,6 +32,10 @@ class AwaitingModel:
         self._log = log
         self._structured = None
         self._config: dict = {}
+        # Production refuses to claim seed pairing unless ODR's configurable-model hook has
+        # the pinned runtime shape.  This double deliberately mimics that shape; omitting it
+        # would test a model construction path production correctly rejects before invocation.
+        self._configurable_fields = ["model", "max_tokens", "api_key"]
         # Per-conversation turn counters keyed by the first message, so the supervisor and the
         # researcher each advance their own script.
         self._turns: dict = {}
@@ -161,7 +165,9 @@ async def test_the_close_hook_fires_in_the_full_graph(monkeypatch):
     cell = CellSpec(run_id="probe", task_id="T", arm_id="C_VISIBLE", page_variant="P0",
                     close_variant="C01", replicate_id="0", seed=1, work_key="WK",
                     question="Which bodies reported harbour totals?",
-                    cell_token="probe-cell-1")
+                    cell_token="probe-cell-1",
+                    execution_binding_sha256="e" * 64,
+                    protocol_document_sha256="d" * 64)
     result = await asyncio.wait_for(
         run_cell(settings, cell, pool=pool, snapshots=store, bundle=bundle,
                  provider_base_url="http://127.0.0.1:1", runner_token="x",

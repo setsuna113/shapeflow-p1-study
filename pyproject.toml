@@ -37,6 +37,8 @@ dependencies = [
   # evidence parsing
   "beautifulsoup4",
   "markdown-it-py~=3.0.0",
+  # exact Qwen token budgets and offset-preserving evidence chunking
+  "tokenizers~=0.22.0",
   # the pinned+patched vendor agent (resolved from .build/, see [tool.uv.sources])
   "open_deep_research",
 ]

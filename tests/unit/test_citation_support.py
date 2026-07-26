@@ -57,12 +57,11 @@ def test_an_uncertain_judge_leaves_the_citation_unknown():
     assert resolver("c1", "1") is None
 
 
-def test_a_url_outside_the_frozen_world_is_a_definite_failure():
-    """The frozen world is the whole world the run could see, so a URL that is not in it was
-    not read -- that is a finding, not a missing measurement."""
+def test_a_url_outside_the_report_source_lineage_is_a_definite_failure():
+    """A URL outside the arm-local source lineage was not read by this report."""
     resolver = _resolver(lambda claim, evidence: "entail")
     assert resolver("c1", "3") is False
-    assert any("not in this task's frozen world" in r["reason"] for r in resolver.record())
+    assert any("not retrieved by this arm" in r["reason"] for r in resolver.record())
 
 
 def test_a_label_the_report_never_defined_is_unknown():

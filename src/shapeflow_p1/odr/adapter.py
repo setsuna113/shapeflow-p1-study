@@ -75,6 +75,15 @@ class DeferredPageBatch:
         setattr(self, SHAPEFLOW_DEFERRED, True)
 
     def visible_results(self) -> tuple[VendorVisibleResult, ...]:
+        def visible_raw(result: dict) -> Optional[str]:
+            raw = result.get("raw_content")
+            if not raw:
+                return None
+            # Vendor hashes/feeds only this prefix downstream. Addressing the untruncated page
+            # makes the checkpoint name bytes P0 never saw and cannot be resolved by the runner's
+            # same-visible-byte registry for pages longer than max_content_length.
+            return str(raw)[: self.max_content_length]
+
         return tuple(
             VendorVisibleResult(
                 vendor_visible_order=i,
@@ -82,9 +91,10 @@ class DeferredPageBatch:
                 title=r.get("title", ""),
                 snippet=r.get("content", ""),
                 raw_content_id=(
-                    sha256_hex(r["raw_content"].encode("utf-8"))
-                    if r.get("raw_content") else None
+                    sha256_hex(visible_raw(r).encode("utf-8"))
+                    if visible_raw(r) is not None else None
                 ),
+                source_occurrence_id=r.get("_shapeflow_occurrence_id"),
             )
             for i, r in enumerate(self.results)
         )
@@ -114,6 +124,10 @@ class BatchOutcome:
     checkpoint_digest: str
     fell_back: bool = False
     failure: Optional[PageFailure] = None
+    # Search-call provenance for the exact bytes staged in ``observations``.  This remains
+    # sidecar state until record_tool_batch_publication verifies the graph's complete
+    # ToolMessage batch; a staged-but-discarded P1 output must never reach C_VISIBLE.
+    publication_provenance: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 # --- freezing -------------------------------------------------------------------------
@@ -130,7 +144,11 @@ def _role_of(message: Any) -> str:
     return mapping.get(getattr(message, "type", ""), getattr(message, "type", "unknown"))
 
 
-def freeze_message(message: Any) -> FrozenMessage:
+def freeze_message(
+    message: Any,
+    *,
+    published_provenance: Optional[dict] = None,
+) -> FrozenMessage:
     """Freeze a langchain message losslessly.
 
     Every field kept here is a field the rebuilt clone would otherwise lack -- and since the
@@ -147,6 +165,52 @@ def freeze_message(message: Any) -> FrozenMessage:
         for tc in (getattr(message, "tool_calls", None) or ())
     )
     artifact = getattr(message, "artifact", None)
+    if published_provenance is not None:
+        if _role_of(message) != "tool":
+            raise ValueError("published tool provenance cannot be attached to a non-tool message")
+        content_sha = sha256_hex(canonical_json(getattr(message, "content", "")))
+        expected_sha = str(published_provenance.get("content_sha256") or "")
+        if content_sha != expected_sha:
+            raise ValueError(
+                "published tool content changed before the C checkpoint: "
+                f"{content_sha!r} != {expected_sha!r}"
+            )
+        expected_name = str(published_provenance.get("name") or "")
+        actual_name = str(getattr(message, "name", None) or "")
+        if actual_name != expected_name:
+            raise ValueError(
+                "published tool name changed before the C checkpoint: "
+                f"{actual_name!r} != {expected_name!r}"
+            )
+        occurrence_ids = tuple(dict.fromkeys(
+            str(value)
+            for value in (published_provenance.get("source_occurrence_ids") or ())
+            if str(value)
+        ))
+        if occurrence_ids:
+            if artifact is None:
+                artifact = {}
+            if not isinstance(artifact, dict):
+                raise ValueError(
+                    "a published tool message has a non-object artifact; capture-time "
+                    "source provenance cannot be merged safely"
+                )
+            existing_ids = tuple(dict.fromkeys(
+                str(value)
+                for value in (artifact.get("source_occurrence_ids") or ())
+                if str(value)
+            ))
+            if existing_ids and existing_ids != occurrence_ids:
+                raise ValueError(
+                    "graph-visible artifact and capture-time sidecar disagree about source "
+                    "occurrences"
+                )
+            artifact = {
+                **artifact,
+                "source_occurrence_ids": list(occurrence_ids),
+                "provenance_capture": "whole_batch_publish_v1",
+                "published_content_sha256": content_sha,
+            }
     return FrozenMessage(
         role=_role_of(message),
         content=getattr(message, "content", ""),
@@ -163,8 +227,27 @@ def freeze_message(message: Any) -> FrozenMessage:
     )
 
 
-def freeze_messages(messages: Sequence[Any]) -> tuple[FrozenMessage, ...]:
-    return tuple(freeze_message(m) for m in messages)
+def freeze_messages(
+    messages: Sequence[Any],
+    *,
+    tool_provenance: Optional[dict[str, dict]] = None,
+) -> tuple[FrozenMessage, ...]:
+    """Freeze messages, optionally enriching only the checkpoint clone with provenance.
+
+    ``tool_provenance`` is a run-local sidecar committed at the graph's atomic publication
+    point.  The live ToolMessage is never mutated, preserving hooks-off/explicit-P0 prompt
+    parity.  Missing or empty provenance stays missing/empty and therefore remains
+    TOOL_UNATTRIBUTED_CONTEXT downstream.
+    """
+    provenance = tool_provenance or {}
+    frozen: list[FrozenMessage] = []
+    for message in messages:
+        entry = None
+        if _role_of(message) == "tool":
+            call_id = str(getattr(message, "tool_call_id", None) or "")
+            entry = provenance.get(call_id)
+        frozen.append(freeze_message(message, published_provenance=entry))
+    return tuple(frozen)
 
 
 def thaw_message(frozen: FrozenMessage) -> Any:
@@ -185,9 +268,14 @@ def thaw_message(frozen: FrozenMessage) -> Any:
         additional_kwargs=load(frozen.additional_kwargs_canonical),
         response_metadata=load(frozen.response_metadata_canonical),
     )
-    if frozen.message_id:
+    # `is not None`, not truthiness. An empty string is a value the vendor really set, and
+    # dropping it here rebuilds the message with `None` instead -- which re-freezes to a
+    # different FrozenMessage and therefore a different checkpoint digest. The C fork proves
+    # it started from the planned boundary by re-deriving that digest, so a field that does
+    # not survive freeze -> thaw -> freeze silently makes every fork from such a message fail.
+    if frozen.message_id is not None:
         common["id"] = frozen.message_id
-    if frozen.name:
+    if frozen.name is not None:
         common["name"] = frozen.name
 
     if frozen.role == "ai":
@@ -204,11 +292,30 @@ def thaw_message(frozen: FrozenMessage) -> Any:
             message.usage_metadata = usage
         return message
     if frozen.role == "tool":
-        kwargs = dict(common, tool_call_id=frozen.tool_call_id or "")
+        # `or ""` would turn None into "", which re-freezes to a different value and moves the
+        # digest. langchain requires tool_call_id on a real ToolMessage, so None here means
+        # this did not come from one -- same unreachable-state class as `status` below.
+        if frozen.tool_call_id is None:
+            raise ValueError(
+                "tool message has no tool_call_id; a frozen ToolMessage always carries one, "
+                "so this state did not come from a real message"
+            )
+        kwargs = dict(common, tool_call_id=frozen.tool_call_id)
         if frozen.artifact_canonical is not None:
             kwargs["artifact"] = load(frozen.artifact_canonical)
-        if frozen.status:
-            kwargs["status"] = frozen.status
+        # ToolMessage.status is a Literal["success", "error"] that defaults to "success", so a
+        # real frozen tool message always carries one of those two. Anything else -- None, "",
+        # a typo -- cannot have come from freezing a live message, and quietly letting the
+        # default fill it in would produce a state that re-freezes to *different* bytes and
+        # therefore a different checkpoint digest. Refuse instead: a fork proves it started
+        # from the planned boundary by re-deriving that digest, so a silent substitution here
+        # is indistinguishable from a tampered checkpoint.
+        if frozen.status not in ("success", "error"):
+            raise ValueError(
+                f"tool message has status {frozen.status!r}; a frozen ToolMessage carries "
+                "'success' or 'error', so this state did not come from a real message"
+            )
+        kwargs["status"] = frozen.status
         return ToolMessage(**kwargs)
     if frozen.role == "system":
         return SystemMessage(**common)
@@ -228,6 +335,7 @@ def build_h_checkpoint(
     observations: Sequence[Any],
     researcher_state_hash: str,
     sampling: SamplingEnvelope,
+    researcher_coordinate: Optional[tuple[int, int, str]] = None,
 ) -> HCheckpoint:
     """Freeze the entire assistant turn: every sibling, deferred or not, in pinned order.
 
@@ -260,6 +368,7 @@ def build_h_checkpoint(
         non_search_outputs=tuple(non_search),
         researcher_state_hash=researcher_state_hash,
         sampling=sampling,
+        researcher_coordinate=researcher_coordinate,
     )
 
 
@@ -306,25 +415,61 @@ async def reduce_tool_batch(
             failure, observations, deferred_positions, checkpoint, component_trial
         )
 
-    by_call = {obs.tool_call_id: obs for obs in produced}
-    missing = [
-        tool_calls[i].get("id") for i in deferred_positions
-        if tool_calls[i].get("id") not in by_call
+    expected_call_ids = [
+        str(tool_calls[i].get("id") or "") for i in deferred_positions
     ]
-    if missing:
+    produced_call_ids = [str(obs.tool_call_id or "") for obs in produced]
+    if produced_call_ids != expected_call_ids or len(set(produced_call_ids)) != len(
+        produced_call_ids
+    ):
         failure = PageFailure(
             reason="INCOMPLETE_BATCH",
-            detail=f"strategy returned no observation for {missing}; a partial batch is not "
-                   "publishable, so the whole batch falls back",
+            detail=(
+                "strategy output ids/order do not equal the deferred search calls "
+                f"(expected {expected_call_ids}, got {produced_call_ids}); a partial, duplicate, "
+                "extra, or reordered batch is not publishable, so the whole batch falls back"
+            ),
         )
         return await _resolve_failure(
             failure, observations, deferred_positions, checkpoint, component_trial
         )
 
+    by_call = {str(obs.tool_call_id or ""): obs for obs in produced}
+    offered_occurrences = {
+        str(call_id): {
+            str(result.source_occurrence_id)
+            for result in results
+            if result.source_occurrence_id
+        }
+        for call_id, results in checkpoint.search_result_sets
+    }
+    publication_provenance: list[tuple[str, tuple[str, ...]]] = []
+    for call_id in expected_call_ids:
+        claimed = tuple(dict.fromkeys(
+            str(value) for value in by_call[call_id].source_occurrence_ids if str(value)
+        ))
+        unknown = sorted(set(claimed) - offered_occurrences.get(call_id, set()))
+        if unknown:
+            failure = PageFailure(
+                reason="PROVENANCE_OUTSIDE_CHECKPOINT",
+                detail=(
+                    f"strategy attributed tool call {call_id!r} to occurrences {unknown} that "
+                    "were not in that call's frozen H checkpoint"
+                ),
+            )
+            return await _resolve_failure(
+                failure, observations, deferred_positions, checkpoint, component_trial
+            )
+        publication_provenance.append((call_id, claimed))
+
     staged = list(observations)
     for i in deferred_positions:
-        staged[i] = by_call[tool_calls[i]["id"]].content
-    return BatchOutcome(observations=tuple(staged), checkpoint_digest=checkpoint.digest)
+        staged[i] = by_call[str(tool_calls[i].get("id") or "")].content
+    return BatchOutcome(
+        observations=tuple(staged),
+        checkpoint_digest=checkpoint.digest,
+        publication_provenance=tuple(publication_provenance),
+    )
 
 
 async def _resolve_failure(
@@ -335,16 +480,37 @@ async def _resolve_failure(
     component_trial: bool,
 ) -> BatchOutcome:
     if component_trial:
-        # Record and fail. The component trial exists to measure how often P1 cannot produce a
-        # publishable batch; silently substituting P0 would erase that number.
+        # Record and fail. The caller must terminate the component sample before vendor wraps
+        # these opaque deferred objects in ToolMessage. Returning the original observations is
+        # only a transport for the failure metadata; it is never a publishable result.
         return BatchOutcome(
             observations=tuple(observations), checkpoint_digest=checkpoint.digest,
             fell_back=False, failure=failure,
         )
+    # Vendor executes sibling tool calls concurrently. A P1 failure must not quietly turn the
+    # fallback into a sequential P0 implementation: that changes the critical path and makes the
+    # failure penalty an artefact of the adapter. Gather all vendor closures first, then stage the
+    # complete batch. If one closure fails, nothing is published.
+    rendered = await asyncio.gather(
+        *(observations[i].render_vendor() for i in deferred_positions)
+    )
     staged = list(observations)
-    for i in deferred_positions:
-        staged[i] = await observations[i].render_vendor()
+    for i, value in zip(deferred_positions, rendered):
+        staged[i] = value
     return BatchOutcome(
         observations=tuple(staged), checkpoint_digest=checkpoint.digest,
         fell_back=True, failure=failure,
+        # E2E fallback publishes vendor's rendering of every result in each deferred call.
+        # Use the frozen checkpoint, not a URL reverse lookup and not the failed P1 selection.
+        publication_provenance=tuple(
+            (
+                str(call_id),
+                tuple(dict.fromkeys(
+                    str(result.source_occurrence_id)
+                    for result in results
+                    if result.source_occurrence_id
+                )),
+            )
+            for call_id, results in getattr(checkpoint, "search_result_sets", ())
+        ),
     )

@@ -97,7 +97,7 @@ def _sampling():
     return SamplingEnvelope(model="qwen", temperature=0.3, top_p=1.0, max_tokens=8192, seed=7)
 
 
-def _h_checkpoint(order=0):
+def _h_checkpoint(order=0, researcher_coordinate=None):
     msg = FrozenMessage(
         role="ai",
         content="I will search.",
@@ -117,6 +117,7 @@ def _h_checkpoint(order=0):
         non_search_outputs=(),
         researcher_state_hash="b" * 64,
         sampling=_sampling(),
+        researcher_coordinate=researcher_coordinate,
     )
 
 
@@ -159,6 +160,29 @@ def test_raw_content_is_referenced_not_inlined():
     content = cp.content()
     ref = content["search_result_sets"][0][1][0]["raw_content_id"]
     assert ref == "a" * 64  # a content_id reference, not page bytes
+
+
+def test_deferred_page_addresses_exact_vendor_truncated_bytes_and_occurrence():
+    from shapeflow_p1.hashing import sha256_hex
+    from shapeflow_p1.odr.adapter import DeferredPageBatch
+
+    raw = "abcdefghij"
+    batch = DeferredPageBatch(
+        tool_call_id="c1",
+        tool_name="tavily_search",
+        results=({
+            "url": "https://e.invalid",
+            "title": "E",
+            "content": "snippet",
+            "raw_content": raw,
+            "_shapeflow_occurrence_id": "occ-1",
+        },),
+        render_vendor=lambda: None,
+        max_content_length=5,
+    )
+    visible = batch.visible_results()[0]
+    assert visible.raw_content_id == sha256_hex(raw[:5].encode("utf-8"))
+    assert visible.source_occurrence_id == "occ-1"
 
 
 def test_fork_key_depends_on_all_coordinates():
@@ -408,6 +432,53 @@ def test_a_checkpoint_round_trips_byte_for_byte(tmp_path):
     assert canonical_json(to_document(restored)) == canonical_json(to_document(original))
     assert restored.researcher_messages[1].additional_kwargs_canonical == '{"refusal":null}'
     assert restored.researcher_messages[2].status == "success"
+
+
+def test_an_h_checkpoint_round_trips_including_its_researcher_coordinate(tmp_path):
+    """The C round trip above passed while every *child* H boundary was unreadable.
+
+    ``researcher_coordinate`` is in ``content()`` and therefore in the digest, but
+    ``from_document`` did not restore it, so a checkpoint written by a ConductResearch child
+    rebuilt with ``None``, hashed differently, and tripped its own digest check on load. The
+    store was effectively write-only for exactly the boundaries a fork has to start from.
+    """
+    from shapeflow_p1.canonical import canonical_json
+    from shapeflow_p1.odr.checkpoints import CheckpointStore, to_document
+
+    original = _h_checkpoint(researcher_coordinate=(2, 1, "call-abc"))
+    store = CheckpointStore(tmp_path / "checkpoints")
+
+    restored = store.get(store.put(original))
+
+    assert restored.researcher_coordinate == (2, 1, "call-abc")
+    assert restored == original
+    assert canonical_json(to_document(restored)) == canonical_json(to_document(original))
+    assert restored.digest == original.digest
+
+
+def test_an_h_checkpoint_without_a_coordinate_still_round_trips(tmp_path):
+    """``None`` is reserved for direct researcher-subgraph probes and must stay ``None``."""
+    from shapeflow_p1.odr.checkpoints import CheckpointStore
+
+    original = _h_checkpoint()
+    store = CheckpointStore(tmp_path / "checkpoints")
+
+    restored = store.get(store.put(original))
+
+    assert restored.researcher_coordinate is None
+    assert restored == original
+
+
+def test_a_coordinate_is_part_of_the_boundary_identity():
+    """Two children of one supervisor turn are different boundaries, not one."""
+    assert (
+        _h_checkpoint(researcher_coordinate=(1, 0, "call-a")).digest
+        != _h_checkpoint(researcher_coordinate=(1, 1, "call-b")).digest
+    )
+    assert (
+        _h_checkpoint(researcher_coordinate=(1, 0, "call-a")).digest
+        != _h_checkpoint().digest
+    )
 
 
 def test_a_checkpoint_document_that_does_not_rebuild_to_its_digest_is_refused(tmp_path):

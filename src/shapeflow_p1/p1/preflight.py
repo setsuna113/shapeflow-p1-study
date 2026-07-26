@@ -174,6 +174,9 @@ class PreflightConfig:
     # had, which is C_REGISTRY provenance wearing a C_VISIBLE label. Left None only for tests
     # and for variants that legitimately span both (C_REGISTRY).
     expected_namespace: str | None = None
+    # Defence in depth for treatment fidelity. The parser already locks the arm, but preflight
+    # is the last publish gate and must not publish a selection produced under another contract.
+    expected_contract: str | None = None
 
 
 @dataclass
@@ -214,6 +217,19 @@ def preflight(
     tokenizer = view.tokenizer
     body_for = lambda span: view.text_for(_span_id(span))
 
+    # 0. The contract is part of the treatment, not a suggestion in the prompt.
+    if config.expected_contract is not None and selection.contract != config.expected_contract:
+        result.errors.append(
+            f"selection contract {selection.contract!r} does not match this arm's locked "
+            f"contract {config.expected_contract!r}"
+        )
+    if selection.contract == "P1_BRIDGE":
+        if config.bridge_token_cap_each is None or config.bridge_token_cap_total is None:
+            result.errors.append(
+                "P1_BRIDGE has no binding per-bridge/total token caps; without both it is "
+                "unbounded prose rather than the registered bridge treatment"
+            )
+
     # 1. Every aggregated span must be a real candidate.
     spans = []
     for item in aggregated.items:
@@ -233,12 +249,53 @@ def preflight(
     #     bytes once at construction, so this is membership in an immutable set -- not a digest
     #     recomputed from the same mutable registry that a repointed ref was already baked into.
     offered = {c.span_id for c in view.candidates}
+    offered_candidates = {c.span_id: c for c in view.candidates}
     for item in aggregated.items:
         if item.span_id not in offered:
             result.errors.append(
                 f"published span {item.span_id[:12]} was not in the offered candidate view"
             )
     result.errors.extend(view.drift_errors(item.span_id for item in aggregated.items))
+
+    # 1d. Visible model/user messages are part of the compressor's input, but they are not
+    #     source evidence.  The distinction must survive selection: allowing a typed selector
+    #     to mark its own earlier reasoning as support manufactures provenance, and allowing a
+    #     bridge to cite it manufactures a citation.  P1_ID may preserve such a span as context;
+    #     P1_TYPED/P1_BRIDGE may only label it background.
+    non_citable_ids = {
+        candidate.span_id
+        for candidate in view.candidates
+        if candidate.namespace == "VISIBLE_MESSAGE"
+        and candidate.origin_kind in {
+            "TOOL_UNATTRIBUTED_CONTEXT",
+            "MODEL_DERIVED_CONTEXT",
+            "USER_CONTEXT",
+        }
+    }
+    for item in selection.items:
+        if item.span_id not in non_citable_ids:
+            continue
+        disallowed_roles = sorted({
+            str(role) for _facet, role in item.relations
+            if role not in (None, "background")
+        })
+        if disallowed_roles:
+            origin = offered_candidates[item.span_id].origin_kind
+            result.errors.append(
+                f"non-citable {origin} span {item.span_id[:12]} was marked "
+                f"{'/'.join(disallowed_roles)}; unattributed/model/user context may only be "
+                "background"
+            )
+    for bridge in selection.bridges:
+        context_refs = [
+            span_id for span_id in bridge.evidence_span_ids
+            if span_id in non_citable_ids
+        ]
+        if context_refs:
+            result.errors.append(
+                f"bridge {bridge.text[:40]!r} cites non-citable tool/model/user context "
+                f"{', '.join(span_id[:12] for span_id in context_refs)}"
+            )
 
     # 2. Namespace. The view already refused to OFFER a foreign candidate -- which is the
     #    binding check, since the selector reads the whole offered set -- so this is defence in

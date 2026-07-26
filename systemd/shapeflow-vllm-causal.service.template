@@ -24,6 +24,12 @@ StartLimitBurst=3
 Type=simple
 User=@INFER_USER@
 WorkingDirectory=@REPO@
+RuntimeDirectory=shapeflow-vllm-causal
+RuntimeDirectoryMode=0755
+# A stack digest is not a boot id. systemd gives each invocation a fresh INVOCATION_ID; persist
+# it where the runner can read it before assigning any cell, so a vLLM restart cannot splice a
+# paired block while appearing to be the same epoch.
+ExecStartPre=@REPO@/.venv/bin/python @REPO@/scripts/write_engine_epoch.py /run/shapeflow-vllm-causal/engine_epoch
 # Reuses the pinned existing vLLM as a read-only executable; never installs into its venv.
 # --revision is deliberately absent: the model is a local directory, and vLLM's --revision
 # only selects a hub commit. The revision is pinned and verified separately, from the HF

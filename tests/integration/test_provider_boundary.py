@@ -24,6 +24,7 @@ from shapeflow_p1.experiment.ledger import Ledger
 from shapeflow_p1.object_store import ObjectStore
 from shapeflow_p1.providers.provider_client import (
     PROVIDER_KEY_PLACEHOLDER,
+    ProviderCallError,
     ProviderClient,
 )
 from shapeflow_p1.runtime.provider_server import (
@@ -217,6 +218,36 @@ async def test_inference_is_tagged_by_the_cell_path(provider):
     event = [e for e in service.events if e["kind"] == "INFERENCE_COMMITTED"][-1]
     assert event["op_class"] == "RESEARCHER_REACT"
     assert event["task_id"] == "T1" and event["variant_id"] == "H02"
+
+    attestation = await runner.canary_audit(work_keys=["WK1"])
+    assert attestation["work_keys"] == ["WK1"]
+    assert attestation["work"][0]["ops"][0]["op_class"] == "RESEARCHER_REACT"
+    assert attestation["work"][0]["ops"][0]["prompt_tokens"] == 3
+    assert (
+        attestation["work"][0]["settled_gpu_seconds"]
+        == pytest.approx(
+            attestation["work"][0]["ops"][0]["settled_gpu_seconds"])
+    )
+    assert attestation["open_attempts"] == 0
+    assert "prompt_sha256" not in json.dumps(attestation)
+
+
+async def test_empty_canary_work_set_fails_locally_without_an_http_request():
+    client = ProviderClient(
+        base_url="http://127.0.0.1:1", token=TOKENS["runner"])
+    with pytest.raises(
+        ProviderCallError, match="requires at least one work_key"
+    ):
+        await client.canary_audit(work_keys=[])
+
+
+async def test_non_runner_role_cannot_call_the_canary_audit(provider):
+    base, *_ = provider
+    evaluator = ProviderClient(base_url=base, token=TOKENS["evaluator"])
+    status, payload = await evaluator._post(
+        "/v1/canary/audit", {"work_keys": ["WK1"]})
+    assert status == 403
+    assert "may not call" in payload["error"]
 
 
 async def test_an_unknown_route_is_a_404_not_a_guess(provider):

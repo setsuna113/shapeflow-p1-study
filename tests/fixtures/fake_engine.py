@@ -92,13 +92,32 @@ class FakeEngine:
                     "key_excerpts": text[:200]}
         if schema == "ConductResearch":
             return {"research_topic": text[:300] or "the question"}
-        if schema == "selector_output":
+        if schema in {
+            "selector_output", "selector_output_P1_ID",
+            "selector_output_P1_TYPED", "selector_output_P1_BRIDGE",
+        }:
             # The P1 selector call. On the real stack this is response_format: json_schema, and
-            # the served model returns a P1_ID selection; the fixture mirrors that so the offline
-            # tests exercise the real structured-output path rather than falling back silently.
+            # each arm has its own root schema. Mirror the named contract so tests cannot pass by
+            # accepting a valid object from a different treatment arm.
+            labels = [label for label in _labels_in(text) if label.startswith("E")][:4]
             if self.selector_ids is not None:
-                return {"contract": "P1_ID", "selected_ids": list(self.selector_ids)}
-            return {"contract": "P1_ID", "selected_ids": _labels_in(text)[:4]}
+                labels = list(self.selector_ids)
+            if schema.endswith("P1_TYPED"):
+                return {
+                    "contract": "P1_TYPED",
+                    "selections": [
+                        {"span_id": label, "role": "support"} for label in labels
+                    ],
+                }
+            if schema.endswith("P1_BRIDGE"):
+                return {
+                    "contract": "P1_BRIDGE",
+                    "selections": [
+                        {"span_id": label, "role": "support"} for label in labels
+                    ],
+                    "bridges": [],
+                }
+            return {"contract": "P1_ID", "selected_ids": labels}
         return {}
 
     # --- reply shapes ---------------------------------------------------------------

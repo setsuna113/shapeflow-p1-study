@@ -148,6 +148,8 @@ async def test_a_complete_p0_task_runs_with_no_network(frozen_world, tmp_path, n
             run_id="RUN-OFFLINE", task_id=task_id, arm_id="P0", page_variant="P0",
             close_variant="P0", replicate_id="0", seed=1, work_key="WK-OFFLINE",
             question=question, cell_token="cell-offline-1",
+            execution_binding_sha256="e" * 64,
+            protocol_document_sha256="d" * 64,
         )
         import asyncio
 

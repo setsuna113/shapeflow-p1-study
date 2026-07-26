@@ -32,7 +32,10 @@ Coding agent 必须完成以下闭环，而不是只搭一个空 harness：
 
 “自动启动”不等于绕过安全门。任何缺 secret、环境不匹配、P0 parity 失败、数据未冻结、schema 不闭合或 smoke 失败都必须 fail closed，并生成 `reports/BLOCKED.md`，禁止静默使用替代模型、替代数据或默认参数继续。
 
-用户在 2026-07-24 已明确要求“建完自动开始跑”；该指令就是 v0.1 的启动授权。Coding agent 将本文的固定预算和 decision thresholds 写成 hash-locked `launch_approval.json`，通过全部 hard gates 后无需再次询问或等待，直接启动 treatment 长跑。只有安全/完整性 gate 失败才停，并立即生成 `BLOCKED` 报告。
+2026-07-25 的方法学修订已改变 arm 集合、分析代码、decision config 与 protocol
+hash，因此旧 `launch_approval.json` 已失效并从工作树删除。当前代码审查阶段**不得**
+自动启动、部署或花费 API/GPU；只有修订代码形成 clean commit、重新冻结全部输入并由
+steward 生成覆盖完整新 execution binding 的外部 approval 后，自动启动才重新生效。
 
 ---
 
@@ -53,7 +56,10 @@ WEBPAGE-P1 会改变 researcher 后续轨迹和 CLOSE-P1 的输入，必须测 H
 必须比较 chunking、selector scope、aggregation、output freedom、close mode；不能把某一个 prompt 的失败写成“P1 无用”，也不能把某一个成功变体写成“所有 P1 有用”。
 
 **RQ5 — 什么时候有用？**  
-只能使用 decision-time 可见的 pre-treatment 特征，输出一个在 untouched holdout 上验证过的 eligibility envelope。
+本周只能使用冻结的处理前 task/source-pool 特征，分别探索 H、C、条件增量和 H+C
+联合选择在哪些 task strata 上同时满足 strict-quality guards 与完整 service-work
+节省。结果必须写成 task-level formative hypothesis；它不是 invocation policy、
+deployment envelope 或 confirmatory claim，也不得改变主 verdict。
 
 ### 1.2 不在本周范围内
 
@@ -413,7 +419,8 @@ server experiment checkout:
 
 Coding agent 在本地完成并提交每个 gate 后，可创建上述**私有服务器 bare remote**并普通 push；这不是 GitHub/publication。若任一路径已存在且 identity 不匹配，必须停下生成 `BLOCKED_EXISTING_PATH.md`，禁止删除、覆盖或 force-push。服务器只从明确 commit checkout；dirty tree 禁止 launch。
 
-`protocol/launch_approval.json` 至少包含：
+由 `SHAPEFLOW_APPROVAL_FILE` 指向、位于 Git execution tree 外的 append-only approval
+store，其 current pointer 至少包含：
 
 ```text
 protocol_sha
@@ -423,6 +430,10 @@ approval_mode: USER_EXPLICIT_AUTO_LAUNCH
 approval_source_date: 2026-07-24
 approved_at_utc
 ```
+
+approval 不得写入或提交到它所批准的 repo：否则写文件会使 tree dirty，而提交该文件又会
+改变 `approved_commit`，形成无法启动的自指。批准对象是已 clean 的 code HEAD；外部
+approval history 只追加、runner/evaluator 只读。
 
 Coding agent 只把本文已固定的值 materialize/hash，不能自行改值；这不是再次请求审批。审批文件与 commit SHA 匹配后，server checkout 自动执行 `scripts/bootstrap_and_run.sh`。原始 snapshots、object store、SQLite 和 logs 永不进入 Git；最终只回传 redacted reports、Parquet exports 和 hash manifests。
 
@@ -1316,6 +1327,18 @@ Truth critical recall、真实 contradiction-pair recall 和 required evidence c
 - C01–C04 的 selector 输入是完整 `VisibleCompressorView`，输出 namespace 是 `VisibleMessageSpan`；AI reasoning 只能标成 `MODEL_DERIVED_CONTEXT`，不能自动成为 evidence；
 - C06-REG 才能读取 hidden registry spans，必须单独估计 `visible-only × registry-assisted`；
 - `SHORT_PROSE` 区分 pointer/ID 机制与“单纯少 decode”；`CPU_LEXICAL` 区分 LLM selection 与确定性 lexical selection；
+- `SHORT_PROSE` 的主比较是 **structured-ID bounded policy vs bounded-short-prose
+  policy** 的 all-offered ITT。publisher 先按同一 rendered-token budget 唯一确定最长
+  prefix，再验证该 prefix；预算截断本身不是 semantic repair，prefix 内非法必须拒绝，
+  禁止继续向前搜索一个“碰巧合法”的更短答案。每次真实 prose 调用（包括
+  call failure、cancellation、reject、atomic fallback 中已完成但未发布的 sibling）必须
+  产生 closed normalization trace；H 与 C 分别记账，HC 不得用一个节点替另一个节点。
+- pointer-only 归因是比主 policy effect 更强的敏感性结论：structured 一侧任何
+  selector repair/invalid trace 按最差质量，prose 一侧任何 raw-contract nonadherence
+  按最有利质量，禁止 complete-case 删除。若 prose raw contract 不合规，则合规 prose
+  的反事实 service work 不可从已发生的 decode 推出，因此 work-superiority
+  sensitivity 必须为 `NOT_ESTIMABLE`；此时仍可报告 bounded-policy ITT，但不得写成
+  pointer representation 本身优于合格 prose。
 - TruthPacket oracle 只用于 frozen-state ceiling，不进入产品候选或最终 end-to-end；
 - pinned `ResearchComplete` 是空 schema，C05-FUSED-EXT 不能通过普通 close-after hook 实现；它必须使用独立的 P1-only tool/graph variant（例如 `ResearchCompleteWithSelection`），保留三种退出路径的 dedicated-selector fallback，并报告为“停止策略 + reducer”联合扩展，不得归因成 compressor-only；
 - H/C 内部 budget 档位由 block design 分配，不再复制成几十个手写 variant；
@@ -2023,6 +2046,9 @@ Primary holdout 在 isolated causal mode 运行；冻结的 operational replicat
 1. **Direct node effect**
    - 同一 H/C checkpoint fork；
    - 回答 immediate representation/work/quality。
+   - 当前 pinned ODR 没有可验证的 boundary-resume backend；producer 必须
+     fail closed 为 `UNAVAILABLE`，不得用两次独立 full-graph run 冒充同 checkpoint
+     direct effect。
 2. **Frozen-source end-to-end ITT**
    - 允许 trajectory 分叉；
    - Week-1 的主要产品效应。
@@ -2038,7 +2064,8 @@ P1 通过必须同时满足：
 3. final report 质量非劣；
 4. all-offered complete work 明确下降；
 5. failure/tail guard 不破；
-6. 若声称 CONDITIONAL，frozen-registry eligibility coverage 达到唯一预注册门。
+6. structured ID-path 相对 CPU 与 SHORT_PROSE 的预注册机制门通过。探索性
+   eligibility 不进入 primary decision tree。
 
 `configs/decision.yaml` 中将 provisional values 明确标为 v0.1；在 mini-ITT freeze 前锁死。第一版建议：
 
@@ -2067,7 +2094,11 @@ coverage:
   conditional_task_exposure_coverage_lcb_min: 0.30
 ```
 
-这些值是本次显式 auto-launch 指令采用的 protocol v0.1，不是 coding agent 可自行调节的默认。`protocol/launch_approval.json` 中的 `decision_thresholds_sha` 必须精确匹配。Automatic policy freeze 只能复制这些 margins，不能在 mini 结果后选择或修改它们。
+`coverage` 项仅保留为未来 boundary-randomized invocation study 的版本兼容占位；
+当前 task-level eligibility producer 与 finalizer 不读取它，也不能生成
+`CONDITIONAL` verdict。
+
+这些值是本次显式 auto-launch 指令采用的 protocol v0.1，不是 coding agent 可自行调节的默认。外部 approval current pointer 中的 `decision_thresholds_sha` 必须精确匹配。Automatic policy freeze 只能复制这些 margins，不能在 mini 结果后选择或修改它们。
 
 ### 15.3 Inference
 
@@ -2118,9 +2149,10 @@ THESIS_GRADE:
   KEEP AND E2E speedup LCB95 >= 1.5x
 
 CONDITIONAL:
-  overall KEEP fails
-  BUT pre-frozen eligibility rule passes KEEP on holdout
-  AND frozen-registry task-exposure coverage LCB95 >= 30%
+  RESERVED_NOT_REACHABLE_IN_WEEK1
+  # 只有未来在同一 upstream checkpoint 做 boundary randomization/fork，
+  # 并在独立 confirmatory corpus 上验证 invocation policy 后才能启用。
+  # 当前 task-level formative CART 不得产生或升级此 verdict。
 
 MECHANISM_ONLY:
   isolated guards PASS
@@ -2141,65 +2173,89 @@ NOT_ESTABLISHED:
 
 ### 15.4 “什么时候有用”
 
-eligibility 是**node invocation policy**，不是事后给整 task 贴标签。只允许该 boundary 在 selector 调用前可见的 features：
+Week-1 的 execution unit 是完整 task；没有在同一 H/C checkpoint 上随机化
+“调用 P1 还是 P0”的 boundary-level fork。因此本周只能回答
+**task-level formative heterogeneity**，不能把 CART 写成 node invocation policy。
+search result、reasoning trajectory、H/C checkpoint 与 close reason 都是在 treatment
+后产生的 mediator/outcome，不能进入 eligibility features。
+
+唯一允许的处理前 features 在第一条 treatment cell 之前由 steward 冻结并
+content-address：
 
 ```text
-WEBPAGE:
+frozen source pool:
   candidate_evidence_tokens, source_count, span_count
-  span_length_quantiles, table_list_fraction, redundancy
-  visible_conflict_cue, raw_content_available_fraction
+  span_length_q25/q50/q75/q90, table_list_fraction
+  redundancy, raw_content_available_fraction
 
-C_VISIBLE:
-  visible_message_tokens, visible_tool_output_tokens
-  tool_call_count, source_count, query_attempt_count
-  table_list_fraction, redundancy, close_reason
+frozen evaluator task view:
+  question_token_count, authored_facet_count, fixed_query_count
+  declared_stratum_* one-hot
 ```
 
-在 SCREEN/POWER_PILOT 分别学习 H/C 的低自由度 rule；end-to-end policy 对每个 eligible invocation 执行 P1，其余 fallback P0。训练 label 只用同 checkpoint 可观测的 component outcome：
+`authored_facet_count`、`fixed_query_count` 与 declared strata 只允许用于 evaluator
+侧形成性解释；treatment identity 看不到它们，所以它们尤其不能被描述成可直接部署
+的 online policy feature。
+
+target family 在 outcome 之前完整冻结，事后不得增删或挑选：
 
 ```text
-local_quality_pass
-  = structural PASS
-    AND H raw-evidence recall / C VisibleTruthProjection recall passes
-
-local_saving_pass
-  = isolated paired upstream-service saving >=10%
-
-training_success = local_quality_pass AND local_saving_pass
+H_STANDALONE         = H  vs P0
+C_STANDALONE         = C  vs P0
+C_INCREMENT_GIVEN_H  = HC vs H
+H_INCREMENT_GIVEN_C  = HC vs C
+HC_JOINT_CHOICE      = HC vs ALL(P0, H, C)
 ```
 
-operational saving 不归因到 invocation，也不进入 CART label；冻结后的整套 node policy 在 independent TraceBlocks 上验证。
-
-Week-1 没有概率抽样框，因此不得声称覆盖任意外部“目标人口”。唯一可识别的 coverage estimand 是：
+最后一个 target 使用 intersection-union label；HC 只优于 P0、却不优于 H 或 C
+时必须失败，禁止把单节点收益重写成组合收益。每个 task 先对 replicates 取 mean，
+再对该 target 的每个 comparator 计算：
 
 ```text
-invocation_coverage(node)
-= eligible node opportunities / all node opportunities
+quality_pass(comparator)
+  = treatment 每个 replicate 的 strict qualified_report == 1
+    AND strict view 下全部 frozen higher-is-better NI guards 通过
+    AND critical_harm increase guard 通过
 
-task_exposure_coverage(node)
-= tasks with >=1 eligible invocation / all tasks offering that node
+work_pass(comparator)
+  = 1 - mean(W_treatment) / mean(W_comparator) >= 10%
+
+training_success(target)
+  = ALL comparators: quality_pass AND work_pass
 ```
 
-每个 topic/source cluster 等权，cluster 内 tasks 平分该权重；invocations 在 task 内再平分 task 权重。95% CI 用 task/source-cluster bootstrap。CONDITIONAL 的 30% 门针对 `task_exposure_coverage` LCB；同时强制报告 invocation coverage、每 task eligible count 和 all-offered policy effect。报告必须写成“本冻结 registry 的覆盖率”，外推到论文 workload 需要未来代表性 benchmark。
+某 metric 两臂都不适用时该 guard 记为 `NOT_APPLICABLE_PASS`；一侧缺失或只一侧
+不适用必须 fail closed。失败 API、retry、fallback 与已花 work 留在完整
+`service_work` 中。绝不能把“两臂都失败但 P1 失败得更快”标为 useful；不得用
+local selector recall 代替最终 strict report quality。
 
-eligibility learner 冻结为：
+每个 target 独立拟合并完整报告：
 
-- depth ≤2 CART；
-- 每 leaf 至少来自 8 个 independent tasks，而非 8 个 correlated boundaries；
-- 只用上列 features；
-- design split 目标为上述 `training_success`；
-- bootstrap rule-selection stability ≥70%；
-- 选择目标是 `coverage × saving_LCB`；
-- mini 后保存可读 rule、feature thresholds 和 hash；
-- stability 不足时禁止 CONDITIONAL claim。
+- depth ≤2 CART，零 information-gain 时禁止制造 split；
+- 每 leaf 至少 8 个 independent tasks；
+- source/topic cluster-held-out OOF；
+- cluster bootstrap root stability ≥70%；
+- coverage 只能命名为 `task_coverage` / `cluster_equal_task_coverage`；
+- FORMATIVE_POWER_PILOT 只允许 frozen-rule prediction，绝不 refit；
+- zero eligible denominator 明确写 `NOT_ESTIMABLE`；
+- stable、unstable、no-split、null、negative、not-estimable 五个 targets 全部输出；
+- 不选“最好看的 target”，不产生 CI/p-value 式 confirmatory subgroup claim；
+- 无论结果如何，不改变 KEEP/MECHANISM_ONLY/KILL/NOT_ESTABLISHED、champion、
+  structured attribution 或 deployment envelope。
 
 禁止：
 
-- treatment 后 fallback/retry/reuse 作为 eligibility feature；
-- 在 holdout 重新切点；
-- 高维 subgroup fishing；
-- 只报 eligible-only、不报 all-offered；
-- 用 P0 实际输出长度作为部署时不可见的 oracle feature。
+- `visible_message_tokens`、tool/query counts、`close_reason`、checkpoint/trajectory、
+  fallback/retry/reuse 等 treatment 后变量；
+- 在 holdout 重新切点、重选 feature、target 或 margin；
+- 把 task coverage 写成 invocation coverage；
+- 把 machine-authored formative holdout 写成 confirmatory corpus；
+- 用 eligibility 生成 `CONDITIONAL` verdict。
+
+未来若要回答 invocation-level C eligibility，必须另建同一 upstream checkpoint 的
+boundary randomization/fork、独立 sealed confirmatory corpus，并冻结本周产生的
+hypothesis/rule hash；当前 E2E trajectory divergence 仍是 total-effect mediator，
+不是 pairing error。
 
 ---
 
@@ -2562,8 +2618,8 @@ exports/request_level_accounting.parquet
 - citation correctness/association；
 - trajectory shifts；
 - harm/fallback/failure；
-- eligibility coverage；
-- benefit surface；
+- five-target exploratory task-level eligibility findings（含 null/unstable）；
+- formative task-level benefit surface（不得标 invocation/deployment envelope）；
 - GPU sentinel/time drift。
 
 ### 20.3 `WEEK1_P1_DECISION.md` 固定结构
@@ -2577,7 +2633,7 @@ C_REGISTRY: ...
 H_PLUS_C_VISIBLE: ...
 verdict_status: PROVISIONAL_MACHINE | HUMAN_AUDIT_COMPLETE
 champion_variant: exact full specification
-eligible_coverage + CI
+exploratory_task_level_eligibility: all frozen targets, no verdict effect
 quality_effects + CI
 engine_work/wall/energy effects + CI
 critical_harm_rate
@@ -2598,7 +2654,7 @@ human_audit_status
 9. Average/median/tail effect；
 10. Quality and critical harms；
 11. Work balance；
-12. Eligibility envelope and coverage；
+12. Exploratory task-level eligibility（非 invocation/deployment envelope）；
 13. Failure/fallback accounting；
 14. Sensitivity and live validity；
 15. Human-audit status；

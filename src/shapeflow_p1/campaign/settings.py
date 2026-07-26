@@ -111,6 +111,10 @@ class Settings:
             "max_consecutive_failures",
             int(self.get("budget", "retry_policy", "max_consecutive_failures")),
         )
+        layer = str(self.get("week1", "measurement", "layer"))
+        block["max_upstream_inflight"] = int(
+            self.get("stack", "isolation", layer, "gateway_max_upstream_inflight")
+        )
         return ProviderConfig.from_mapping(block)
 
     def admission_pricing(self) -> dict[str, float]:
@@ -204,6 +208,55 @@ class Settings:
             # attempts record the reasoning tokens that actually came back instead.
             send_thinking_switch=bool(block.get("send_thinking_switch", False)),
         )
+
+    def judge_sampling(self):
+        """Return the exact evaluator decoding envelope frozen in ``judge.yaml``.
+
+        Evaluation previously constructed :class:`DeepSeekJudge` with client defaults.  The
+        defaults happened to match temperature/top-p, but the frozen file did not control the
+        request body and therefore could drift without changing the measurement.  Keep the
+        actual wire policy behind the same Settings boundary as corpus authoring.
+        """
+        from ..evaluation.judge_client import SamplingEnvelope
+
+        self.validate_judge_policy_versions()
+
+        block = self.get("judge", "model")
+        return SamplingEnvelope(
+            temperature=float(block["temperature"]),
+            top_p=float(block["top_p"]),
+            seed=int(block["seed"]),
+            max_tokens=int(block["max_tokens"]),
+            enable_thinking=bool(block["enable_thinking"]),
+            send_thinking_switch=bool(block["send_thinking_switch"]),
+        )
+
+    def judge_max_retries(self) -> int:
+        """The retry envelope is protocol, not a client-library default."""
+        value = int(self.get("judge", "retry", "max_retries"))
+        if value < 0:
+            raise ConfigError("judge.retry.max_retries must be non-negative")
+        return value
+
+    def validate_judge_policy_versions(self) -> None:
+        """Refuse a config/code mismatch in any evaluator measurement primitive."""
+        from ..evaluation.atomizer import ATOMIZE_VERSION
+        from .evaluate import RELATION_PROMPT_VERSION
+        from .truth import TRUTH_PROMPT_VERSION
+
+        declared = self.get("judge", "prompts")
+        expected = {
+            "atomize_version": ATOMIZE_VERSION,
+            "truth_version": TRUTH_PROMPT_VERSION,
+            "report_version": RELATION_PROMPT_VERSION,
+        }
+        mismatches = [
+            f"{key}={declared.get(key)!r}, code={value!r}"
+            for key, value in expected.items() if declared.get(key) != value
+        ]
+        if mismatches:
+            raise ConfigError(
+                "judge prompt/parser policy drift: " + "; ".join(mismatches))
 
     def exa_usd_worst_case(self) -> float:
         """The most one search can cost, derived from the pinned result count and price list.

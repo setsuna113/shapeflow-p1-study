@@ -154,9 +154,7 @@ async def _unusable_model_call(**_kw):  # pragma: no cover - never invoked
 def run_preflight(settings: Settings, *, repo: Path,
                   approved_protocol_sha: Optional[str] = None) -> dict:
     """The last check before treatment: approval, corpus, world, and the runner's own view."""
-    from ..acquire.manifest import campaign_manifest
-    from ..campaign.acquire import task_world_is_complete
-    from ..campaign.prepare import load_sealed_registry
+    from ..analysis.design import load_runner_analysis_design_receipt
     from ..protocol import ApprovalError, protocol_sha, verify_approval_file
 
     checks: list[Gate] = []
@@ -175,60 +173,85 @@ def run_preflight(settings: Settings, *, repo: Path,
     else:
         checks.append(Gate("protocol_sha", PASS, live_sha[:12]))
 
+    # P0 parity runs before paid acquisition, so its success is carried forward as a
+    # content-addressed receipt rather than a phase-row written into a different UID's ledger.
+    parity_path = repo / "reports" / "P0_PARITY_PASSED.json"
+    if not parity_path.exists():
+        checks.append(Gate("p0_parity", FAIL, "P0 parity receipt is missing"))
+    else:
+        try:
+            from ..canonical import canonical_json
+            from ..hashing import sha256_hex
+
+            parity = json.loads(parity_path.read_text(encoding="utf-8"))
+            recorded = str(parity.get("content_sha256") or "")
+            actual = sha256_hex(canonical_json(
+                {k: v for k, v in parity.items() if k != "content_sha256"}))
+            parity_ok = (
+                parity.get("status") == "PASS"
+                and parity.get("protocol_sha") == live_sha
+                and len(str(parity.get("probe_inputs_sha256") or "")) == 64
+                and recorded == actual
+            )
+            checks.append(Gate(
+                "p0_parity", PASS if parity_ok else FAIL,
+                f"receipt {recorded[:12]}" if parity_ok
+                else "receipt status/protocol/content hash does not match this tree",
+            ))
+        except (OSError, json.JSONDecodeError, TypeError) as e:
+            checks.append(Gate("p0_parity", FAIL, f"{type(e).__name__}: {e}"))
+
     try:
         verify_approval_file(repo)
         checks.append(Gate("approval", PASS, "binds the live configuration"))
     except ApprovalError as e:
         checks.append(Gate("approval", FAIL, str(e)[:300]))
 
+    # Runner preflight must not open the steward/evaluator trees it is meant to be unable to
+    # read.  The steward publishes this content-addressed, non-secret receipt before treatment;
+    # schedule freeze binds it below.  It contains task/split/pool hashes, never facets, truth,
+    # audit-only ranks or eligibility feature values.
     try:
-        registry, digest = load_sealed_registry(settings)
-        checks.append(Gate("sealed_registry", PASS,
-                           f"{len(registry['tasks'])} tasks, {digest[:12]}"))
+        analysis_receipt = load_runner_analysis_design_receipt(settings)
+        receipt_tasks = list(analysis_receipt["task_pools"])
+        checks.append(Gate(
+            "sealed_registry_receipt", PASS,
+            f"{len(receipt_tasks)} acquired tasks, "
+            f"registry {str(analysis_receipt['sealed_registry_sha256'])[:12]}",
+        ))
+        checks.append(Gate(
+            "campaign_manifest_receipt", PASS,
+            str(analysis_receipt["campaign_acquisition_sha256"])[:12],
+        ))
+        checks.append(Gate(
+            "analysis_design", PASS,
+            str(analysis_receipt["content_sha256"])[:12],
+        ))
     except Exception as e:  # noqa: BLE001
-        checks.append(Gate("sealed_registry", FAIL, f"{type(e).__name__}: {e}"))
-        registry = {"tasks": []}
+        checks.append(Gate(
+            "sealed_registry_receipt", FAIL, f"{type(e).__name__}: {e}"))
+        checks.append(Gate(
+            "campaign_manifest_receipt", FAIL, "analysis-design receipt unavailable"))
+        checks.append(Gate(
+            "analysis_design", FAIL, "pre-treatment analysis design unavailable"))
+        analysis_receipt = {}
+        receipt_tasks = []
 
-    # Every world re-verified, not just counted by filename. A pool file exists for a task
-    # whose blobs are gone and whose manifest never verified; globbing the directory counted
-    # that as frozen.
+    # Every runner-visible world is re-verified from its published pool and object bytes.  The
+    # acquisition audit manifest remains in the steward tree; its hash is in the receipt above.
     split = str(settings.get("week1", "screen", "split"))
-    wanted = [t["task_id"] for t in registry.get("tasks", []) if t.get("split") == split]
-    broken = []
-    for task_id in wanted:
-        complete, _digest, reason = task_world_is_complete(settings, task_id)
-        if not complete:
-            broken.append(f"{task_id}: {reason}")
+    wanted = [
+        str(task["task_id"]) for task in receipt_tasks
+        if task.get("split") == split
+    ]
+    broken = _runner_world_failures(settings, receipt_tasks)
     checks.append(Gate("frozen_world", PASS if wanted and not broken else FAIL,
                        f"{len(wanted)} worlds frozen and verified" if wanted and not broken
                        else "; ".join(broken[:5]) or "no tasks in this split"))
 
-    # The campaign manifest describes the whole acquisition, and nothing re-checked it.
-    campaign_path = settings.path("acquisition") / "campaign_acquisition.json"
-    if not campaign_path.exists():
-        checks.append(Gate("campaign_manifest", FAIL, "no campaign acquisition manifest"))
-    else:
-        try:
-            body = json.loads(campaign_path.read_text(encoding="utf-8"))
-            recorded = body.get("campaign_acquisition_sha256", "")
-            recomputed = campaign_manifest(
-                {k: v for k, v in (body.get("per_task") or {}).items()},
-                registry_sha256=body.get("registry_sha256", ""),
-                claim_scope=body.get("claim_scope", ""),
-                corpus_tier=body.get("corpus_tier", ""),
-            )["campaign_acquisition_sha256"] if body.get("per_task") else recorded
-            covered = set(body.get("per_task") or body.get("tasks") or {})
-            uncovered = sorted(set(wanted) - covered) if covered else []
-            checks.append(Gate(
-                "campaign_manifest",
-                PASS if recorded and recomputed == recorded and not uncovered else FAIL,
-                f"{len(covered)} tasks, {recorded[:12]}" if not uncovered
-                else f"{len(uncovered)} screen task(s) absent from the manifest"))
-        except (OSError, json.JSONDecodeError, KeyError) as e:
-            checks.append(Gate("campaign_manifest", FAIL, f"{type(e).__name__}: {e}"))
-
     # Real source overlap, not the topic label the author invented. Two tasks sharing pages
     # are one observation; across two splits they are a leak.
+    registry = {"tasks": receipt_tasks}
     checks.append(_source_cluster_gate(settings, registry))
 
     # The runner's own view must carry the question and nothing else.
@@ -243,19 +266,71 @@ def run_preflight(settings: Settings, *, repo: Path,
                        "question only" if not leaked
                        else f"{len(leaked)} task view(s) carry more than the question"))
 
-    # The evaluator's own view must exist, or truth has nothing to be built from.
-    evaluator_tasks = settings.path("evaluator_root") / "tasks"
-    published = sorted(evaluator_tasks.glob("*.json")) if evaluator_tasks.exists() else []
-    checks.append(Gate("evaluator_view", PASS if published else FAIL,
-                       f"{len(published)} task views published"
-                       if published else f"{evaluator_tasks} is empty"))
+    # Creating the analysis receipt required the steward to read every evaluator task view and
+    # freeze the feature registry.  The runner must not prove that by listing the evaluator tree
+    # itself; doing so would defeat the UID boundary.
+    checks.append(Gate(
+        "evaluator_view_receipt",
+        PASS if receipt_tasks else FAIL,
+        f"{len(receipt_tasks)} evaluator views bound before treatment"
+        if receipt_tasks else "no evaluator-view receipt",
+    ))
 
     # Neither the answer key nor the steward's audit graph may be reachable from here.
     ok, detail = tree_isolation(repo, settings, ("evaluator_root", "steward_root"))
     checks.append(Gate("tree_isolation", PASS if ok else FAIL, detail))
 
     return {"ok": _ok(checks), "checks": [c.as_dict() for c in checks],
-            "protocol_sha": live_sha}
+            "protocol_sha": live_sha,
+            "analysis_design_receipt_sha256":
+                str(analysis_receipt.get("content_sha256") or "")}
+
+
+def _runner_world_failures(settings: Settings, task_rows: list[dict]) -> list[str]:
+    """Verify only the runner-safe world; never traverse the steward tree."""
+    from ..canonical import canonical_json
+    from ..hashing import sha256_hex
+    from ..object_store import ObjectStore
+
+    root = settings.path("frozen_corpus_for_runner")
+    objects = ObjectStore(root / "objects")
+    failures: list[str] = []
+    seen: set[str] = set()
+    for task in task_rows:
+        task_id = str(task.get("task_id") or "")
+        if not task_id or task_id in seen:
+            failures.append(f"duplicate/empty task coordinate {task_id!r}")
+            continue
+        seen.add(task_id)
+        pool_path = root / "pools" / f"{task_id}.json"
+        task_path = root / "tasks" / f"{task_id}.json"
+        try:
+            pool = json.loads(pool_path.read_text(encoding="utf-8"))
+            recorded = str(pool.get("pool_sha256") or "")
+            actual = sha256_hex(canonical_json({
+                key: value for key, value in pool.items() if key != "pool_sha256"
+            }))
+            if (
+                recorded != actual
+                or recorded != str(task.get("source_pool_sha256") or "")
+                or str(pool.get("task_id") or "") != task_id
+            ):
+                raise ValueError("pool identity/hash differs from frozen receipt")
+            view = json.loads(task_path.read_text(encoding="utf-8"))
+            if (
+                str(view.get("task_id") or "") != task_id
+                or str(view.get("split") or "") != str(task.get("split") or "")
+            ):
+                raise ValueError("runner task view differs from frozen receipt")
+            for snapshot in (pool.get("snapshots") or {}).values():
+                if (
+                    not isinstance(snapshot, dict)
+                    or not objects.verify(str(snapshot.get("object_ref") or ""))
+                ):
+                    raise ValueError("snapshot object is missing or corrupt")
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+            failures.append(f"{task_id}: {type(exc).__name__}: {exc}")
+    return failures
 
 
 def _source_cluster_gate(settings: Settings, registry: dict) -> Gate:

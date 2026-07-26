@@ -108,11 +108,12 @@ class CitationSupportResolver:
             return None
         content_hash = self.url_to_content.get(_normalize(url), "")
         if not content_hash:
-            # Not unknown. The frozen world is the whole world this run could see, so a URL
-            # that is not in it was not read.
+            # Not unknown. ``url_to_content`` is the source lineage available to this report
+            # (normally the exact occurrences retrieved by its arm), so a URL outside it was
+            # not read by the system that produced this claim.
             self.resolutions.append(CitationResolution(
                 label=str(label), url=url, supports=False,
-                reason="the cited URL is not in this task's frozen world"))
+                reason="the cited URL was not retrieved by this arm"))
             return False
         text = self.content_texts.get(content_hash, "")
         if not text:

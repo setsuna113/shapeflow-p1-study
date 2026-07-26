@@ -83,6 +83,7 @@ while true; do
   setsid runuser -u "$ROLE" -- env \
       USER="$ROLE" LOGNAME="$ROLE" HOME="/tmp" \
       SHAPEFLOW_REPO="$REPO" SHAPEFLOW_DATA_ROOT="$DATA_ROOT" \
+      SHAPEFLOW_APPROVAL_FILE="${SHAPEFLOW_APPROVAL_FILE:-$DATA_ROOT/approvals/launch_approval.json}" \
       PYTHONHASHSEED=0 TZ=UTC PYTHONUNBUFFERED=1 \
       "$@" >> "$LOG" 2>&1 &
   CHILD=$!

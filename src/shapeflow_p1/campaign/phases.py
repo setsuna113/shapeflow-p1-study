@@ -51,6 +51,29 @@ CREATE TABLE IF NOT EXISTS campaign_phase_transitions (
     at          REAL NOT NULL,
     reason      TEXT
 );
+
+-- v2 scopes state by the complete approved execution binding.  The v1 table used ``phase`` as
+-- its only primary key, so a newly approved experiment silently inherited the old campaign's
+-- completed gates.
+CREATE TABLE IF NOT EXISTS campaign_phases_v2 (
+    protocol_sha  TEXT NOT NULL,
+    phase         TEXT NOT NULL,
+    state         TEXT NOT NULL,
+    detail_json   TEXT NOT NULL DEFAULT '{}',
+    detail_sha    TEXT NOT NULL DEFAULT '',
+    started_at    REAL NOT NULL,
+    ended_at      REAL,
+    PRIMARY KEY(protocol_sha, phase)
+);
+
+CREATE TABLE IF NOT EXISTS campaign_phase_transitions_v2 (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    protocol_sha  TEXT NOT NULL,
+    from_phase    TEXT,
+    to_phase      TEXT NOT NULL,
+    at            REAL NOT NULL,
+    reason        TEXT
+);
 """
 
 
@@ -74,6 +97,22 @@ class PhaseStore:
         self._protocol_sha = protocol_sha
         with ledger.lock:
             ledger.raw_connection.executescript(_SCHEMA)
+            # Preserve every v1 phase row under the identity it already recorded.  v1 could
+            # hold at most one row per phase, so this migration is deterministic and
+            # idempotent.  New writes go only to v2.
+            ledger.raw_connection.execute(
+                "INSERT OR IGNORE INTO campaign_phases_v2("
+                " protocol_sha, phase, state, detail_json, detail_sha, started_at, ended_at)"
+                " SELECT protocol_sha, phase, state, detail_json, detail_sha, started_at,"
+                " ended_at FROM campaign_phases"
+            )
+            ledger.raw_connection.execute(
+                "INSERT OR IGNORE INTO campaign_phase_transitions_v2("
+                " id, protocol_sha, from_phase, to_phase, at, reason)"
+                " SELECT t.id, p.protocol_sha, t.from_phase, t.to_phase, t.at, t.reason"
+                " FROM campaign_phase_transitions AS t"
+                " JOIN campaign_phases AS p ON p.phase=t.to_phase"
+            )
 
     def _conn(self):
         return self._ledger.raw_connection
@@ -92,8 +131,9 @@ class PhaseStore:
     def record(self, phase: Phase) -> Optional[PhaseRecord]:
         with self._ledger.lock:
             row = self._conn().execute(
-                "SELECT phase, state, detail_json, detail_sha FROM campaign_phases WHERE phase=?",
-                (phase.value,),
+                "SELECT phase, state, detail_json, detail_sha FROM campaign_phases_v2"
+                " WHERE protocol_sha=? AND phase=?",
+                (self._protocol_sha, phase.value),
             ).fetchone()
         if row is None:
             return None
@@ -110,7 +150,9 @@ class PhaseStore:
         """The furthest phase that completed, or NEW."""
         with self._ledger.lock:
             rows = self._conn().execute(
-                "SELECT phase FROM campaign_phases WHERE state='COMPLETE'"
+                "SELECT phase FROM campaign_phases_v2"
+                " WHERE protocol_sha=? AND state='COMPLETE'",
+                (self._protocol_sha,),
             ).fetchall()
         completed = {Phase(r["phase"]) for r in rows}
         latest = Phase.NEW
@@ -131,15 +173,17 @@ class PhaseStore:
             )
         now = self._ledger.now()
         self._write(
-            "INSERT INTO campaign_phases(phase, state, protocol_sha, started_at)"
-            " VALUES (?,'RUNNING',?,?)"
-            " ON CONFLICT(phase) DO UPDATE SET state='RUNNING', started_at=excluded.started_at",
-            (phase.value, self._protocol_sha, now),
+            "INSERT INTO campaign_phases_v2(protocol_sha, phase, state, started_at)"
+            " VALUES (?,?,'RUNNING',?)"
+            " ON CONFLICT(protocol_sha, phase) DO UPDATE SET"
+            " state='RUNNING', started_at=excluded.started_at",
+            (self._protocol_sha, phase.value, now),
         )
         self._write(
-            "INSERT INTO campaign_phase_transitions(from_phase, to_phase, at, reason)"
-            " VALUES (?,?,?,?)",
-            (current.value, phase.value, now, reason or "begin"),
+            "INSERT INTO campaign_phase_transitions_v2("
+            " protocol_sha, from_phase, to_phase, at, reason)"
+            " VALUES (?,?,?,?,?)",
+            (self._protocol_sha, current.value, phase.value, now, reason or "begin"),
         )
 
     def complete(self, phase: Phase, detail: dict) -> str:
@@ -155,30 +199,34 @@ class PhaseStore:
                 )
             return digest
         self._write(
-            "INSERT INTO campaign_phases(phase, state, protocol_sha, detail_json, detail_sha,"
-            " started_at, ended_at) VALUES (?,'COMPLETE',?,?,?,?,?)"
-            " ON CONFLICT(phase) DO UPDATE SET state='COMPLETE', detail_json=excluded.detail_json,"
-            " detail_sha=excluded.detail_sha, ended_at=excluded.ended_at",
-            (phase.value, self._protocol_sha, json.dumps(detail, sort_keys=True), digest,
+            "INSERT INTO campaign_phases_v2("
+            " protocol_sha, phase, state, detail_json, detail_sha, started_at, ended_at)"
+            " VALUES (?,?,'COMPLETE',?,?,?,?)"
+            " ON CONFLICT(protocol_sha, phase) DO UPDATE SET state='COMPLETE',"
+            " detail_json=excluded.detail_json, detail_sha=excluded.detail_sha,"
+            " ended_at=excluded.ended_at",
+            (self._protocol_sha, phase.value, json.dumps(detail, sort_keys=True), digest,
              self._ledger.now(), self._ledger.now()),
         )
         return digest
 
     def fail(self, phase: Phase, reason: str) -> None:
         self._write(
-            "INSERT INTO campaign_phases(phase, state, protocol_sha, detail_json, started_at,"
-            " ended_at) VALUES (?,'FAILED',?,?,?,?)"
-            " ON CONFLICT(phase) DO UPDATE SET state='FAILED', detail_json=excluded.detail_json,"
-            " ended_at=excluded.ended_at",
-            (phase.value, self._protocol_sha, json.dumps({"reason": reason}),
+            "INSERT INTO campaign_phases_v2("
+            " protocol_sha, phase, state, detail_json, started_at, ended_at)"
+            " VALUES (?,?,'FAILED',?,?,?)"
+            " ON CONFLICT(protocol_sha, phase) DO UPDATE SET state='FAILED',"
+            " detail_json=excluded.detail_json, ended_at=excluded.ended_at",
+            (self._protocol_sha, phase.value, json.dumps({"reason": reason}),
              self._ledger.now(), self._ledger.now()),
         )
 
     def history(self) -> list[dict]:
         with self._ledger.lock:
             rows = self._conn().execute(
-                "SELECT from_phase, to_phase, at, reason FROM campaign_phase_transitions"
-                " ORDER BY id"
+                "SELECT from_phase, to_phase, at, reason"
+                " FROM campaign_phase_transitions_v2 WHERE protocol_sha=? ORDER BY id",
+                (self._protocol_sha,),
             ).fetchall()
         return [dict(r) for r in rows]
 

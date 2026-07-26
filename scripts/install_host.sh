@@ -5,10 +5,9 @@
 # install units. Nothing that touches a model, a web page or a credential ever runs as root
 # afterwards -- the provider, the engine, the runner and the evaluator all run downgraded.
 #
-# The credential isolation is plain Unix ownership rather than ACLs or systemd credentials,
-# because this host has neither setfacl nor a systemd new enough for LoadCredential=. The
-# resulting boundary is the same and is *proved* at the end of this script by attempting a read
-# as each non-provider identity and requiring it to fail.
+# Credentials use plain Unix ownership.  Experiment artifacts use narrow POSIX ACLs because
+# runner/steward services have UMask=0077 while the evaluator still needs read-only access to
+# their frozen outputs.  Both directions are proved below by actually dropping privileges.
 set -euo pipefail
 
 REPO="${SHAPEFLOW_REPO:-/storage/nvme/shapeflow-p1-study}"
@@ -30,8 +29,15 @@ say "preconditions"
 for user in sfprovider sfrunner sfinfer sfsteward sfevaluator; do
   id "$user" >/dev/null 2>&1 || { echo "missing service user $user" >&2; exit 1; }
 done
+for command in setfacl getfacl; do
+  command -v "$command" >/dev/null 2>&1 \
+    || { echo "$command is required for evaluator read-only publication ACLs" >&2; exit 1; }
+done
 [ -d "$REPO" ] || { echo "repo $REPO not found" >&2; exit 1; }
-[ -r "$CRED_DIR/tavily.key" ] || { echo "$CRED_DIR/tavily.key not found" >&2; exit 1; }
+# Exa is the acquisition credential and the provider refuses to start without it. Tavily is
+# optional now that acquisition moved to Exa -- its caps stay on the books for the requests
+# already spent there, but nothing new is bought through it, so a missing tavily.key is fine.
+[ -r "$CRED_DIR/exa.key" ] || { echo "$CRED_DIR/exa.key not found" >&2; exit 1; }
 [ -r "$CRED_DIR/deepseek.key" ] || { echo "$CRED_DIR/deepseek.key not found" >&2; exit 1; }
 
 FREE="$(df -B1 --output=avail "$REPO" | tail -1 | tr -d ' ')"
@@ -54,8 +60,14 @@ nvidia-smi --query-gpu=uuid --format=csv,noheader | grep -qx "$GPU_UUID" \
 say "credential isolation"
 chown root:sfprovider "$CRED_DIR"
 chmod 0750 "$CRED_DIR"
-chown sfprovider:sfprovider "$CRED_DIR"/tavily.key "$CRED_DIR"/deepseek.key
-chmod 0400 "$CRED_DIR"/tavily.key "$CRED_DIR"/deepseek.key
+# exa.key and deepseek.key are required; tavily.key is optional and only locked down if the
+# operator still keeps one here. Every key present must end up sfprovider-only either way --
+# an unlisted credential left at its creation mode is exactly the leak this section prevents.
+for key in exa deepseek tavily; do
+  [ -e "$CRED_DIR/$key.key" ] || continue
+  chown sfprovider:sfprovider "$CRED_DIR/$key.key"
+  chmod 0400 "$CRED_DIR/$key.key"
+done
 
 # --- role tokens: each role reads only its own capability ---------------------------------------
 say "role tokens"
@@ -83,29 +95,81 @@ INTERP="$(readlink -f "$VLLM_VENV/bin/python")"
 
 # --- data root, one owner per identity -----------------------------------------------------------
 say "data root"
-mkdir -p "$DATA_ROOT"/{provider,steward,runner,evaluator}
+mkdir -p "$DATA_ROOT"/{provider,steward,runner,evaluator,approvals}
 chown root:root "$DATA_ROOT"; chmod 0755 "$DATA_ROOT"
 chown -R sfprovider:sfprovider "$DATA_ROOT/provider"; chmod 0700 "$DATA_ROOT/provider"
-# The steward writes the corpus. The runner reads only what the steward *publishes* into
-# runner/frozen_corpus -- never the steward tree itself, whose acquisition manifests carry
-# the audit occurrence graph (ranks, scores, duplicate links) that is evaluator-only.
-# This used to be sfsteward:sfrunner 0750, which gave the identity under measurement r-x on
-# the directory holding the material its outputs were about to be scored against.
-chown -R sfsteward:sfsteward "$DATA_ROOT/steward"; chmod 0700 "$DATA_ROOT/steward"
-mkdir -p "$DATA_ROOT/runner/frozen_corpus"
-chown -R sfrunner:sfrunner "$DATA_ROOT/runner"; chmod 0755 "$DATA_ROOT/runner"
-# The evaluator holds the answer key. Plan §7.3: the steward *builds* truth and the
-# evaluator *reads* it, so the steward owns this tree and the evaluator group reads it.
-# What matters is the third bit: the runner is not in either, and never sees a TruthPacket.
-chown -R sfsteward:sfevaluator "$DATA_ROOT/evaluator"; chmod 0750 "$DATA_ROOT/evaluator"
+readonly_acl() {
+  # Existing bytes plus defaults for files created later under a service UMask of 0077.
+  # Named users receive r-X only; the owner keeps rwX. No shared directory grants write.
+  local path="$1"; shift
+  local -a access_args=()
+  local -a default_args=("d:u::rwx" "d:g::---" "d:m::rwx" "d:o::---")
+  for reader in "$@"; do
+    access_args+=("u:$reader:r-X")
+    default_args+=("d:u:$reader:r-x")
+  done
+  setfacl -R -m "$(IFS=,; echo "${access_args[*]}")" "$path"
+  setfacl -m "$(IFS=,; echo "${default_args[*]}")" "$path"
+}
 
-# The steward publishes the runner-readable corpus into the runner's tree.
-setfacl_missing=0
-command -v setfacl >/dev/null 2>&1 || setfacl_missing=1
-if [ "$setfacl_missing" -eq 1 ]; then
-  chown -R sfsteward:sfrunner "$DATA_ROOT/runner/frozen_corpus"
-  chmod -R 0750 "$DATA_ROOT/runner/frozen_corpus"
-fi
+# Approval history is outside the Git execution tree: the steward appends, while every role
+# that can spend or evaluate can only read the current pointer and immutable history.
+chown -R sfsteward:sfsteward "$DATA_ROOT/approvals"
+find "$DATA_ROOT/approvals" -type d -exec chmod 0700 {} +
+# 0640, not 0600: chmod sets the ACL *mask* on a file that carries an ACL, and a 0600 mask is
+# `---`, which cancels every u:<role>:r-x entry readonly_acl grants below. The 0700 directory
+# is the real gate; see shapeflow_p1.fsmode.
+find "$DATA_ROOT/approvals" -type f -exec chmod 0640 {} +
+readonly_acl "$DATA_ROOT/approvals" sfrunner sfevaluator
+
+# The steward tree is private except for acquisition manifests that evaluation verifies.
+# sfevaluator gets traverse-only on the root and inherited read-only access on that one subtree.
+mkdir -p "$DATA_ROOT/steward/acquisition"
+chown -R sfsteward:sfsteward "$DATA_ROOT/steward"
+find "$DATA_ROOT/steward" -type d -exec chmod 0700 {} +
+find "$DATA_ROOT/steward" -type f -exec chmod 0640 {} +
+setfacl -m u:sfevaluator:--x,m::--x "$DATA_ROOT/steward"
+readonly_acl "$DATA_ROOT/steward/acquisition" sfevaluator
+
+# Runner output stays runner-owned.  The evaluator can traverse the root and read only the
+# frozen/runtime evidence needed by evaluate: runs (ledger + frozen blocks), object store and
+# checkpoints.
+#
+# The earlier claim here -- that default ACLs make newly-created 0600 bytes readable without
+# weakening UMask -- was false, and it is the whole reason evaluation could not read the
+# runner's artifacts. A default ACL is inherited, but the kernel folds the creating mode into
+# it (`mask &= mode >> 3`), so 0600 yields mask `---` and every named-user grant below becomes
+# `#effective:---`. The umask is genuinely ignored when a default ACL exists, which is why the
+# `umask 077` probes passed while the Python writers -- which ask for 0600 explicitly through
+# tempfile.mkstemp -- did not. See shapeflow_p1.fsmode.
+mkdir -p "$DATA_ROOT/runner"/{runs,object_store,checkpoints,frozen_corpus}
+chown -R sfrunner:sfrunner "$DATA_ROOT/runner"
+find "$DATA_ROOT/runner" -type d -exec chmod 0700 {} +
+find "$DATA_ROOT/runner" -type f -exec chmod 0640 {} +
+setfacl -m u:sfsteward:--x,u:sfevaluator:--x,m::--x "$DATA_ROOT/runner"
+for published in runs object_store checkpoints; do
+  readonly_acl "$DATA_ROOT/runner/$published" sfevaluator
+done
+
+# frozen_corpus is the steward-to-runner publication boundary. Both the runner and evaluator
+# read it; only the steward owns/writes it.
+chown -R sfsteward:sfsteward "$DATA_ROOT/runner/frozen_corpus"
+readonly_acl "$DATA_ROOT/runner/frozen_corpus" sfrunner sfevaluator
+# The evaluator holds the answer key. Plan §7.3: the steward *builds* truth and the
+# evaluator *reads and scores* it, so the steward owns the answer-key directories and the
+# evaluator group reads them. Judgments are a separate capability: only sfevaluator owns and
+# writes that subtree. Do not make the whole evaluator tree group-writable -- that would let
+# scoring mutate the truth it is supposed to measure against.
+mkdir -p "$DATA_ROOT/evaluator"/{tasks,truth_packets,visible_truth,analysis_design,judgments}
+chown -R sfsteward:sfevaluator "$DATA_ROOT/evaluator"
+find "$DATA_ROOT/evaluator" -type d -exec chmod 0750 {} +
+find "$DATA_ROOT/evaluator" -type f -exec chmod 0640 {} +
+for answer_key in tasks truth_packets visible_truth analysis_design; do
+  readonly_acl "$DATA_ROOT/evaluator/$answer_key" sfevaluator
+done
+chown -R sfevaluator:sfevaluator "$DATA_ROOT/evaluator/judgments"
+find "$DATA_ROOT/evaluator/judgments" -type d -exec chmod 0700 {} +
+find "$DATA_ROOT/evaluator/judgments" -type f -exec chmod 0400 {} +
 
 mkdir -p "$REPO/logs" "$REPO/reports"
 chown sfrunner:sfrunner "$REPO/logs" "$REPO/reports"
@@ -132,6 +196,8 @@ gitleaks version
 
 # --- systemd units ---------------------------------------------------------------------------------
 say "units"
+# The coordinator flag historically says --protocol-sha, but after launch it carries the
+# complete approved ProtocolBinding.digest. Never substitute the document-only SHA.
 render() {
   sed -e "s|@REPO@|$REPO|g" \
       -e "s|@DATA_ROOT@|$DATA_ROOT|g" \
@@ -145,7 +211,7 @@ render() {
       -e "s|@MODEL_REVISION@|${SHAPEFLOW_MODEL_REVISION:-31c69efc29464b6bb0aee1398b5a7b50a99340c3}|g" \
       -e "s|@GPU_UUID@|$GPU_UUID|g" \
       -e "s|@VLLM_PORT@|$VLLM_PORT|g" \
-      -e "s|@PROTOCOL_SHA@|${SHAPEFLOW_PROTOCOL_SHA:-UNSET}|g" \
+      -e "s|@PROTOCOL_SHA@|${SHAPEFLOW_EXECUTION_BINDING_SHA:-UNSET}|g" \
       "$1"
 }
 SUPERVISOR="systemd"
@@ -192,8 +258,12 @@ for role in sfrunner sfinfer sfsteward sfevaluator; do
   [ "$denied" = true ] || exit 1
 done
 PROVIDER_CAN_READ=true
-runuser -u sfprovider -- cat "$CRED_DIR/deepseek.key" >/dev/null \
-  || { echo "FATAL: sfprovider cannot read its own credential" >&2; PROVIDER_CAN_READ=false; }
+# Both mandatory credentials, not just one: the provider will not start without either, and a
+# check that passed on deepseek alone would let an unreadable exa.key through to launch.
+for key in exa deepseek; do
+  runuser -u sfprovider -- cat "$CRED_DIR/$key.key" >/dev/null \
+    || { echo "FATAL: sfprovider cannot read $CRED_DIR/$key.key" >&2; PROVIDER_CAN_READ=false; }
+done
 [ "$PROVIDER_CAN_READ" = true ] || exit 1
 runuser -u sfinfer -- "$VLLM_VENV/bin/python" -c 'import sys; sys.exit(0)' \
   || { echo "FATAL: sfinfer cannot execute the pinned interpreter" >&2; exit 1; }
@@ -206,6 +276,113 @@ for tree in evaluator steward; do
     exit 1
   fi
 done
+
+# Prove default ACL inheritance the way the campaign actually writes.  Existing-file checks are
+# insufficient: every ledger/object/checkpoint is created after install.
+#
+# These probes used `umask 077; : > file`, which asks the kernel for 0666 -- and the umask is
+# ignored outright when a default ACL is present, so the probe file landed with mask `rw-` and
+# passed unconditionally. The Python writers ask for 0600 explicitly (tempfile.mkstemp), which
+# collapses the mask to `---`. The probe therefore certified an access path that did not exist.
+#
+# `new_shared_probe` reproduces the real sequence: create restricted, widen to 0640 before
+# publishing, exactly as shapeflow_p1.fsmode.chmod_shared does.
+new_shared_probe() {  # <owner-uid> <path>
+  runuser -u "$1" -- sh -c 'install -m 0600 /dev/null "$1" && chmod 0640 "$1"' sh "$2"
+}
+# ...and `new_unshared_probe` creates one *without* the widening, so the assertions below are
+# proved non-vacuous: on a filesystem where ACLs are live this file must NOT be readable.
+new_unshared_probe() {  # <owner-uid> <path>
+  runuser -u "$1" -- sh -c 'install -m 0600 /dev/null "$1"' sh "$2"
+}
+
+# Mask liveness: if this read were to succeed, every "can read" assertion below would be
+# meaningless, because the mask would not be constraining anything.
+mask_probe="$DATA_ROOT/approvals/.acl-mask-liveness-probe-$$"
+new_unshared_probe sfsteward "$mask_probe"
+if runuser -u sfrunner -- cat "$mask_probe" >/dev/null 2>&1; then
+  rm -f "$mask_probe"
+  echo "FATAL: a 0600 file under $DATA_ROOT/approvals is readable by sfrunner; the ACL mask" >&2
+  echo "       is not constraining access, so the isolation probes below prove nothing" >&2
+  exit 1
+fi
+rm -f "$mask_probe"
+
+probe="$DATA_ROOT/approvals/.approval-read-probe-$$"
+denied="$DATA_ROOT/approvals/.runner-approval-write-denied-probe-$$"
+new_shared_probe sfsteward "$probe"
+for reader in sfrunner sfevaluator; do
+  runuser -u "$reader" -- cat "$probe" >/dev/null \
+    || { echo "FATAL: $reader cannot read new external approval bytes" >&2; exit 1; }
+done
+if runuser -u sfrunner -- touch "$denied" >/dev/null 2>&1; then
+  rm -f "$probe" "$denied"
+  echo "FATAL: sfrunner can mutate the external approval store" >&2
+  exit 1
+fi
+rm -f "$probe"
+
+for directory in \
+  "$DATA_ROOT/runner/runs" \
+  "$DATA_ROOT/runner/object_store" \
+  "$DATA_ROOT/runner/checkpoints"; do
+  probe="$directory/.runner-evaluator-read-probe-$$"
+  denied="$directory/.evaluator-write-denied-probe-$$"
+  new_shared_probe sfrunner "$probe"
+  runuser -u sfevaluator -- cat "$probe" >/dev/null \
+    || { echo "FATAL: sfevaluator cannot read new runner artifact $probe" >&2; exit 1; }
+  if runuser -u sfevaluator -- touch "$denied" >/dev/null 2>&1; then
+    rm -f "$denied"
+    echo "FATAL: sfevaluator can write runner publication directory $directory" >&2
+    exit 1
+  fi
+  rm -f "$probe"
+done
+
+probe="$DATA_ROOT/runner/frozen_corpus/.steward-publication-read-probe-$$"
+new_shared_probe sfsteward "$probe"
+runuser -u sfrunner -- cat "$probe" >/dev/null \
+  || { echo "FATAL: sfrunner cannot read newly published frozen corpus bytes" >&2; exit 1; }
+runuser -u sfevaluator -- cat "$probe" >/dev/null \
+  || { echo "FATAL: sfevaluator cannot read newly published frozen corpus bytes" >&2; exit 1; }
+rm -f "$probe"
+
+probe="$DATA_ROOT/steward/acquisition/.evaluator-acquisition-read-probe-$$"
+new_shared_probe sfsteward "$probe"
+runuser -u sfevaluator -- cat "$probe" >/dev/null \
+  || { echo "FATAL: sfevaluator cannot read a new frozen acquisition manifest" >&2; exit 1; }
+if runuser -u sfrunner -- cat "$probe" >/dev/null 2>&1; then
+  rm -f "$probe"
+  echo "FATAL: sfrunner can read evaluator-only acquisition provenance" >&2
+  exit 1
+fi
+rm -f "$probe"
+
+probe="$DATA_ROOT/evaluator/tasks/.answer-key-read-probe-$$"
+denied="$DATA_ROOT/evaluator/tasks/.evaluator-answer-key-write-denied-probe-$$"
+new_shared_probe sfsteward "$probe"
+runuser -u sfevaluator -- cat "$probe" >/dev/null \
+  || { echo "FATAL: sfevaluator cannot read a new answer-key artifact" >&2; exit 1; }
+if runuser -u sfrunner -- cat "$probe" >/dev/null 2>&1; then
+  rm -f "$probe"
+  echo "FATAL: sfrunner can read the evaluator answer key" >&2
+  exit 1
+fi
+if runuser -u sfevaluator -- touch "$denied" >/dev/null 2>&1; then
+  rm -f "$probe" "$denied"
+  echo "FATAL: sfevaluator can mutate the steward-owned answer key" >&2
+  exit 1
+fi
+rm -f "$probe"
+
+probe="$DATA_ROOT/evaluator/judgments/.evaluator-write-probe-$$"
+new_unshared_probe sfevaluator "$probe"
+if runuser -u sfrunner -- cat "$probe" >/dev/null 2>&1; then
+  rm -f "$probe"
+  echo "FATAL: sfrunner can read evaluator judgments" >&2
+  exit 1
+fi
+rm -f "$probe"
 
 mkdir -p "$REPO/reports"
 cat > "$REPO/reports/CREDENTIAL_ISOLATION.json" <<JSON

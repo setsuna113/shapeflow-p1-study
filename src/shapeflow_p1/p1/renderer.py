@@ -38,7 +38,7 @@ __all__ = [
 # Sharing one SOURCE header across a contiguous run changes how many tokens P1 materializes
 # relative to P0, so it is a frozen, named behaviour rather than an implementation detail. It
 # enters the protocol hash; changing it mints a new protocol SHA.
-RENDERER_GROUPING_VERSION = "renderer_source_grouping_v1"
+RENDERER_GROUPING_VERSION = "renderer_visible_source_binding_and_order_v3"
 
 # Given a span dict, return its exact text (snapshot slice or message slice).
 SourceTextFn = Callable[[dict], str]
@@ -112,11 +112,60 @@ def _canonical_order(items, registry: dict) -> list:
 
 
 def _order_key(span: dict) -> tuple:
-    start, _ = _start_end(span)
-    return (span.get("namespace", ""), _source_of(span), start, _span_id_of(span))
+    namespace = span.get("namespace", "")
+    start, end = _start_end(span)
+    if namespace == "VISIBLE_MESSAGE":
+        # message_id is an identity label, not an order coordinate.  Sorting by it can reverse
+        # the exact conversation the compressor read (for example m-z precedes m-a in bytes).
+        # Every visible span addresses one immutable view, so byte offsets are the canonical
+        # order; the id is only a final deterministic tie-breaker.
+        return (
+            namespace,
+            span.get("visible_compressor_view_hash", ""),
+            start,
+            end,
+            _span_id_of(span),
+        )
+    return (namespace, _source_of(span), start, end, _span_id_of(span))
 
 
-def _contiguous_runs(items, registry: dict) -> list[list]:
+def _visible_kind(span: dict) -> str:
+    return str(span.get("kind") or "")
+
+
+def _is_non_citable_context(span: dict) -> bool:
+    return (
+        span.get("namespace") == "VISIBLE_MESSAGE"
+        and _visible_kind(span) in {
+            "TOOL_UNATTRIBUTED_CONTEXT",
+            "MODEL_DERIVED_CONTEXT",
+            "USER_CONTEXT",
+        }
+    )
+
+
+def _context_header(kind: str) -> str:
+    if kind == "TOOL_UNATTRIBUTED_CONTEXT":
+        return "UNATTRIBUTED TOOL CONTEXT (non-citable; not source evidence):"
+    if kind == "MODEL_DERIVED_CONTEXT":
+        return "MODEL-DERIVED CONTEXT (non-citable; not source evidence):"
+    return "USER CONTEXT (non-citable; not source evidence):"
+
+
+def _render_source_identity(span: dict, span_id: str, source_meta: dict) -> tuple:
+    meta = source_meta.get(span_id)
+    if span.get("namespace") == "VISIBLE_MESSAGE" and meta:
+        return (
+            "VISIBLE_SOURCE_RANGE",
+            meta.get("visible_compressor_view_hash"),
+            meta.get("byte_start"),
+            meta.get("byte_end"),
+            tuple(meta.get("source_occurrence_ids") or ()),
+        )
+    return ("SPAN_SOURCE", span.get("namespace"), _source_of(span))
+
+
+def _contiguous_runs(items, registry: dict, source_meta: dict) -> list[list]:
     """Group consecutive items that come from one source and abut in that source.
 
     Two selected sentences that are adjacent in the same page share one SOURCE header instead
@@ -134,8 +183,11 @@ def _contiguous_runs(items, registry: dict) -> list[list]:
         span = registry[item.span_id]
         if runs:
             prev = registry[runs[-1][-1].span_id]
-            same_source = _source_of(prev) == _source_of(span) and (
-                prev.get("namespace") == span.get("namespace")
+            prev_id = _span_id_of(prev) or runs[-1][-1].span_id
+            span_id = _span_id_of(span) or item.span_id
+            same_source = (
+                _render_source_identity(prev, prev_id, source_meta)
+                == _render_source_identity(span, span_id, source_meta)
             )
             # Abutting, allowing the whitespace a chunker leaves between blocks.
             adjacent = same_source and 0 <= _start_end(span)[0] - _start_end(prev)[1] <= 2
@@ -167,18 +219,45 @@ def _check_visible_provenance(
     meta = source_meta.get(span_id)
     if not meta:
         return
-    view = visible_views.get(span["visible_compressor_view_hash"])
+    if meta.get("binding_version") != "visible_source_byte_range_v1":
+        raise SourceMetaLeak(
+            f"span {span_id[:12]}: title/URL lacks the frozen byte-range binding"
+        )
+    view_hash = str(meta.get("visible_compressor_view_hash") or "")
+    if view_hash != str(span.get("visible_compressor_view_hash") or ""):
+        raise SourceMetaLeak(
+            f"span {span_id[:12]}: title/URL addresses another compressor view"
+        )
+    view = visible_views.get(view_hash)
     if view is None:
         raise SourceMetaLeak(
             f"span {span_id[:12]}: cannot prove title/URL provenance -- the compressor view "
             "is not available to check against"
         )
+    block_start = int(meta["byte_start"])
+    block_end = int(meta["byte_end"])
+    if not (
+        0
+        <= block_start
+        <= int(span["byte_start"])
+        <= int(span["byte_end"])
+        <= block_end
+        <= len(view)
+    ):
+        raise SourceMetaLeak(
+            f"span {span_id[:12]}: title/URL source range does not contain the span"
+        )
     for field in ("title", "url"):
-        value = meta.get(field)
-        if value and value.encode("utf-8") not in view:
+        value = str(meta.get(field) or "")
+        field_start = int(meta[f"{field}_byte_start"])
+        field_end = int(meta[f"{field}_byte_end"])
+        actual = view[field_start:field_end].decode("utf-8", errors="strict")
+        if value == "(untitled source)" and field_start == field_end:
+            continue
+        if actual != value:
             raise SourceMetaLeak(
-                f"span {span_id[:12]}: {field} {value!r} does not appear in the "
-                "compressor-visible bytes; that is C_REGISTRY provenance, not C_VISIBLE"
+                f"span {span_id[:12]}: {field} {value!r} does not reconstruct from its "
+                "capture-time byte range"
             )
 
 
@@ -211,19 +290,46 @@ def render(
     context_text_for = context_text_for or _no_context
     lines: list[str] = []
 
-    for run in _contiguous_runs(_canonical_order(evidence.items, registry), registry):
+    for run in _contiguous_runs(
+        _canonical_order(evidence.items, registry), registry, source_meta
+    ):
         first = registry[run[0].span_id]
         first_id = _span_id_of(first) or run[0].span_id
+        context_run = _is_non_citable_context(first)
         if first.get("namespace") == "VISIBLE_MESSAGE":
-            _check_visible_provenance(first, first_id, source_meta, visible_views)
+            if context_run:
+                # Even genuine title/URL bytes do not turn a user/model message into a source.
+                # Silently accepting source_meta here would put citation affordances on material
+                # whose provenance contract explicitly forbids them.
+                if any(source_meta.get(item.span_id) for item in run):
+                    raise SourceMetaLeak(
+                        f"span {first_id[:12]}: non-citable context may not carry source metadata"
+                    )
+            else:
+                for item in run:
+                    span = registry[item.span_id]
+                    _check_visible_provenance(
+                        span, _span_id_of(span) or item.span_id, source_meta, visible_views
+                    )
         # ONLY the source header is shared across the run. Everything below stays bound to the
         # span it describes: collapsing a run's roles and facets into one line leaves no way to
         # tell which role belongs to which span, so a contradiction the selector correctly
         # marked becomes unreadable downstream.
-        lines.append("SOURCE: " + _title_url(first_id, source_meta))
+        if context_run:
+            lines.append(_context_header(_visible_kind(first)))
+        else:
+            lines.append("SOURCE: " + _title_url(first_id, source_meta))
         for item in run:
             span = registry[item.span_id]
-            bits = [f"[{label_for(item.span_id)}]"]
+            item_is_context = _is_non_citable_context(span)
+            if item_is_context:
+                # Deliberately no square-bracket citation syntax.  A downstream citation parser
+                # must not be able to turn a context handle into source support by accident.
+                bits = [
+                    f"CONTEXT ITEM (handle {label_for(item.span_id)}; non-citable)"
+                ]
+            else:
+                bits = [f"[{label_for(item.span_id)}]"]
             # Every (facet, role) relation, each bound to THIS span. A span can support one
             # facet and contradict another; flattening to a single role would erase exactly the
             # disagreement the contradiction guard exists to preserve.
@@ -232,9 +338,14 @@ def render(
                 shown = [f"{role}:{facet}" if facet != OVERALL_FACET else str(role)
                          for facet, role in relations if role]
                 if shown:
-                    bits.append("(" + ", ".join(shown) + ")")
+                    if item_is_context:
+                        bits.append("context roles: " + ", ".join(shown))
+                    else:
+                        bits.append("(" + ", ".join(shown) + ")")
             elif item.role:
-                bits.append(f"({item.role})")
+                bits.append(
+                    f"context role: {item.role}" if item_is_context else f"({item.role})"
+                )
                 if item.facet_ids:
                     bits.append("facets: " + ",".join(item.facet_ids))
             # Breadcrumb and context both come from addressed, re-hashed ranges -- never from

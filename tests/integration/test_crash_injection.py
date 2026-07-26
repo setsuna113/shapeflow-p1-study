@@ -34,7 +34,7 @@ from shapeflow_p1.campaign.schedule import ArmSpec, cell_key
 from shapeflow_p1.campaign.settings import Settings
 from shapeflow_p1.evaluation.judge_client import DeepSeekJudge
 from shapeflow_p1.experiment.budget import Budget
-from shapeflow_p1.experiment.ledger import Ledger
+from shapeflow_p1.experiment.ledger import TERMINAL_STATES, Ledger
 from shapeflow_p1.object_store import ObjectStore
 from shapeflow_p1.providers.provider_client import PROVIDER_KEY_PLACEHOLDER
 from shapeflow_p1.runtime.provider_server import (
@@ -218,9 +218,10 @@ def _integrity(runner, manifest, *, phase_id, split) -> None:
     assert runner.ledger.integrity_check()
     states = runner.cell_states(manifest, phase_id=phase_id, split=split)
     for block in manifest.blocks:
-        complete = all(states.get(cell_key(c)) == "COMMITTED" for c in block.cells)
+        terminal = all(
+            states.get(cell_key(c)) in TERMINAL_STATES for c in block.cells)
         frozen = (runner.settings.path("runs") / "blocks" / f"{block.block_id}.json").exists()
-        assert frozen <= complete, "an incomplete block was frozen"
+        assert frozen <= terminal, "a non-terminal block was frozen"
 
 
 async def test_a_cell_that_dies_mid_run_does_not_commit(campaign, settings, tmp_path):
@@ -249,8 +250,13 @@ async def test_a_cell_that_dies_mid_run_does_not_commit(campaign, settings, tmp_
 
     states = runner.cell_states(manifest, phase_id="crash", split="FORMATIVE_SCREEN")
     assert "FAILED_UNKNOWN" in states.values()
-    assert runner.freeze_blocks(manifest, phase_id="crash", split="FORMATIVE_SCREEN",
-                                directory=settings.path("runs") / "blocks") == []
+    frozen = runner.freeze_blocks(
+        manifest, phase_id="crash", split="FORMATIVE_SCREEN",
+        directory=settings.path("runs") / "blocks")
+    assert len(frozen) == 1
+    assert frozen[0]["terminal_frozen"] is True
+    assert frozen[0]["complete_success"] is False
+    assert (settings.path("runs") / "blocks" / "FREEZE_ROOT.json").exists()
     _integrity(runner, manifest, phase_id="crash", split="FORMATIVE_SCREEN")
 
 

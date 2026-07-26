@@ -22,7 +22,7 @@ operational layer measures directly.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Optional
 
 from ..evidence.chunkers import Tokenizer
 from ..odr.checkpoints import CCheckpoint
@@ -34,7 +34,13 @@ from .pipeline import (
     run_selection,
     spans_from_visible_view,
 )
-from .visible_view import VisibleCompressorView, build_visible_view
+from .visible_view import (
+    VisibleCompressorView,
+    VisibleSourceRegistryError,
+    build_visible_source_registry,
+    build_visible_view,
+    source_partitioned_message_segments,
+)
 
 __all__ = ["CloseSelectionStrategy", "CloseStrategyConfig", "CloseSelectionError"]
 
@@ -55,6 +61,9 @@ class CloseStrategyConfig:
     #: declared one per C arm; this node never had a field to put it in, so every C arm
     #: chunked the same way and the axis did not exist here.
     chunker: str = "paragraph_sentence_v1"
+    scope: str = "per_researcher"
+    bridge_token_cap_each: int | None = None
+    bridge_token_cap_total: int | None = None
 
     def __post_init__(self) -> None:
         if self.node not in (VISIBLE, REGISTRY, "C_FUSED_EXT"):
@@ -65,6 +74,24 @@ class CloseStrategyConfig:
             raise ValueError(
                 f"close chunker {self.chunker!r} has no implementation "
                 f"(have {sorted(CLOSE_CHUNKERS)})")
+        if self.scope != "per_researcher":
+            raise ValueError(
+                f"close scope {self.scope!r} has no faithful implementation"
+            )
+        if self.close_mode not in {"dedicated_selector", "separate"}:
+            raise ValueError(
+                f"close mode {self.close_mode!r} has no faithful implementation. "
+                "prefix_preserving requires preserving the selector input prefix at invocation "
+                "time, and fused_with_fallback requires a real fused completion tool; an output "
+                "wrapper or dedicated fallback is not that treatment."
+            )
+        if self.contract == "P1_BRIDGE":
+            if self.bridge_token_cap_each is None or self.bridge_token_cap_total is None:
+                raise ValueError("P1_BRIDGE close variant requires per-bridge and total token caps")
+            if not (0 < self.bridge_token_cap_each <= self.bridge_token_cap_total):
+                raise ValueError("bridge caps require 0 < each <= total")
+        elif self.bridge_token_cap_each is not None or self.bridge_token_cap_total is not None:
+            raise ValueError("bridge caps belong only to a P1_BRIDGE variant")
 
 
 class CloseSelectionStrategy:
@@ -83,10 +110,19 @@ class CloseSelectionStrategy:
                 "sees only the compressor's bytes; holding the means to read more makes that "
                 "claim a promise instead of a property."
             )
+        if config.node == REGISTRY and (
+            raw_spans_for is None or snapshot_texts_for is None
+        ):
+            raise ValueError(
+                "C_REGISTRY requires both raw_spans_for and snapshot_texts_for. Falling back to "
+                "the compressor-visible view would silently run C_VISIBLE under a C_REGISTRY "
+                "label."
+            )
         self._raw_spans_for = raw_spans_for
         self._snapshot_texts_for = snapshot_texts_for
         self._work_sink = work_sink
         self.last_work = WorkRecord()
+        self.last_outcome: Optional[SelectionOutcome] = None
         self.last_view: Optional[VisibleCompressorView] = None
 
     async def close_researcher(
@@ -95,9 +131,28 @@ class CloseSelectionStrategy:
         cfg = self.config
         view = build_visible_view(checkpoint.researcher_messages)
         self.last_view = view
+        source_registry = None
+        if cfg.node != REGISTRY:
+            try:
+                source_registry = build_visible_source_registry(view)
+            except VisibleSourceRegistryError as exc:
+                outcome = SelectionOutcome(
+                    failure=SelectionFailure("VISIBLE_SOURCE_REGISTRY", str(exc)),
+                    contract=cfg.contract,
+                    aggregation=cfg.aggregation,
+                    checkpoint_hash=checkpoint.digest,
+                )
+                self.last_outcome = outcome
+                raise CloseSelectionError(outcome.failure) from exc
 
         spans = spans_from_visible_view(
-            view.view_bytes, view_hash=view.view_hash, messages=view.message_segments,
+            view.view_bytes,
+            view_hash=view.view_hash,
+            messages=(
+                source_partitioned_message_segments(view, source_registry)
+                if source_registry is not None
+                else view.message_segments
+            ),
             tokenizer=self._tokenizer, max_tokens=cfg.chunk_max_tokens,
             # Read, not ignored. Every C arm used to chunk identically whatever its variant
             # declared, so the chunker axis did not exist at this node at all.
@@ -106,31 +161,62 @@ class CloseSelectionStrategy:
         namespace = "VISIBLE_MESSAGE"
         snapshot_texts: dict[str, str] = {}
         visible_views = {view.view_hash: view.view_bytes}
+        source_meta: dict[str, dict] = {}
 
-        if cfg.node == REGISTRY and self._raw_spans_for is not None:
+        if cfg.node == REGISTRY:
             # The extension's larger world. Kept in its own namespace and its own arm; the
             # offered view is built once per namespace, so the two never appear in one prompt
             # by accident.
             raw = self._raw_spans_for(checkpoint)
-            if raw:
-                spans = raw
-                namespace = "RAW_SOURCE"
-                snapshot_texts = self._snapshot_texts_for(checkpoint) if \
-                    self._snapshot_texts_for else {}
-                visible_views = {}
+            if not raw:
+                outcome = SelectionOutcome(
+                    failure=SelectionFailure(
+                        "REGISTRY_UNAVAILABLE",
+                        "C_REGISTRY checkpoint resolved no raw spans; refusing to run C_VISIBLE "
+                        "under the registry label",
+                    ),
+                    contract=cfg.contract, aggregation=cfg.aggregation,
+                    checkpoint_hash=checkpoint.digest,
+                )
+                self.last_outcome = outcome
+                raise CloseSelectionError(outcome.failure)
+            spans = raw
+            namespace = "RAW_SOURCE"
+            snapshot_texts = self._snapshot_texts_for(checkpoint)
+            visible_views = {}
+        else:
+            try:
+                assert source_registry is not None
+                source_meta = source_registry.source_meta_for(spans)
+            except VisibleSourceRegistryError as exc:
+                outcome = SelectionOutcome(
+                    failure=SelectionFailure("VISIBLE_SOURCE_REGISTRY", str(exc)),
+                    contract=cfg.contract,
+                    aggregation=cfg.aggregation,
+                    checkpoint_hash=checkpoint.digest,
+                )
+                self.last_outcome = outcome
+                raise CloseSelectionError(outcome.failure) from exc
 
         outcome = await run_selection(
             spans=spans, namespace=namespace, snapshot_texts=snapshot_texts,
             visible_views=visible_views,
             topic=getattr(task_ctx, "research_topic", ""),
             contract=cfg.contract, aggregation=cfg.aggregation,
+            chunker=cfg.chunker,
             token_budget=cfg.token_budget, tokenizer=self._tokenizer,
             query_attempts=[(qid, qid) for qid in checkpoint.query_attempt_ids],
             selector=self._selector, task_ctx=task_ctx,
             known_occurrence_ids={
                 oid for s in spans for oid in (s.get("source_occurrence_ids") or [])
             },
+            bridge_token_cap_each=cfg.bridge_token_cap_each,
+            bridge_token_cap_total=cfg.bridge_token_cap_total,
+            checkpoint_hash=checkpoint.digest,
+            stage="single",
+            source_meta=source_meta,
         )
+        self.last_outcome = outcome
         self.last_work = outcome.work
         if self._work_sink is not None:
             self._work_sink(cfg.variant_id, outcome.work)

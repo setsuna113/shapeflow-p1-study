@@ -24,6 +24,12 @@ ExecStart=@REPO@/.venv/bin/shapeflow-p1 serve-provider --config @REPO@/configs/w
 
 # The paths, never the values. The provider reads them once into memory and registers them with
 # the redactor; they never enter argv, the environment of any child, or a log line.
+#
+# Exa is the acquisition credential and is MANDATORY: runtime.provider_main.build_service calls
+# load_exa_key unconditionally, so a missing EXA_API_KEY_FILE stops the provider from starting
+# at all. Tavily is optional and retained only so the requests already recorded against it stay
+# on the books; nothing new is acquired through it.
+Environment=EXA_API_KEY_FILE=@CRED_DIR@/exa.key
 Environment=TAVILY_API_KEY_FILE=@CRED_DIR@/tavily.key
 Environment=DEEPSEEK_API_KEY_FILE=@CRED_DIR@/deepseek.key
 Environment=SHAPEFLOW_DATA_ROOT=@DATA_ROOT@

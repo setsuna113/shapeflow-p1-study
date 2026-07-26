@@ -23,6 +23,7 @@ from shapeflow_p1.odr.checkpoints import (
 )
 
 REPO = Path(__file__).resolve().parents[2]
+BINDING = "e" * 64
 
 
 @pytest.fixture()
@@ -51,7 +52,8 @@ def _stored(settings):
 def test_p0_is_always_in_the_fork_set(settings):
     _store, digest = _stored(settings)
     plan = plan_forks(settings, checkpoint_digest=digest, boundary_kind="C",
-                      task_id="T1", variant_ids=["C01", "C02"], seed=7)
+                      task_id="T1", variant_ids=["C01", "C02"], seed=7,
+                      execution_binding_sha256=BINDING)
     assert plan.variant_ids == ["P0", "C01", "C02"]
 
 
@@ -61,7 +63,8 @@ def test_a_boundary_with_no_p1_variants_is_refused(settings):
     _store, digest = _stored(settings)
     with pytest.raises(ValueError, match="no P1 variants"):
         plan_forks(settings, checkpoint_digest=digest, boundary_kind="C",
-                   task_id="T1", variant_ids=[], seed=7)
+                   task_id="T1", variant_ids=[], seed=7,
+                   execution_binding_sha256=BINDING)
 
 
 def test_every_fork_of_a_boundary_gets_the_same_bytes(settings):
@@ -69,7 +72,8 @@ def test_every_fork_of_a_boundary_gets_the_same_bytes(settings):
     full graph per arm, so each arm reached its own boundary with its own history."""
     _store, digest = _stored(settings)
     plan = plan_forks(settings, checkpoint_digest=digest, boundary_kind="C",
-                      task_id="T1", variant_ids=["C01", "C02"], seed=7)
+                      task_id="T1", variant_ids=["C01", "C02"], seed=7,
+                      execution_binding_sha256=BINDING)
 
     seen = []
 
@@ -89,9 +93,11 @@ def test_every_fork_of_a_boundary_gets_the_same_bytes(settings):
 def test_fork_ids_differ_by_variant_and_seed(settings):
     _store, digest = _stored(settings)
     a = plan_forks(settings, checkpoint_digest=digest, boundary_kind="C", task_id="T1",
-                   variant_ids=["C01"], seed=7)
+                   variant_ids=["C01"], seed=7,
+                   execution_binding_sha256=BINDING)
     b = plan_forks(settings, checkpoint_digest=digest, boundary_kind="C", task_id="T1",
-                   variant_ids=["C01"], seed=8)
+                   variant_ids=["C01"], seed=8,
+                   execution_binding_sha256=BINDING)
     assert {f.fork_id for f in a.forks}.isdisjoint({f.fork_id for f in b.forks})
     assert len({f.fork_id for f in a.forks}) == len(a.forks)
 
@@ -101,7 +107,8 @@ def test_a_failing_variant_is_recorded_as_failed_not_as_p0(settings):
     "this variant behaved exactly like P0"."""
     _store, digest = _stored(settings)
     plan = plan_forks(settings, checkpoint_digest=digest, boundary_kind="C",
-                      task_id="T1", variant_ids=["C01"], seed=7)
+                      task_id="T1", variant_ids=["C01"], seed=7,
+                      execution_binding_sha256=BINDING)
 
     def execute(spec, checkpoint):
         if spec.variant_id == "C01":
@@ -131,7 +138,8 @@ def test_a_variant_identical_to_p0_from_one_boundary_is_inert(settings):
 def test_the_fork_record_names_the_shared_boundary(settings, tmp_path):
     _store, digest = _stored(settings)
     plan = plan_forks(settings, checkpoint_digest=digest, boundary_kind="C",
-                      task_id="T1", variant_ids=["C01"], seed=7)
+                      task_id="T1", variant_ids=["C01"], seed=7,
+                      execution_binding_sha256=BINDING)
     outcomes = [
         ForkOutcome(plan.forks[0].fork_id, "P0", digest, state="COMMITTED",
                     output_sha256="aaa"),

@@ -58,11 +58,19 @@ class TaskContext:
 @dataclass(frozen=True)
 class ToolObservation:
     """One tool message a page-transform strategy produces. The adapter renders this into a
-    langchain ``ToolMessage`` in the pinned join order."""
+    langchain ``ToolMessage`` in the pinned join order.
+
+    ``source_occurrence_ids`` is capture-time sidecar provenance for the bytes in ``content``.
+    It is deliberately not placed on the graph-visible ToolMessage: doing that would change
+    explicit-P0 prompts and destroy parity.  The whole-batch publication hook commits it only
+    after the exact ToolMessage content/order has been verified, and the close hook injects it
+    only into the frozen C checkpoint.
+    """
 
     tool_call_id: str
     name: str
     content: str
+    source_occurrence_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

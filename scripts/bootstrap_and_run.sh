@@ -14,11 +14,14 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 REPORTS="$REPO/reports"
 DATA_ROOT="${SHAPEFLOW_DATA_ROOT:-/storage/nvme/shapeflow-data}"
+APPROVAL_FILE="${SHAPEFLOW_APPROVAL_FILE:-$DATA_ROOT/approvals/launch_approval.json}"
+export SHAPEFLOW_APPROVAL_FILE="$APPROVAL_FILE"
 CONFIG="${SHAPEFLOW_CONFIG:-$REPO/configs/week1.yaml}"
+ENGINE_EPOCH_FILE="${SHAPEFLOW_ENGINE_EPOCH_FILE:-/run/shapeflow-vllm-causal/engine_epoch}"
 VENDOR_PIN="408da442a661ea5e40a6163329f82e3f22628949"
 PATCHED=".build/open_deep_research-patched"
 MIN_FREE_BYTES=12884901888   # 12 GiB hard floor (plan §5.2)
-TOTAL_STEPS=17
+TOTAL_STEPS=18
 STEP=0
 SPEND_POSSIBLE=0
 
@@ -63,9 +66,11 @@ step() { STEP=$((STEP + 1)); echo "== [${STEP}/${TOTAL_STEPS}] $* =="; }
 # it -- so a step would run as the right uid while failing the check that says so.
 as() { local role="$1"; shift; runuser -u "$role" -- env USER="$role" LOGNAME="$role" \
         SHAPEFLOW_DATA_ROOT="$DATA_ROOT" SHAPEFLOW_REPO="$REPO" \
+        SHAPEFLOW_APPROVAL_FILE="$APPROVAL_FILE" \
         PYTHONHASHSEED=0 TZ=UTC \
         ${SHAPEFLOW_ENGINE_PID:+SHAPEFLOW_ENGINE_PID="$SHAPEFLOW_ENGINE_PID"} \
         ${SHAPEFLOW_ENGINE_LOG:+SHAPEFLOW_ENGINE_LOG="$SHAPEFLOW_ENGINE_LOG"} \
+        SHAPEFLOW_ENGINE_EPOCH_FILE="$ENGINE_EPOCH_FILE" \
         "$@"; }
 SF="$REPO/.venv/bin/shapeflow-p1"
 
@@ -95,18 +100,39 @@ discover_engine_pid() {
 
 # ---------------------------------------------------------------------------------------
 step "singleton: no active coordinator"
-systemctl is-active --quiet shapeflow-p1-week1.service \
-  && blocked "ACTIVE_COORDINATOR" "shapeflow-p1-week1.service is already running"
+# `systemctl is-active` is not sufficient on this host: systemd is not PID 1 here, so the call
+# fails, `&&` short-circuits, and the gate passed unconditionally -- while the coordinator that
+# actually runs is an sfsupervise process holding a flock. Check both, so the gate means the
+# same thing under systemd and under the supervisor.
+if command -v systemctl >/dev/null 2>&1 && [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ]; then
+  systemctl is-active --quiet shapeflow-p1-week1.service \
+    && blocked "ACTIVE_COORDINATOR" "shapeflow-p1-week1.service is already running"
+fi
+for lock in "${SHAPEFLOW_RUN_DIR:-/run/shapeflow}"/week1*.lock; do
+  [ -e "$lock" ] || continue
+  # flock -n succeeds only if nothing holds it; if we cannot take it, a coordinator is live.
+  if ! flock -n "$lock" true 2>/dev/null; then
+    blocked "ACTIVE_COORDINATOR" "a supervised coordinator already holds $lock"
+  fi
+done
 
 step "credentials present, readable only by the provider"
-runuser -u sfprovider -- test -r /etc/shapeflow/tavily.key \
-  || blocked "NO_SECURE_SECRET_INJECTION" "sfprovider cannot read the Tavily credential"
+# Exa is the acquisition credential the provider refuses to start without; Tavily is optional
+# since acquisition moved off it. Checking only tavily.key here would have passed a host that
+# cannot acquire anything at all.
+runuser -u sfprovider -- test -r /etc/shapeflow/exa.key \
+  || blocked "NO_SECURE_SECRET_INJECTION" "sfprovider cannot read the Exa credential"
 runuser -u sfprovider -- test -r /etc/shapeflow/deepseek.key \
   || blocked "NO_SECURE_SECRET_INJECTION" "sfprovider cannot read the DeepSeek credential"
+# Every credential actually present must be unreachable by every non-provider role. Probing one
+# fixed filename would leave a newly added key unproven.
 for role in sfrunner sfinfer sfevaluator; do
-  if runuser -u "$role" -- cat /etc/shapeflow/tavily.key >/dev/null 2>&1; then
-    blocked "SECRET_ISOLATION" "$role can read a credential; the boundary does not hold"
-  fi
+  for key in exa deepseek tavily; do
+    [ -f "/etc/shapeflow/$key.key" ] || continue
+    if runuser -u "$role" -- cat "/etc/shapeflow/$key.key" >/dev/null 2>&1; then
+      blocked "SECRET_ISOLATION" "$role can read $key.key; the boundary does not hold"
+    fi
+  done
 done
 
 step "campaign quota + free-space floor"
@@ -152,8 +178,10 @@ step "tests"
 "$REPO/.venv/bin/python" -m pytest -q || blocked "TESTS" "test suite failed"
 
 step "approval binds the live configuration"
-"$SF" verify-approval --approval "$REPO/protocol/launch_approval.json" --config "$CONFIG" \
-  || blocked "APPROVAL_MISMATCH" "launch_approval.json does not bind the live configuration"
+SHAPEFLOW_APPROVAL_FILE="$APPROVAL_FILE" \
+  "$SF" verify-approval --approval "$APPROVAL_FILE" --config "$CONFIG" \
+  || blocked "APPROVAL_MISMATCH" \
+    "external approval $APPROVAL_FILE does not bind the clean live configuration"
 
 step "doctor: stack, GPU UUID, driver, CUDA, vLLM, model revision, patch, APC"
 # The frozen stack manifest is only verifiable against a running engine. Give doctor the
@@ -174,19 +202,51 @@ step "P0 parity (mock model, no GPU, no credits)"
 # Everything past this line can consume a paid resource.
 SPEND_POSSIBLE=1
 
-step "prepare + acquire (steward)"
+# The last free gate, and deliberately the one immediately before the first paid command.
+# "The credential file is readable" and "the vendor accepts it" are different facts, and only
+# the second predicts whether acquisition can work. Without this check a rejected key is
+# discovered one billed rejection at a time -- which is exactly how a dead Tavily key turned
+# into 262 charged 401s and an empty frozen world. The probe sends a deliberately invalid body,
+# so a working credential answers 400 and nothing is searched or charged.
+step "upstream credentials are accepted (free probe, before anything is bought)"
+PROBE_STATUS="$(as sfsteward curl -sS -o /tmp/sf-credential-probe.json -w '%{http_code}' \
+  --unix-socket "${SHAPEFLOW_RUN_DIR:-/run/shapeflow}/provider.sock" \
+  -H "Authorization: Bearer $(cat /etc/shapeflow-tokens/steward.token)" \
+  -X POST http://localhost/v1/credentials/probe 2>/dev/null || echo 000)"
+if [ "$PROBE_STATUS" != "200" ]; then
+  blocked "CREDENTIAL_REJECTED" \
+    "the provider's upstream credential probe returned HTTP $PROBE_STATUS: $(
+      head -c 400 /tmp/sf-credential-probe.json 2>/dev/null)"
+fi
+rm -f /tmp/sf-credential-probe.json
+
+step "prepare + acquire + freeze machine truth candidates (steward)"
 as sfsteward "$SF" prepare --config "$CONFIG" || blocked "PREPARE" "prepare failed"
 as sfsteward "$SF" acquire --config "$CONFIG" || blocked "ACQUIRE" "acquisition failed"
+# Truth construction reads only the already-frozen task/source world and writes into the
+# evaluator tree.  It runs before treatment so neither an arm's report nor an observed effect
+# can influence which atoms enter the candidate answer key.  Human audit remains a later,
+# explicit verdict gate; this command never labels machine candidates AUDITED.
+as sfsteward "$SF" build-truth --config "$CONFIG" \
+  || blocked "BUILD_TRUTH" "machine truth-candidate construction failed"
+as sfsteward "$SF" freeze-analysis-design --config "$CONFIG" \
+  || blocked "ANALYSIS_DESIGN" \
+    "pre-treatment feature registry or eligibility specification could not be frozen"
 
 # Preflight is the last check BEFORE treatment, so it runs before the GPU canary rather
 # than after it. It used to sit after prepare, acquire and smoke, by which point the
 # credits and the GPU hours it was meant to protect were already spent.
 step "preflight against the approved protocol SHA"
-APPROVED_SHA="$("$REPO/.venv/bin/python" -c \
+APPROVED_PROTOCOL_SHA="$("$REPO/.venv/bin/python" -c \
   "import sys; sys.path.insert(0,'src'); from pathlib import Path; \
 from shapeflow_p1.protocol import protocol_sha; print(protocol_sha(Path('.')))")"
-as sfrunner "$SF" preflight --config "$CONFIG" --approved-protocol-sha "$APPROVED_SHA" \
-  || blocked "PREFLIGHT" "campaign preflight failed under protocol $APPROVED_SHA"
+APPROVED_BINDING_SHA="$("$REPO/.venv/bin/python" -c \
+  "import sys; sys.path.insert(0,'src'); from pathlib import Path; \
+from shapeflow_p1.protocol import verified_execution_binding; \
+print(verified_execution_binding(Path('.')).digest)")"
+as sfrunner "$SF" preflight --config "$CONFIG" \
+  --approved-protocol-sha "$APPROVED_PROTOCOL_SHA" \
+  || blocked "PREFLIGHT" "campaign preflight failed under protocol $APPROVED_PROTOCOL_SHA"
 
 step "GPU smoke (runner)"
 as sfrunner "$SF" smoke --config "$CONFIG" || blocked "GPU_SMOKE" "the GPU canary failed"
@@ -197,7 +257,9 @@ cat > "$REPORTS/LAUNCH_GATE_PASSED.json" <<JSON
   "status": "GATES_GREEN_LAUNCHING",
   "approval_mode": "USER_EXPLICIT_AUTO_LAUNCH",
   "claim_scope": "FORMATIVE_ONLY",
-  "protocol_sha": "$APPROVED_SHA",
+  "protocol_sha": "$APPROVED_PROTOCOL_SHA",
+  "execution_binding_sha256": "$APPROVED_BINDING_SHA",
+  "approval_file": "$APPROVAL_FILE",
   "vendor_commit": "$GOT",
   "config": "$CONFIG",
   "data_root": "$DATA_ROOT",
@@ -208,21 +270,25 @@ cat > "$REPORTS/LAUNCH_GATE_PASSED.json" <<JSON
 JSON
 
 echo
-echo "All ${TOTAL_STEPS} hard gates passed. Starting screening (protocol $APPROVED_SHA)."
+echo "All ${TOTAL_STEPS} hard gates passed. Starting screening (binding $APPROVED_BINDING_SHA)."
 # This host runs in a container where systemd is not PID 1. The launch used to be
 # `systemctl enable --now` unconditionally: the earlier `systemctl is-active` gate
 # short-circuited on the same absence, so every gate reported green and then the campaign
 # simply never started. sfsupervise is the documented substitute (plan §17.2) and was
 # already installed by install_host.sh; nothing used it for the coordinator.
 if [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ] && command -v systemctl >/dev/null 2>&1; then
-  sed -i "s|@PROTOCOL_SHA@|$APPROVED_SHA|" /etc/systemd/system/shapeflow-p1-week1.service
+  # install_host already rendered @PROTOCOL_SHA@ (normally to UNSET), so replacing the
+  # template token here was a no-op. Replace the coordinator argument itself.
+  sed -i -E \
+    "s|--protocol-sha [^[:space:]]+|--protocol-sha $APPROVED_BINDING_SHA|" \
+    /etc/systemd/system/shapeflow-p1-week1.service
   systemctl daemon-reload
   systemctl enable --now shapeflow-p1-week1.service
   systemctl --no-pager status shapeflow-p1-week1.service | head -20
 else
   echo "systemd is not PID 1; supervising the campaign with sfsupervise instead."
   setsid /usr/local/bin/sfsupervise week1 sfrunner "$REPO" "$DATA_ROOT" -- \
-    "$SF" run-screen --config "$CONFIG" --resume --protocol-sha "$APPROVED_SHA" \
+    "$SF" run-screen --config "$CONFIG" --resume --protocol-sha "$APPROVED_BINDING_SHA" \
     >> "$REPO/logs/coordinator.log" 2>&1 &
   echo "sfsupervise started (pid $!); log: $REPO/logs/coordinator.log"
 fi

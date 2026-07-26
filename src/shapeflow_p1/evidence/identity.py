@@ -130,9 +130,13 @@ def build_visible_message_span(
     source_occurrence_ids: Optional[list[str]] = None,
     token_len: int = 0,
 ) -> dict:
-    """Build a VISIBLE_MESSAGE span dict. Only TOOL_EVIDENCE may carry occurrences (a citation
-    binding); MODEL_DERIVED_CONTEXT and USER_CONTEXT may not."""
-    if kind not in {"TOOL_EVIDENCE", "MODEL_DERIVED_CONTEXT", "USER_CONTEXT"}:
+    """Build a VISIBLE_MESSAGE span dict. Only TOOL_EVIDENCE may carry occurrences."""
+    if kind not in {
+        "TOOL_EVIDENCE",
+        "TOOL_UNATTRIBUTED_CONTEXT",
+        "MODEL_DERIVED_CONTEXT",
+        "USER_CONTEXT",
+    }:
         raise ValueError(f"bad visible-message kind {kind!r}")
     if kind != "TOOL_EVIDENCE" and source_occurrence_ids:
         raise ValueError("only TOOL_EVIDENCE spans may carry source occurrences")

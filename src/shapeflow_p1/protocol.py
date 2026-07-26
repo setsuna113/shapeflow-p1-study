@@ -15,21 +15,26 @@ approval rather than silently running under it.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from .canonical import canonical_json
 from .config import load_config
+from .fsmode import chmod_shared
 from .hashing import sha256_hex
 
 __all__ = [
     "PROTOCOL_DOCUMENT",
     "ProtocolBinding",
     "ApprovalError",
+    "default_approval_path",
     "protocol_sha",
     "compute_binding",
     "verify_approval_file",
+    "verified_execution_binding",
     "write_approval_file",
 ]
 
@@ -145,9 +150,7 @@ class VendorCommitUnobservable(ApprovalError):
     """
 
 
-def _git(repo: Path, *args: str) -> "subprocess.CompletedProcess":
-    import subprocess
-
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=30,
     )
@@ -167,8 +170,6 @@ def read_vendor_pin(repo: Path) -> str:
     real commit for the owner and an empty string for everyone else -- which is why the
     approval was minted with an empty vendor pin and still verified.
     """
-    import subprocess
-
     try:
         out = _git(repo, "ls-files", "-s", "--", "vendor/open_deep_research")
     except (OSError, subprocess.SubprocessError) as e:
@@ -202,18 +203,55 @@ def read_head_commit(repo: Path) -> str:
     return out.stdout.strip()
 
 
-def approvals_dir(repo: Path) -> Path:
-    return Path(repo) / "protocol" / "approvals"
+def default_approval_path(repo: Path) -> Path:
+    """Resolve the mutable current-approval pointer outside the approved Git tree.
+
+    An approval cannot be a tracked input to the commit it approves: writing it dirties that
+    tree, while committing it changes HEAD and invalidates ``approved_commit``.  The host
+    therefore supplies ``SHAPEFLOW_APPROVAL_FILE`` (or ``SHAPEFLOW_DATA_ROOT`` as a base).
+    """
+    explicit = os.environ.get("SHAPEFLOW_APPROVAL_FILE", "").strip()
+    if explicit:
+        candidate = Path(explicit).expanduser()
+    else:
+        data_root = os.environ.get("SHAPEFLOW_DATA_ROOT", "").strip()
+        if not data_root:
+            raise ApprovalError(
+                "no external approval store configured; set SHAPEFLOW_APPROVAL_FILE or "
+                "SHAPEFLOW_DATA_ROOT"
+            )
+        candidate = Path(data_root).expanduser() / "approvals" / "launch_approval.json"
+    return _external_approval_path(repo, candidate)
 
 
-def approval_chain(repo: Path) -> list[dict]:
+def _external_approval_path(repo: Path, approval_path: Path) -> Path:
+    repo_root = Path(repo).resolve()
+    candidate = Path(approval_path).expanduser().resolve()
+    if candidate == repo_root or repo_root in candidate.parents:
+        raise ApprovalError(
+            f"approval artifact {candidate} is inside the approved execution tree {repo_root}; "
+            "that creates a self-referential approval"
+        )
+    return candidate
+
+
+def approvals_dir(repo: Path, approval_path: Optional[Path] = None) -> Path:
+    current = (
+        _external_approval_path(repo, approval_path)
+        if approval_path is not None
+        else default_approval_path(repo)
+    )
+    return current.parent / "history"
+
+
+def approval_chain(repo: Path, approval_path: Optional[Path] = None) -> list[dict]:
     """Every approval ever recorded, oldest first.
 
     A chain rather than a file. One mutable path can only ever show the current answer, so
     the question "what was approved when this ran?" has no artifact behind it -- and the
     refusal-to-overwrite that guarded it is one `rm` away from being no guard at all.
     """
-    index = approvals_dir(repo) / "INDEX.json"
+    index = approvals_dir(repo, approval_path) / "INDEX.json"
     if not index.exists():
         return []
     try:
@@ -235,10 +273,36 @@ def _write_atomic(path: Path, body: dict) -> None:
             fh.write(json.dumps(body, indent=2, sort_keys=True) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
+        # Widen from mkstemp's 0600 before the rename: the approval must never be visible at
+        # its published path with an ACL mask that denies the roles that have to verify it.
+        # ``smoke``, ``run-screen``, ``preflight`` and doctor's phase record all run as
+        # sfrunner and call verified_execution_binding. See shapeflow_p1.fsmode.
+        chmod_shared(tmp)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def _write_new(path: Path, body: dict) -> None:
+    """Create one immutable history link, accepting only an identical existing link."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(body, indent=2, sort_keys=True) + "\n"
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        chmod_shared(path)
+        return
+    except FileExistsError:
+        pass
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ApprovalError(f"immutable approval link {path} is unreadable: {exc}") from exc
+    if existing != body:
+        raise ApprovalError(f"immutable approval link {path} already contains different bytes")
 
 
 def write_approval_file(
@@ -253,22 +317,42 @@ def write_approval_file(
     This does not *grant* an approval -- protocol v0.1 already fixed the mode, the budgets and
     the thresholds, and this only records their hashes so a later edit is detectable.
 
-    It appends. A new configuration mints a new numbered file in ``protocol/approvals/`` and
-    a new entry in its index; nothing is ever rewritten in place, so the approval a past run
-    was checked against remains readable after the next one is recorded.
+    It appends. A new configuration mints a new numbered file in the configured external
+    approval store's ``history/`` directory and a new entry in its index; nothing is ever
+    rewritten in place, so the approval a past run was checked against remains readable after
+    the next one is recorded.
     """
     from .experiment.freeze import APPROVAL_MODE_AUTO
 
     repo = Path(repo)
-    approval_path = approval_path or (repo / "protocol" / "launch_approval.json")
-    binding = compute_binding(repo, approved_commit=approved_commit or read_head_commit(repo))
-    chain = approval_chain(repo)
+    approval_path = (
+        _external_approval_path(repo, approval_path)
+        if approval_path is not None
+        else default_approval_path(repo)
+    )
+    _require_clean_execution_tree(repo)
+    head = read_head_commit(repo)
+    if approved_commit and approved_commit != head:
+        raise ApprovalError(
+            f"cannot approve commit {approved_commit!r} while clean execution HEAD is {head!r}")
+    binding = compute_binding(repo, approved_commit=head)
+    # Close the check/read/write race: if any approved byte or HEAD changed while the binding
+    # was being computed, do not publish a credential for the mixed observation.
+    _require_clean_execution_tree(repo)
+    if read_head_commit(repo) != binding.approved_commit:
+        raise ApprovalError("execution HEAD changed while the approval binding was computed")
+    chain = approval_chain(repo, approval_path)
     if chain and chain[-1].get("binding_sha256") == binding.digest:
+        link = approvals_dir(repo, approval_path) / str(chain[-1].get("file") or "")
+        try:
+            body = json.loads(link.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ApprovalError(
+                f"latest immutable approval link {link} is unreadable: {exc}") from exc
+        if body.get("binding_sha256") != binding.digest:
+            raise ApprovalError(f"latest immutable approval link {link} does not verify")
+        _write_atomic(approval_path, body)
         return binding              # already recorded for exactly this configuration
-    if approval_path.exists():
-        existing = json.loads(approval_path.read_text(encoding="utf-8"))
-        if existing.get("binding_sha256") == binding.digest:
-            return binding
     body = {
         "approval_mode": APPROVAL_MODE_AUTO,
         "approval_source_date": "2026-07-24",
@@ -285,10 +369,11 @@ def write_approval_file(
         ),
     }
     sequence = len(chain) + 1
-    versioned = approvals_dir(repo) / f"{sequence:04d}-{binding.digest[:12]}.json"
+    history = approvals_dir(repo, approval_path)
+    versioned = history / f"{sequence:04d}-{binding.digest[:12]}.json"
     body["sequence"] = sequence
-    _write_atomic(versioned, body)
-    _write_atomic(approvals_dir(repo) / "INDEX.json", {
+    _write_new(versioned, body)
+    _write_atomic(history / "INDEX.json", {
         "approvals": [
             *chain,
             {
@@ -313,7 +398,11 @@ def verify_approval_file(repo: Path, approval_path: Optional[Path] = None) -> Pr
     pre-registration that does not describe it, which is indistinguishable from having none.
     """
     repo = Path(repo)
-    approval_path = approval_path or (repo / "protocol" / "launch_approval.json")
+    approval_path = (
+        _external_approval_path(repo, approval_path)
+        if approval_path is not None
+        else default_approval_path(repo)
+    )
     if not approval_path.exists():
         raise ApprovalError(f"{approval_path} missing; nothing authorises this campaign")
     try:
@@ -351,3 +440,41 @@ def verify_approval_file(repo: Path, approval_path: Optional[Path] = None) -> Pr
             f"live {live.digest!r}"
         )
     return live
+
+
+def _require_clean_execution_tree(repo: Path) -> None:
+    status = _git(Path(repo), "status", "--porcelain", "--untracked-files=all")
+    if status.returncode != 0:
+        raise ApprovalError(
+            f"cannot establish a clean execution tree: {status.stderr.strip()[:200]}")
+    if status.stdout.strip():
+        first = status.stdout.splitlines()[0]
+        raise ApprovalError(
+            "the execution tree has tracked or untracked changes after its approved commit "
+            f"(first entry: {first!r})"
+        )
+
+
+def verified_execution_binding(
+    repo: Path,
+    *,
+    expected_digest: Optional[str] = None,
+    approval_path: Optional[Path] = None,
+) -> ProtocolBinding:
+    """Return the live, approved execution identity and optionally bind a caller claim.
+
+    ``protocol_sha`` names only the protocol document.  It deliberately does not change when
+    an arm, stack, corpus, judge, patch, or approved commit changes.  Campaign work therefore
+    uses :attr:`ProtocolBinding.digest` as its namespace.  The optional expected digest is the
+    resume/launcher claim; it is compared with the independently re-derived approval binding,
+    never with another caller-supplied value.  A clean tree is part of that claim: otherwise
+    ``approved_commit`` would name HEAD while the interpreter executes different source bytes.
+    """
+    _require_clean_execution_tree(Path(repo))
+    binding = verify_approval_file(repo, approval_path)
+    if expected_digest is not None and expected_digest != binding.digest:
+        raise ApprovalError(
+            f"execution binding mismatch: caller supplied {expected_digest!r}, "
+            f"approved live binding is {binding.digest!r}"
+        )
+    return binding

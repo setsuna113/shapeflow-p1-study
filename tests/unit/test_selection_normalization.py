@@ -17,7 +17,11 @@ import pytest
 from shapeflow_p1.evidence.chunkers import WhitespaceTokenizer, paragraph_sentence_v1
 from shapeflow_p1.evidence.identity import CandidateSet, build_evidence_span
 from shapeflow_p1.p1.aggregators import AggregatedEvidence, AggregatedItem, stable_union_v1
-from shapeflow_p1.p1.contracts import SelectionContractError, parse_selection
+from shapeflow_p1.p1.contracts import (
+    SelectionContractError,
+    canonical_normalization_document,
+    parse_selection,
+)
 from shapeflow_p1.p1.preflight import PreflightConfig, preflight
 from shapeflow_p1.p1.view import CandidateViewRecord, ViewConstructionError
 
@@ -85,8 +89,10 @@ def test_same_span_with_conflicting_roles_is_rejected(order):
         {"span_id": "E1", "role": order[0], "facet_ids": ["f"]},
         {"span_id": "E1", "role": order[1], "facet_ids": ["f"]},
     ]}
-    with pytest.raises(SelectionContractError, match="conflicting roles"):
+    with pytest.raises(SelectionContractError, match="conflicting roles") as caught:
         parse_selection(raw, cs)
+    assert caught.value.normalization.semantic_conflict_count == 1
+    assert caught.value.normalization.rejected_reason == "semantic_conflict"
 
 
 def test_exact_duplicate_selection_is_normalized_not_rejected():
@@ -127,6 +133,35 @@ def test_p1_id_exact_duplicates_are_deduped_stably():
     assert sel.selected_span_ids == (span_ids[2], span_ids[0])  # first-seen order preserved
     assert sel.normalization.raw_count == 4
     assert sel.normalization.duplicate_count == 2
+
+
+def test_out_of_set_id_keeps_the_all_offered_invalid_attempt_record():
+    _, _, cs = _fixture()
+    with pytest.raises(SelectionContractError, match="not in the offered") as caught:
+        parse_selection(
+            {"contract": "P1_ID", "selected_ids": ["E1", "E99"]}, cs)
+    record = caught.value.normalization
+    assert record.raw_count == 2
+    assert record.rejected_reason == "out_of_set_label"
+    assert record.duplicate_count == 0
+
+
+def test_normalization_wire_document_recomputes_derived_flags():
+    document = canonical_normalization_document({
+        "raw_count": 2,
+        "unique_count": 1,
+        "duplicate_count": 1,
+        "semantic_conflict_count": 0,
+        "rejected_reason": None,
+    })
+    assert document["was_repaired"] is True
+    assert document["was_rejected"] is False
+    assert document["strict_valid"] is False
+    with pytest.raises(ValueError, match="not closed"):
+        canonical_normalization_document({
+            **document,
+            "strict_valid": True,
+        })
 
 
 def test_repeated_gap_facet_unions_its_query_attempts():
@@ -173,12 +208,14 @@ def test_render_keeps_role_and_facet_attached_to_their_own_span():
     # One shared SOURCE header for the run...
     assert out.count("SOURCE:") == 1
     # ...but each span keeps its own label line with its own relation.
-    assert "[E1] (support:f1)" in out
-    assert "[E2] (contradict:f2)" in out
+    first_label = f"[{view.publication_handle_for(span_ids[0])}] (support:f1)"
+    second_label = f"[{view.publication_handle_for(span_ids[1])}] (contradict:f2)"
+    assert first_label in out
+    assert second_label in out
     # And each label line immediately precedes its own bytes.
     lines = [ln for ln in out.splitlines() if ln.strip()]
-    assert lines[lines.index("[E1] (support:f1)") + 1].startswith("Cats are feline")
-    assert lines[lines.index("[E2] (contradict:f2)") + 1].startswith("Dogs are canine")
+    assert lines[lines.index(first_label) + 1].startswith("Cats are feline")
+    assert lines[lines.index(second_label) + 1].startswith("Dogs are canine")
 
 
 def test_render_keeps_each_spans_own_breadcrumb():

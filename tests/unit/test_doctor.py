@@ -236,6 +236,15 @@ def test_stack_check_reads_the_backend_from_the_engine_log(tmp_path, monkeypatch
             if isinstance(value, str) and value.startswith("@"):
                 obskey = _OBSERVED_KEY.get(key, key)
                 values[obskey] = "FLASH_ATTN" if obskey == "attention_backend" else f"{len(values):064x}"
+    from shapeflow_p1.campaign.evaluate import relation_prompt_sha256
+    from shapeflow_p1.campaign.truth import truth_prompt_sha256
+    from shapeflow_p1.evaluation.atomizer import atomize_protocol_sha256
+
+    values.update({
+        "atomize_prompt_sha256": atomize_protocol_sha256(),
+        "truth_prompt_sha256": truth_prompt_sha256(),
+        "report_prompt_sha256": relation_prompt_sha256(),
+    })
     freeze_stack(fake_repo, declared, StackObservation(values=dict(values)),
                  frozen_at_utc="2026-07-24T00:00:00Z")
 
@@ -262,7 +271,9 @@ def test_stack_check_reads_the_backend_from_the_engine_log(tmp_path, monkeypatch
     assert drift.status == FAIL and "attention_backend" in drift.detail
 
 
-def test_verify_approval_reads_the_protocol_sha_from_the_tracked_document():
+def test_verify_approval_reads_the_protocol_sha_from_the_tracked_document(
+    tmp_path, monkeypatch
+):
     """Comparing the approval's protocol_sha to itself always passes and proves nothing.
 
     The SHA is now a fact about a file in the repository, so a caller-supplied value cannot make
@@ -273,24 +284,30 @@ def test_verify_approval_reads_the_protocol_sha_from_the_tracked_document():
     from typer.testing import CliRunner
 
     from shapeflow_p1.cli import app
+    import shapeflow_p1.protocol as protocol_module
 
+    monkeypatch.setattr(protocol_module, "_require_clean_execution_tree", lambda _repo: None)
     runner = CliRunner()
     result = runner.invoke(
-        app, ["verify-approval", "--approval", "protocol/does_not_exist.json"],
+        app, ["verify-approval", "--approval", str(tmp_path / "does_not_exist.json")],
         env={"SHAPEFLOW_PROTOCOL_SHA": ""},
     )
     assert result.exit_code == 1
     assert "nothing authorises" in result.output
 
 
-def test_verify_approval_rejects_a_caller_who_names_a_different_protocol(tmp_path):
+def test_verify_approval_rejects_a_caller_who_names_a_different_protocol(
+    tmp_path, monkeypatch
+):
     import json
 
     from typer.testing import CliRunner
 
     from shapeflow_p1.cli import app
+    import shapeflow_p1.protocol as protocol_module
     from shapeflow_p1.protocol import compute_binding, read_head_commit
 
+    monkeypatch.setattr(protocol_module, "_require_clean_execution_tree", lambda _repo: None)
     # Bound to the live HEAD, so the only thing left to disagree about is the SHA the
     # caller names.
     binding = compute_binding(REPO, approved_commit=read_head_commit(REPO))

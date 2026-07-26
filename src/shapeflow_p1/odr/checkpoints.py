@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..canonical import canonical_json
+from ..fsmode import chmod_shared
 from ..hashing import derive_id, sha256_hex
 
 __all__ = [
@@ -158,6 +159,9 @@ class VendorVisibleResult:
     title: str
     snippet: str
     raw_content_id: Optional[str]  # content_id into the object store, or None
+    # Exact frozen-pool occurrence. Content hashes are intentionally not identities: two distinct
+    # URLs may serve identical bytes and both remain distinct citation/provenance occurrences.
+    source_occurrence_id: Optional[str] = None
 
     def content(self) -> dict:
         return {
@@ -166,6 +170,7 @@ class VendorVisibleResult:
             "title": self.title,
             "snippet": self.snippet,
             "raw_content_id": self.raw_content_id,
+            "source_occurrence_id": self.source_occurrence_id,
         }
 
 
@@ -198,6 +203,11 @@ class HCheckpoint:
     non_search_outputs: tuple[tuple[str, str], ...]
     researcher_state_hash: str
     sampling: SamplingEnvelope
+    # Structural coordinate of the ConductResearch child that owns this checkpoint:
+    # (supervisor research iteration, allowed tool-call ordinal, tool-call id).  A cell-level
+    # researcher id is not enough because every child resets its assistant-turn/toolset
+    # counters.  ``None`` is reserved for direct researcher-subgraph probes.
+    researcher_coordinate: Optional[tuple[int, int, str]] = None
 
     def content(self) -> dict:
         return {
@@ -213,6 +223,10 @@ class HCheckpoint:
             "non_search_outputs": [list(pair) for pair in self.non_search_outputs],
             "researcher_state_hash": self.researcher_state_hash,
             "sampling": self.sampling.content(),
+            "researcher_coordinate": (
+                list(self.researcher_coordinate)
+                if self.researcher_coordinate is not None else None
+            ),
         }
 
     @property
@@ -312,6 +326,7 @@ def from_document(body: dict):
                     VendorVisibleResult(
                         vendor_visible_order=r["order"], url=r["url"], title=r["title"],
                         snippet=r["snippet"], raw_content_id=r["raw_content_id"],
+                        source_occurrence_id=r.get("source_occurrence_id"),
                     ) for r in results
                 ))
                 for tcid, results in body["search_result_sets"]
@@ -321,6 +336,17 @@ def from_document(body: dict):
             ),
             researcher_state_hash=body["researcher_state_hash"],
             sampling=_sampling_from(body["sampling"]),
+            # Part of content() and therefore of the digest. Dropping it here rebuilt every
+            # ConductResearch child's checkpoint with None, so the digest check below fired on
+            # load and no child boundary could be read back at all -- the store was write-only
+            # for exactly the checkpoints a fork needs. JSON has no tuples, so restore the
+            # (iteration, ordinal, tool_call_id) shape rather than leaving a list, which would
+            # canonicalize identically but compare unequal to a freshly built checkpoint.
+            researcher_coordinate=(
+                (int(coordinate[0]), int(coordinate[1]), str(coordinate[2]))
+                if (coordinate := body.get("researcher_coordinate")) is not None
+                else None
+            ),
         )
     elif kind == "C":
         checkpoint = CCheckpoint(
@@ -376,6 +402,10 @@ class CheckpointStore:
                 fh.write(canonical_json(body))
                 fh.flush()
                 os.fsync(fh.fileno())
+            # The runner writes these; the evaluator scores against them and a later fork
+            # process loads them. mkstemp's 0600 would zero the inherited ACL mask and make
+            # the checkpoint unreadable to both. See shapeflow_p1.fsmode.
+            chmod_shared(tmp)
             os.replace(tmp, path)
         except BaseException:
             from pathlib import Path as _P

@@ -35,7 +35,9 @@ their redacted form and the raw bytes never reach the object store or a log hand
 
 from __future__ import annotations
 
+import contextlib
 import json
+import math
 import os
 import re
 import socket
@@ -88,8 +90,13 @@ ROLE_ROUTES: dict[str, frozenset[str]] = {
     "deepseek.chat": frozenset({"steward", "evaluator"}),
     "chat.completions": frozenset({"runner", "steward"}),
     "cells.register": frozenset({"runner"}),
+    # Sanitized measurements only: no prompt or response bytes, credentials, or evaluator truth.
+    "cells.work": frozenset({"runner", "evaluator"}),
+    # Closed aggregate attestation only. The runner cannot read the provider's 0700 tree.
+    "canary.audit": frozenset({"runner"}),
     "healthz": frozenset({"runner", "steward", "evaluator", "infer"}),
     "readyz": frozenset({"runner", "steward", "evaluator", "infer"}),
+    "credentials.probe": frozenset({"runner", "steward", "evaluator"}),
 }
 
 #: Model alias -> op class. The alias is what ODR is configured with; the provider rewrites it
@@ -170,6 +177,14 @@ class ProviderError(RuntimeError):
         self.status = status
 
 
+class ResponseTooLarge(RuntimeError):
+    """An upstream body too large to freeze verbatim.
+
+    Deliberately not a :class:`ProviderError`: it is raised *after* the bytes arrived, so the
+    caller has to settle the attempt and the reservation before turning it into a response.
+    """
+
+
 # --- configuration ----------------------------------------------------------------------
 
 
@@ -200,8 +215,18 @@ class ProviderConfig:
 
     request_timeout_seconds: float = 120.0
     inference_timeout_seconds: float = 900.0
+    # Isolated causal mode serializes the actual upstream vLLM dispatches. Zero is deliberately
+    # unbounded for the operational batching/APC study. This is enforced by ProviderService, not
+    # merely declared in stack.yaml.
+    max_upstream_inflight: int = 0
     # Protocol §3.5 retry_policy.max_consecutive_failures. Zero disables the breaker.
     max_consecutive_failures: int = 5
+    # Ceiling on a frozen response body. A response above this is *not* truncated and stored:
+    # truncation produced invalid JSON that was still marked COMMITTED, so the call was bought
+    # and permanently unreplayable (every later read raised 409). Oversize now fails the
+    # attempt instead, which leaves the call re-fetchable. Sized well above any real Exa,
+    # Tavily or DeepSeek response so it is a corruption guard, not a routine limit.
+    max_frozen_response_bytes: int = 8 * 1024 * 1024
 
     # Worst-case reservations. Admission control is only meaningful if the reserved amount is
     # an upper bound on what the call can cost, so these are ceilings, not estimates.
@@ -237,7 +262,10 @@ class ProviderConfig:
             kwargs["model_aliases"] = {
                 str(alias): OpClass(str(op)) for alias, op in aliases.items()
             }
-        return cls(**kwargs)
+        config = cls(**kwargs)
+        if config.max_upstream_inflight < 0:
+            raise ProviderError(500, "max_upstream_inflight must be zero or a positive integer")
+        return config
 
 
 @dataclass(frozen=True)
@@ -397,6 +425,11 @@ class ProviderService:
         self._consecutive_failures: dict[str, int] = {}
         self._lock = threading.RLock()
         self._events: list[dict] = []
+        self._inference_gate = (
+            threading.BoundedSemaphore(config.max_upstream_inflight)
+            if config.max_upstream_inflight > 0
+            else None
+        )
         self._ready = False
         tokens.register_with(redactor)
         for key in (exa_key, tavily_key, deepseek_key):
@@ -474,9 +507,69 @@ class ProviderService:
         self._emit("REPLAYED_FROM_LEDGER", {"call_id": call_id})
         return 200, payload
 
+    #: Incident kinds that hold the breaker open across a provider restart.
+    _BREAKER_INCIDENTS = ("provider_unauthorized", "provider_consecutive_failures")
+
+    def require_breaker_closed(self, provider: str) -> None:
+        """Refuse before dispatch when this provider's breaker is already open.
+
+        The breaker used to be recorded and never consulted: ``_note_upstream_failure`` runs
+        *after* a response, so each rejection was dispatched, billed, and only then counted.
+        Four consecutive 401s were four real charges. Worse, the counter lived in memory, so a
+        provider restart reset it -- which is how a single dead credential burned 262 requests
+        across one acquisition run.
+
+        Both limbs are checked here, before ``open_call``/``reserve``/``mark_sent``:
+
+        * the in-memory consecutive-failure count for this process, and
+        * a FATAL incident already durable in the ledger, so the refusal survives a restart.
+
+        A credential the upstream rejects fails identically every time; retrying is not
+        recovery, it is paying to relearn the same fact.
+        """
+        with self._lock:
+            count = self._consecutive_failures.get(provider, 0)
+            limit = self._cfg.max_consecutive_failures
+        if limit and count >= limit:
+            raise ProviderError(
+                503,
+                f"{provider} failed {count} times in a row; the circuit breaker is open and "
+                "no further call will be dispatched",
+            )
+        for kind in self._BREAKER_INCIDENTS:
+            incident = self._ledger.latest_incident(severity="FATAL", kind=kind)
+            if incident is None:
+                continue
+            if provider not in str(incident.get("detail") or ""):
+                continue
+            raise ProviderError(
+                503,
+                f"{provider} is fenced by a durable {kind} incident "
+                f"({incident.get('detail')}); refusing to dispatch. Replace the credential and "
+                "clear the incident before resuming.",
+            )
+
     def _note_upstream_success(self, provider: str) -> None:
         with self._lock:
             self._consecutive_failures[provider] = 0
+
+    def _frozen_response_text(self, payload: Any) -> str:
+        """Serialize a response for the ledger, refusing to freeze a body we cannot replay.
+
+        Returning a truncated prefix here is what made a committed call unreadable forever:
+        the stored bytes were invalid JSON, ``_replayed`` raised 409, and the call could
+        neither be recovered nor re-bought. Raising instead keeps the attempt failable and the
+        call re-fetchable.
+        """
+        text = json.dumps(payload, sort_keys=True)
+        limit = self._cfg.max_frozen_response_bytes
+        if limit and len(text.encode("utf-8")) > limit:
+            raise ResponseTooLarge(
+                f"response is {len(text.encode('utf-8'))} bytes, above the "
+                f"{limit}-byte freeze ceiling; refusing to commit a body that cannot be "
+                "replayed verbatim"
+            )
+        return text
 
     def _note_upstream_failure(self, provider: str, status: int) -> None:
         """Trip the breaker after a run of failures, before the cap is burned.
@@ -529,8 +622,8 @@ class ProviderService:
         if role not in allowed:
             raise ProviderError(
                 403,
-                f"role {role!r} may not call {route!r}; this route can reach a credential and "
-                "that role has no path to one",
+                f"role {role!r} may not call {route!r}; that route is not authorized "
+                "for this role",
             )
         expected_uid = self._allowed_uids.get(role)
         if expected_uid is not None and peer_uid is not None and peer_uid != expected_uid:
@@ -546,8 +639,14 @@ class ProviderService:
             return 200, {"status": "ok"}
         if route == "readyz":
             return (200, {"status": "ready"}) if self._ready else (503, {"status": "starting"})
+        if route == "credentials.probe":
+            return self.credentials_probe()
         if route == "cells.register":
             return self.register_cell(body)
+        if route == "cells.work":
+            return self.cell_work(body)
+        if route == "canary.audit":
+            return self.canary_audit(body)
         if route == "exa.search":
             return self.exa_search(body)
         if route == "tavily.search":
@@ -555,6 +654,68 @@ class ProviderService:
         if route == "deepseek.chat":
             return self.deepseek_chat(body, role=role)
         raise ProviderError(404, f"no such route {route!r}")
+
+    def credentials_probe(self) -> tuple[int, dict]:
+        """Ask each upstream whether it accepts our credential, without buying anything.
+
+        This is the gate that did not exist when a rejected Tavily key turned into 262 billed
+        401s.  "A credential file is readable" and "the vendor accepts it" are different
+        facts, and only the second one predicts whether acquisition can succeed.
+
+        The probe is free by construction: it sends a deliberately **invalid body** to each
+        endpoint. Authentication is checked before body validation, so a good credential comes
+        back 400 (the request was understood and rejected on its contents) while a bad one
+        comes back 401/403. Nothing is searched, so nothing is charged and no frozen world is
+        created. Deliberately does not touch the ledger for the same reason -- there is no
+        logical call here to record.
+        """
+        results: dict[str, dict] = {}
+        probes = [
+            ("exa", self._exa_key, self._cfg.exa_endpoint,
+             {"x-api-key": self._exa_key or "", "Content-Type": "application/json"}, {}),
+            ("tavily", self._tavily_key, self._cfg.tavily_endpoint,
+             {"Content-Type": "application/json"}, {"api_key": self._tavily_key or ""}),
+            ("deepseek", self._deepseek_key, f"{self._cfg.deepseek_base_url}/chat/completions",
+             {"Authorization": f"Bearer {self._deepseek_key or ''}",
+              "Content-Type": "application/json"}, {}),
+        ]
+        for name, key, url, headers, body in probes:
+            if key is None:
+                results[name] = {"configured": False, "ok": None, "detail": "no credential loaded"}
+                continue
+            try:
+                status, payload, _elapsed = self._upstream(
+                    url, headers, body, self._cfg.request_timeout_seconds)
+            except Exception as e:  # noqa: BLE001 - an unreachable upstream is a failed probe
+                results[name] = {
+                    "configured": True, "ok": False,
+                    "detail": f"probe failed: {type(e).__name__}",
+                }
+                continue
+            rejected = status in (401, 403)
+            results[name] = {
+                "configured": True,
+                "ok": not rejected,
+                "status": status,
+                "detail": (
+                    f"upstream rejected the credential with HTTP {status}"
+                    if rejected else
+                    f"credential accepted (probe returned {status} on a deliberately "
+                    "invalid body, so authentication passed)"
+                ),
+            }
+            if rejected:
+                # Durable, so the breaker also fences the real path across a restart rather
+                # than rediscovering this one rejection at a time, with a charge each.
+                self._ledger.record_incident(
+                    severity="FATAL", kind="provider_unauthorized",
+                    detail=f"{name} rejected the credential with HTTP {status} during probe",
+                )
+            self._emit("CREDENTIAL_PROBE", {"provider": name, "ok": not rejected})
+
+        configured = {n: r for n, r in results.items() if r["configured"]}
+        all_ok = bool(configured) and all(r["ok"] for r in configured.values())
+        return (200 if all_ok else 503), {"ok": all_ok, "providers": results}
 
     def register_cell(self, body: dict) -> tuple[int, dict]:
         validate_request("cells.register", body)
@@ -582,6 +743,226 @@ class ProviderService:
         with self._lock:
             return self._cells.get(token)
 
+    def cell_work(self, body: dict) -> tuple[int, dict]:
+        """Return durable, sanitized work telemetry for exactly one work item."""
+
+        from .work_accounting import extract_request_events, summarize_work_extraction
+
+        validate_request("cells.work", body)
+        work_key = str(body["work_key"])
+        extraction = extract_request_events(self._ledger, work_keys=[work_key])
+        summary = summarize_work_extraction(
+            extraction, require_isolated=bool(body["require_isolated"])
+        )
+        summary["work_key"] = work_key
+        return 200, summary
+
+    def canary_audit(self, body: dict) -> tuple[int, dict]:
+        """Return a closed, sanitized attestation for exactly the requested canary work.
+
+        The provider owns the 0700 ledger and object store.  The runner therefore asks the
+        provider to reduce them to the few numbers the smoke gate needs; it never receives a
+        request/response body, prompt hash, object reference, header, URL, credential, or truth
+        artifact.  Work keys are an exact allowlist, so historical calls cannot make a current
+        inert canary look healthy.
+        """
+
+        validate_request("canary.audit", body)
+        work_keys = sorted(str(value) for value in body["work_keys"])
+        wanted = set(work_keys)
+        terminal = {"COMMITTED", "FAILED_FINAL", "FAILED_UNKNOWN"}
+        selector_ops = {
+            OpClass.PAGE_P1_SELECTOR_LOCAL.value,
+            OpClass.PAGE_P1_SELECTOR_GLOBAL.value,
+            OpClass.COMPRESSOR_P1_SELECTOR.value,
+        }
+
+        with self._ledger.lock:
+            # Read a consistent provider-owned snapshot. Filtering values in Python avoids
+            # constructing SQL from caller input; only rows whose exact work key was requested
+            # can cross the boundary.
+            rows = self._ledger.raw_connection.execute(
+                "SELECT c.work_key, c.op_class, a.state, a.request_object_ref, a.usage_json"
+                " FROM external_calls c JOIN external_call_attempts a USING(call_id)"
+                " WHERE c.work_key IS NOT NULL ORDER BY c.work_key, c.op_class,"
+                " a.attempt_ordinal"
+            ).fetchall()
+            settlement_rows = self._ledger.raw_connection.execute(
+                "SELECT c.work_key, c.op_class, a.attempt_id,"
+                " b.state AS reservation_state, b.settled_amount"
+                " FROM external_calls c"
+                " JOIN external_call_attempts a USING(call_id)"
+                " JOIN budget_reservations b ON b.attempt_id=a.attempt_id"
+                " WHERE c.work_key IS NOT NULL AND b.resource='gpu_seconds'"
+                " ORDER BY c.work_key, c.op_class, a.attempt_ordinal"
+            ).fetchall()
+            budget = self._ledger.raw_connection.execute(
+                "SELECT cap, reserved_total, settled_total FROM budget_accounts"
+                " WHERE resource='gpu_seconds'"
+            ).fetchone()
+
+        if budget is None:
+            raise ProviderError(
+                409, "gpu_seconds budget account is missing; canary audit cannot attest headroom"
+            )
+
+        by_work: dict[str, dict[str, dict[str, Any]]] = {
+            key: {} for key in work_keys
+        }
+        open_by_work = {key: 0 for key in work_keys}
+        for row in rows:
+            work_key = str(row["work_key"] or "")
+            if work_key not in wanted:
+                continue
+            state = str(row["state"] or "")
+            if state not in terminal:
+                open_by_work[work_key] += 1
+            op_class = str(row["op_class"] or "")
+            aggregate = by_work[work_key].setdefault(op_class, {
+                "op_class": op_class,
+                "attempt_count": 0,
+                "committed_attempt_count": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cached_prompt_tokens": 0,
+                "max_completion_tokens_observed": 0,
+                "settled_gpu_seconds": 0.0,
+                "selector_request_max_tokens": [],
+                "_cached_complete": True,
+            })
+            aggregate["attempt_count"] += 1
+
+            if state == "COMMITTED":
+                try:
+                    usage = json.loads(row["usage_json"] or "{}")
+                except (json.JSONDecodeError, TypeError) as exc:
+                    raise ProviderError(
+                        409,
+                        f"committed usage is unreadable for work {work_key!r}, "
+                        f"op {op_class!r}",
+                    ) from exc
+                if not isinstance(usage, dict):
+                    raise ProviderError(
+                        409,
+                        f"committed usage is not an object for work {work_key!r}, "
+                        f"op {op_class!r}",
+                    )
+                prompt = _nonnegative_int_or_error(
+                    usage.get("prompt_tokens", 0), label="prompt_tokens",
+                    work_key=work_key, op_class=op_class,
+                )
+                completion = _nonnegative_int_or_error(
+                    usage.get("completion_tokens", 0), label="completion_tokens",
+                    work_key=work_key, op_class=op_class,
+                )
+                cached = _cached_tokens(usage)
+                aggregate["committed_attempt_count"] += 1
+                aggregate["prompt_tokens"] += prompt
+                aggregate["completion_tokens"] += completion
+                aggregate["max_completion_tokens_observed"] = max(
+                    aggregate["max_completion_tokens_observed"], completion)
+                if cached is None:
+                    aggregate["_cached_complete"] = False
+                else:
+                    aggregate["cached_prompt_tokens"] += int(cached)
+
+            if op_class in selector_ops and row["request_object_ref"]:
+                try:
+                    request = json.loads(
+                        self._store.get_bytes(row["request_object_ref"]).decode("utf-8"))
+                except Exception as exc:  # noqa: BLE001 - unreadable evidence fails closed
+                    raise ProviderError(
+                        409,
+                        f"selector request metadata is unreadable for work {work_key!r}, "
+                        f"op {op_class!r}",
+                    ) from exc
+                if not isinstance(request, dict):
+                    raise ProviderError(
+                        409,
+                        f"selector request metadata is not an object for work {work_key!r}, "
+                        f"op {op_class!r}",
+                    )
+                limit = request.get("max_tokens")
+                aggregate["selector_request_max_tokens"].append(
+                    limit if isinstance(limit, int) and not isinstance(limit, bool) else None
+                )
+
+        # Budget settlement is read from budget_reservations, not reconstructed from response
+        # latency.  It is the same authority that increments budget_accounts.settled_total.
+        # Keeping this pass separate from attempt telemetry prevents a corrupt duplicate
+        # reservation from duplicating token/attempt counts through a SQL join.
+        seen_gpu_reservations: set[str] = set()
+        for row in settlement_rows:
+            work_key = str(row["work_key"] or "")
+            if work_key not in wanted:
+                continue
+            attempt_id = str(row["attempt_id"] or "")
+            if not attempt_id or attempt_id in seen_gpu_reservations:
+                raise ProviderError(
+                    409,
+                    f"gpu settlement identity is invalid for work {work_key!r}",
+                )
+            seen_gpu_reservations.add(attempt_id)
+            state = str(row["reservation_state"] or "")
+            if state == "SETTLED":
+                settled = _nonnegative_finite_float_or_error(
+                    row["settled_amount"],
+                    label="settled_gpu_seconds",
+                    work_key=work_key,
+                    op_class=str(row["op_class"] or ""),
+                )
+                aggregate = by_work[work_key].get(str(row["op_class"] or ""))
+                if aggregate is None:
+                    raise ProviderError(
+                        409,
+                        f"gpu settlement has no matching attempt for work {work_key!r}",
+                    )
+                aggregate["settled_gpu_seconds"] += settled
+            elif state not in {"RESERVED", "RELEASED"}:
+                raise ProviderError(
+                    409,
+                    f"gpu settlement state is invalid for work {work_key!r}",
+                )
+
+        work_rows: list[dict] = []
+        for work_key in work_keys:
+            rendered_ops = []
+            for op_class in sorted(by_work[work_key]):
+                aggregate = by_work[work_key][op_class]
+                cached = aggregate.pop("_cached_complete")
+                if not cached:
+                    aggregate["cached_prompt_tokens"] = None
+                rendered_ops.append(aggregate)
+            work_rows.append({
+                "work_key": work_key,
+                "open_attempts": open_by_work[work_key],
+                "settled_gpu_seconds": sum(
+                    float(op["settled_gpu_seconds"]) for op in rendered_ops
+                ),
+                "ops": rendered_ops,
+            })
+
+        cap = float(budget["cap"])
+        reserved = float(budget["reserved_total"])
+        settled = float(budget["settled_total"])
+        response = {
+            "version": "canary_audit_v1",
+            "work_keys": work_keys,
+            "work": work_rows,
+            "open_attempts": sum(open_by_work.values()),
+            "gpu_budget": {
+                "resource": "gpu_seconds",
+                "cap": cap,
+                "reserved": reserved,
+                "settled": settled,
+                "remaining": cap - reserved - settled,
+            },
+        }
+        # Response validation is part of the boundary: adding a field later cannot silently
+        # expose it to the runner merely because the producer started returning it.
+        validate_request("canary.audit.response", response)
+        return 200, response
+
     # --- Tavily ----------------------------------------------------------------------
 
     def exa_search(self, body: dict) -> tuple[int, dict]:
@@ -592,6 +973,8 @@ class ProviderService:
         """
         if self._exa_key is None:
             raise ProviderError(503, "provider has no Exa credential loaded")
+        # Before open_call/reserve/mark_sent, so an open breaker costs nothing at all.
+        self.require_breaker_closed("exa")
         validate_request("exa.search", body)
         if str(body.get("type", "")) == "auto":
             raise ProviderError(
@@ -649,8 +1032,23 @@ class ProviderService:
         self._note_upstream_success("exa")
         cost = _float_or(payload.get("costDollars", {}) or {}, "total",
                          default=self._cfg.exa_usd_worst_case)
+        try:
+            frozen = self._frozen_response_text(payload)
+        except ResponseTooLarge as e:
+            # Settle the money before answering: the request really was sent, so the request
+            # cap is spent, but the call must not become a COMMITTED row with an unreadable
+            # body. Failing it here leaves the identity re-fetchable.
+            self._calls.fail_after_response(
+                attempt, group, {"exa_requests": 1.0, "remote_calls": 1.0},
+                error_class="response_too_large")
+            self._ledger.record_incident(
+                severity="ERROR", kind="provider_response_too_large",
+                detail=f"exa call {call_id}: {e}",
+            )
+            self._emit("EXA_RESPONSE_TOO_LARGE", {"call_id": call_id})
+            raise ProviderError(502, f"exa response cannot be frozen: {e}") from e
         self._calls.store_response(
-            attempt, response_text=json.dumps(payload, sort_keys=True)[:200000],
+            attempt, response_text=frozen,
             provider_request_id=str(payload.get("requestId", "")),
         )
         self._calls.validate(attempt)
@@ -666,6 +1064,7 @@ class ProviderService:
         """One acquisition query. The only outbound Tavily path in the whole study."""
         if self._tavily_key is None:
             raise ProviderError(503, "provider has no Tavily credential loaded")
+        self.require_breaker_closed("tavily")
         validate_request("tavily.search", body)
         self._require_placeholder(body, "api_key")
         if body.get("auto_parameters"):
@@ -725,8 +1124,20 @@ class ProviderService:
         self._note_upstream_success("tavily")
         credits = _float_or(payload.get("usage", {}), "credits",
                             default=self._cfg.tavily_credits_worst_case)
+        try:
+            frozen = self._frozen_response_text(payload)
+        except ResponseTooLarge as e:
+            self._calls.fail_after_response(
+                attempt, group, {"tavily_requests": 1.0, "remote_calls": 1.0},
+                error_class="response_too_large")
+            self._ledger.record_incident(
+                severity="ERROR", kind="provider_response_too_large",
+                detail=f"tavily call {call_id}: {e}",
+            )
+            self._emit("TAVILY_RESPONSE_TOO_LARGE", {"call_id": call_id})
+            raise ProviderError(502, f"tavily response cannot be frozen: {e}") from e
         self._calls.store_response(
-            attempt, response_text=json.dumps(payload, sort_keys=True)[:200000],
+            attempt, response_text=frozen,
             provider_request_id=str(payload.get("request_id", "")),
         )
         self._calls.validate(attempt)
@@ -749,6 +1160,7 @@ class ProviderService:
         """
         if self._deepseek_key is None:
             raise ProviderError(503, "provider has no DeepSeek credential loaded")
+        self.require_breaker_closed("deepseek")
         validate_request("deepseek.chat", body)
         self._require_placeholder(body, "api_key")
         op_class = str(body.pop("_op_class", "JUDGE_REPORT"))
@@ -820,8 +1232,19 @@ class ProviderService:
                             "retry": classify_status(status).value}
 
         self._note_upstream_success("deepseek")
+        try:
+            frozen = self._frozen_response_text(payload)
+        except ResponseTooLarge as e:
+            self._calls.fail_after_response(
+                attempt, group, actuals, error_class="response_too_large")
+            self._ledger.record_incident(
+                severity="ERROR", kind="provider_response_too_large",
+                detail=f"deepseek call {call_id}: {e}",
+            )
+            self._emit("DEEPSEEK_RESPONSE_TOO_LARGE", {"call_id": call_id})
+            raise ProviderError(502, f"deepseek response cannot be frozen: {e}") from e
         self._calls.store_response(
-            attempt, response_text=json.dumps(payload, sort_keys=True)[:200000],
+            attempt, response_text=frozen,
             provider_request_id=str(payload.get("id", "")),
             requested_model=str(outbound.get("model", "")),
             returned_model=str(payload.get("model", "")),
@@ -861,6 +1284,7 @@ class ProviderService:
         refused rather than passed through: an untagged treatment request would land in the work
         total with no op class, and a work number nobody can attribute is not a measurement.
         """
+        proxy_ingress_ts = self._clock()
         requested_model = str(body.get("model", ""))
         alias = requested_model.split(":")[-1]
         op = self._cfg.model_aliases.get(alias)
@@ -907,30 +1331,74 @@ class ProviderService:
             outbound["chat_template_kwargs"] = kwargs
         prompt_sha = sha256_hex(json.dumps(outbound.get("messages", []), sort_keys=True)
                                 .encode("utf-8"))
-        self._calls.mark_sent(attempt, request_text=json.dumps(
-            {"model": outbound.get("model"), "prompt_sha256": prompt_sha,
-             "max_tokens": outbound.get("max_tokens"),
-             "temperature": outbound.get("temperature")}, sort_keys=True))
-
         url = self._cfg.vllm_base_url.rstrip("/") + "/chat/completions"
-        dispatch_ts = self._clock()
-        try:
-            status, payload, elapsed = self._upstream(
-                url, {"Content-Type": "application/json"}, outbound,
-                self._cfg.inference_timeout_seconds)
-        except Exception as e:  # noqa: BLE001
-            self._calls.fail_unknown(attempt, group, error_class=type(e).__name__)
-            self._emit("INFERENCE_FAILED_UNKNOWN", {
-                "call_id": call_id, "op_class": op.value, "error": type(e).__name__,
-                "cell": cell_token})
-            raise ProviderError(504, f"vLLM failed after send: {type(e).__name__}") from e
-        response_end_ts = self._clock()
+        gate = self._inference_gate if self._inference_gate is not None else contextlib.nullcontext()
+        with gate:
+            # Queue wait ends here. SENT is recorded immediately before the only upstream call, so
+            # the durable dispatch timestamp denotes service rather than time waiting at ingress.
+            dispatch_ts = self._clock()
+            self._calls.mark_sent(
+                attempt,
+                request_text=json.dumps(
+                    {
+                        "model": outbound.get("model"),
+                        "prompt_sha256": prompt_sha,
+                        "max_tokens": outbound.get("max_tokens"),
+                        "temperature": outbound.get("temperature"),
+                        "seed": outbound.get("seed"),
+                    },
+                    sort_keys=True,
+                ),
+                dispatched_at=dispatch_ts,
+                proxy_ingress_at=proxy_ingress_ts,
+            )
+            try:
+                status, payload, elapsed = self._upstream(
+                    url, {"Content-Type": "application/json"}, outbound,
+                    self._cfg.inference_timeout_seconds)
+            except Exception as e:  # noqa: BLE001
+                self._calls.fail_unknown(attempt, group, error_class=type(e).__name__)
+                self._emit("INFERENCE_FAILED_UNKNOWN", {
+                    "call_id": call_id, "op_class": op.value, "error": type(e).__name__,
+                    "cell": cell_token})
+                raise ProviderError(504, f"vLLM failed after send: {type(e).__name__}") from e
+            response_end_ts = self._clock()
 
         usage = payload.get("usage", {}) or {}
         actual_gpu = min(max(0.0, response_end_ts - dispatch_ts), self._cfg.gpu_seconds_worst_case)
+        telemetry = {
+            "call_id": call_id,
+            "op_class": op.value,
+            "cell": cell_token or "",
+            "run_id": cell.run_id if cell else "",
+            "task_id": cell.task_id if cell else "",
+            "arm_id": cell.arm_id if cell else "",
+            "variant_id": cell.variant_id if cell else "",
+            "replicate_id": cell.replicate_id if cell else "",
+            "work_key": cell.work_key if cell else "",
+            "layer": cell.layer if cell else "",
+            "requested_model": requested_model,
+            "returned_model": str(payload.get("model", "")),
+            "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+            "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+            "cached_prompt_tokens": _cached_tokens(usage),
+            "prompt_sha256": prompt_sha,
+            "upstream_dispatch_ts": dispatch_ts,
+            "upstream_response_end_ts": response_end_ts,
+            "proxy_ingress_ts": proxy_ingress_ts,
+            "queue_wait_seconds": max(0.0, dispatch_ts - proxy_ingress_ts),
+            "elapsed_s": elapsed,
+            "finish_reason": _finish_reason(payload),
+        }
         if status != 200:
             self._calls.fail_after_response(
-                attempt, group, {"gpu_seconds": actual_gpu}, error_class=f"http_{status}")
+                attempt,
+                group,
+                {"gpu_seconds": actual_gpu},
+                error_class=f"http_{status}",
+                response_end_at=response_end_ts,
+                telemetry_json=json.dumps(telemetry, sort_keys=True),
+            )
             self._emit("INFERENCE_HTTP_ERROR", {"call_id": call_id, "status": status})
             return status, {"error": f"vllm returned {status}"}
 
@@ -939,31 +1407,12 @@ class ProviderService:
             requested_model=requested_model,
             returned_model=str(payload.get("model", "")),
             usage_json=json.dumps(usage, sort_keys=True),
+            telemetry_json=json.dumps(telemetry, sort_keys=True),
+            response_end_at=response_end_ts,
         )
         self._calls.validate(attempt)
         self._calls.commit(attempt, group, {"gpu_seconds": actual_gpu})
-        self._emit("INFERENCE_COMMITTED", {
-            "call_id": call_id,
-            "op_class": op.value,
-            "cell": cell_token,
-            "run_id": cell.run_id if cell else "",
-            "task_id": cell.task_id if cell else "",
-            "arm_id": cell.arm_id if cell else "",
-            "variant_id": cell.variant_id if cell else "",
-            "work_key": cell.work_key if cell else "",
-            "requested_model": requested_model,
-            "returned_model": str(payload.get("model", "")),
-            "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
-            "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
-            # Only recorded when the engine actually reports it. A cached-token count derived
-            # from anything else would be a guess presented as a measurement.
-            "cached_prompt_tokens": _cached_tokens(usage),
-            "prompt_sha256": prompt_sha,
-            "upstream_dispatch_ts": dispatch_ts,
-            "upstream_response_end_ts": response_end_ts,
-            "elapsed_s": elapsed,
-            "finish_reason": _finish_reason(payload),
-        })
+        self._emit("INFERENCE_COMMITTED", telemetry)
         return 200, payload
 
     def _next_nonce(self) -> int:
@@ -1003,6 +1452,50 @@ def _float_or(mapping: Mapping[str, Any], key: str, *, default: float) -> float:
         return default
 
 
+def _nonnegative_int_or_error(
+    value: Any,
+    *,
+    label: str,
+    work_key: str,
+    op_class: str,
+) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+    ):
+        raise ProviderError(
+            409,
+            f"{label} is invalid for work {work_key!r}, op {op_class!r}",
+        )
+    return value
+
+
+def _nonnegative_finite_float_or_error(
+    value: Any,
+    *,
+    label: str,
+    work_key: str,
+    op_class: str,
+) -> float:
+    if isinstance(value, bool):
+        valid = False
+        rendered = 0.0
+    else:
+        try:
+            rendered = float(value)
+        except (TypeError, ValueError):
+            valid = False
+        else:
+            valid = math.isfinite(rendered) and rendered >= 0
+    if not valid:
+        raise ProviderError(
+            409,
+            f"{label} is invalid for work {work_key!r}, op {op_class!r}",
+        )
+    return rendered
+
+
 def _cached_tokens(usage: Mapping[str, Any]) -> Optional[int]:
     details = usage.get("prompt_tokens_details")
     if isinstance(details, Mapping) and details.get("cached_tokens") is not None:
@@ -1029,8 +1522,11 @@ _ROUTE_BY_PATH = {
     "/v1/deepseek/chat": "deepseek.chat",
     "/v1/chat/completions": "chat.completions",
     "/v1/cells": "cells.register",
+    "/v1/cells/work": "cells.work",
+    "/v1/canary/audit": "canary.audit",
     "/healthz": "healthz",
     "/readyz": "readyz",
+    "/v1/credentials/probe": "credentials.probe",
 }
 
 _CELL_PATH = re.compile(r"^/v1/cell/([A-Za-z0-9_\-]{8,128})/chat/completions$")

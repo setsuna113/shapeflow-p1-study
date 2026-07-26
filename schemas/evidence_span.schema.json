@@ -228,9 +228,10 @@
           "pattern": "^[0-9a-f]{64}$"
         },
         "kind": {
-          "description": "Only TOOL_EVIDENCE may produce a citation or source binding. MODEL_DERIVED_CONTEXT (the researcher's own reasoning, and model-written page summaries) can be retained to preserve plans and gap statements, but is never promoted to source evidence -- and primary quality evidence metrics count TOOL_EVIDENCE only.",
+          "description": "Only TOOL_EVIDENCE with capture-time source occurrences may produce a citation or source binding. TOOL_UNATTRIBUTED_CONTEXT, MODEL_DERIVED_CONTEXT, and USER_CONTEXT can be retained as context but are never promoted to source evidence; primary quality evidence metrics count TOOL_EVIDENCE only.",
           "enum": [
             "TOOL_EVIDENCE",
+            "TOOL_UNATTRIBUTED_CONTEXT",
             "MODEL_DERIVED_CONTEXT",
             "USER_CONTEXT"
           ]

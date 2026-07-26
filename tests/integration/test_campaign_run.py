@@ -11,6 +11,10 @@ import json
 from pathlib import Path
 
 import pytest
+from fixtures.campaign_harness import Harness
+from fixtures.fake_engine import FakeEngine
+from fixtures.fake_exa import FakeExa
+from fixtures.scripted_author import ScriptedAuthor
 
 from shapeflow_p1.acquire.exa_client import ExaCaptureClient
 from shapeflow_p1.campaign.acquire import acquire_all, exa_params_from
@@ -19,11 +23,6 @@ from shapeflow_p1.campaign.runner import available_tasks, questions_for, write_s
 from shapeflow_p1.campaign.schedule import ArmSpec, cell_key
 from shapeflow_p1.campaign.settings import Settings
 from shapeflow_p1.evaluation.judge_client import DeepSeekJudge
-
-from fixtures.campaign_harness import Harness
-from fixtures.fake_engine import FakeEngine
-from fixtures.fake_exa import FakeExa
-from fixtures.scripted_author import ScriptedAuthor
 
 REPO = Path(__file__).resolve().parents[2]
 PATCHED = REPO / ".build" / "open_deep_research-patched" / "src"
@@ -89,6 +88,14 @@ async def test_a_block_of_two_arms_runs_and_freezes(harness, settings, tmp_path)
                            questions=questions_for(settings, tasks))
     states = runner.cell_states(manifest, phase_id="run-screen", split="FORMATIVE_SCREEN")
     assert set(states.values()) == {"COMMITTED"}, states
+    for cell in manifest.cells:
+        work_key = runner.work_key_for(
+            cell, phase_id="run-screen", split="FORMATIVE_SCREEN")
+        output_ref = runner.ledger.committed_ref(work_key)
+        output = json.loads(runner.store.get_bytes(output_ref).decode("utf-8"))
+        assert output["e2e_latency_seconds"] >= 0.0
+        assert output["work_summary"]["e2e_latency_seconds"] == (
+            output["e2e_latency_seconds"])
 
     frozen = runner.freeze_blocks(manifest, phase_id="run-screen", split="FORMATIVE_SCREEN",
                                   directory=tmp_path / "blocks")
@@ -98,6 +105,56 @@ async def test_a_block_of_two_arms_runs_and_freezes(harness, settings, tmp_path)
     assert {c["arm"]["arm_id"] for c in record["cells"]} == {"P0", "H_ID"}
     assert all(c["output_ref"] for c in record["cells"])
     assert (tmp_path / "blocks" / f"{record['block_id']}.json").exists()
+    root = json.loads((tmp_path / "blocks" / "FREEZE_ROOT.json").read_text())
+    assert root["run_id"] == "RUN-TEST"
+    assert root["phase_id"] == "run-screen"
+    assert root["execution_binding_sha256"] == runner.execution_binding_sha256
+    assert root["protocol_sha256"] == runner.protocol_document_sha256
+    assert root["schedule_sha256"] == manifest.digest
+    assert root["terminal_frozen"] is True
+    assert len(root["blocks"]) == len(manifest.blocks)
+    assert {
+        (cell["arm"]["arm_id"], cell["arm"]["page_variant"],
+         cell["arm"]["close_variant"], cell["seed"], cell["order_index"])
+        for block in root["blocks"] for cell in block["cells"]
+    } == {
+        (cell.arm.arm_id, cell.arm.page_variant, cell.arm.close_variant,
+         cell.seed, cell.order_index)
+        for cell in manifest.cells
+    }
+    assert all(
+        cell["engine_epoch"]
+        for block in root["blocks"] for cell in block["cells"])
+
+
+async def test_new_execution_binding_cannot_reuse_old_committed_cell(harness, settings):
+    tasks = available_tasks(settings, "FORMATIVE_SCREEN")[:1]
+    old = harness.runner(execution_binding_sha256="e" * 64)
+    old_manifest = old.build_schedule(
+        task_ids=tasks, arms=ARMS, split="FORMATIVE_SCREEN")
+    old_cell = old_manifest.cells[0]
+    old_key = old.work_key_for(
+        old_cell, phase_id="run-screen", split="FORMATIVE_SCREEN")
+    attempt = old.ledger.claim(old_key, "test", lease_seconds=60, run_id="RUN-TEST")
+    ref = old.store.put_bytes(b"old approved execution")
+    old.ledger.register_artifact(
+        ref.key, kind="cell_output", raw_size=ref.raw_size,
+        stored_size=ref.stored_size, work_key=old_key)
+    old.ledger.advance(attempt.attempt_id, "MATERIALIZED")
+    old.ledger.advance(attempt.attempt_id, "VALIDATED")
+    old.ledger.commit(attempt.attempt_id, result_object_ref=ref.key)
+
+    new = harness.runner(execution_binding_sha256="f" * 64)
+    new_manifest = new.build_schedule(
+        task_ids=tasks, arms=ARMS, split="FORMATIVE_SCREEN")
+    new_cell = new_manifest.cells[0]
+    new_key = new.work_key_for(
+        new_cell, phase_id="run-screen", split="FORMATIVE_SCREEN")
+
+    assert new_manifest.digest != old_manifest.digest
+    assert new_cell.block_id != old_cell.block_id
+    assert new_key != old_key
+    assert new.ledger.get_work_item(new_key).state == "PENDING"
 
 
 async def test_an_incomplete_block_is_not_frozen(harness, settings, tmp_path):
@@ -112,6 +169,42 @@ async def test_an_incomplete_block_is_not_frozen(harness, settings, tmp_path):
     frozen = runner.freeze_blocks(manifest, phase_id="run-screen", split="FORMATIVE_SCREEN",
                                   directory=tmp_path / "blocks")
     assert frozen == [], "a half-finished block was frozen as a paired observation"
+    assert not (tmp_path / "blocks" / "FREEZE_ROOT.json").exists()
+
+
+async def test_a_terminal_failure_block_is_frozen_for_itt(harness, settings, tmp_path):
+    """P1 failure stays in the offered denominator instead of deleting the whole task."""
+    tasks = available_tasks(settings, "FORMATIVE_SCREEN")[:1]
+    runner = harness.runner()
+    manifest = runner.build_schedule(task_ids=tasks, arms=ARMS, split="FORMATIVE_SCREEN")
+    for index, cell in enumerate(manifest.cells):
+        work_key = runner.work_key_for(
+            cell, phase_id="run-screen", split="FORMATIVE_SCREEN")
+        attempt = runner.ledger.claim(
+            work_key, "test", lease_seconds=60, run_id="RUN-TEST")
+        runner.ledger.record_engine_epoch(work_key, runner.engine_epoch)
+        ref = runner.store.put_bytes(
+            json.dumps({"cell": cell.content(), "index": index}).encode())
+        runner.ledger.register_artifact(
+            ref.key, kind="cell_output", raw_size=ref.raw_size,
+            stored_size=ref.stored_size, work_key=work_key)
+        if index == 0:
+            runner.ledger.fail(
+                attempt.attempt_id, disposition="FAILED_FINAL",
+                error_class="selector_error", result_object_ref=ref.key)
+        else:
+            runner.ledger.advance(attempt.attempt_id, "MATERIALIZED")
+            runner.ledger.advance(attempt.attempt_id, "VALIDATED")
+            runner.ledger.commit(attempt.attempt_id, result_object_ref=ref.key)
+
+    frozen = runner.freeze_blocks(
+        manifest, phase_id="run-screen", split="FORMATIVE_SCREEN",
+        directory=tmp_path / "blocks")
+    assert len(frozen) == 1
+    assert frozen[0]["terminal_frozen"] is True
+    assert frozen[0]["complete_success"] is False
+    failed = [c for c in frozen[0]["cells"] if c["state"] == "FAILED_FINAL"]
+    assert len(failed) == 1 and failed[0]["output_ref"]
 
 
 async def test_resume_fills_the_gap_without_repeating_finished_work(harness, settings, tmp_path):
@@ -172,6 +265,9 @@ async def test_every_cell_is_attributed_in_the_provider_ledger(harness, settings
     assert committed
     assert {e["arm_id"] for e in committed} == {"P0", "H_ID"}
     assert all(e["work_key"] for e in committed)
+    assert all(
+        request["body"].get("seed") == 1 for request in harness.engine.requests
+    ), "the replicate seed was recorded but not sent on every ODR/selector request"
     # Reservations all closed: nothing left holding budget it never settled.
     open_calls = harness.provider_ledger.raw_connection.execute(
         "SELECT COUNT(*) c FROM external_calls WHERE state NOT IN"
@@ -182,8 +278,11 @@ async def test_every_cell_is_attributed_in_the_provider_ledger(harness, settings
 async def test_an_unregistered_arm_never_runs(harness, settings):
     """An arm nobody pre-registered must not execute, or the design no longer describes the run."""
     runner = harness.runner()
-    assert {a.arm_id for a in runner.arms_from_config("canary")} == {
-        "P0", "H_ID", "H_TYPED", "C_VISIBLE", "H_PLUS_C", "CPU_LEXICAL", "SHORT_PROSE"}
+    configured = {
+        str(arm["arm_id"])
+        for arm in settings.get("week1", "screen_arms", "arms")
+    }
+    assert {a.arm_id for a in runner.arms_from_config("canary")} == configured
 
     week1 = dict(settings.configs["week1"])
     week1["canary"] = {**week1["canary"], "arms": [
@@ -231,8 +330,8 @@ async def test_a_stop_request_halts_admission_without_losing_finished_cells(
     assert len(outcomes) == len(manifest.cells)
 
 
-async def test_a_block_that_spans_two_engine_epochs_is_never_frozen(harness, settings,
-                                                                    tmp_path):
+async def test_a_block_that_spans_two_engine_epochs_is_frozen_but_invalid(harness, settings,
+                                                                          tmp_path):
     """Complete is not the same as one observation. A block half-run before an engine
     restart and half after compares two arms served by two engines, and freeze_blocks used
     to accept it because every cell said COMMITTED."""
@@ -251,7 +350,47 @@ async def test_a_block_that_spans_two_engine_epochs_is_never_frozen(harness, set
 
     frozen = runner.freeze_blocks(manifest, phase_id="run-screen", split="FORMATIVE_SCREEN",
                                   directory=tmp_path / "blocks")
-    assert not any(r["block_id"] == block.block_id for r in frozen)
+    record = next(r for r in frozen if r["block_id"] == block.block_id)
+    assert record["valid_for_paired_estimate"] is False
+    assert record["invalid_reason"] == "SPANS_ENGINE_EPOCHS"
     incident = runner.ledger.raw_connection.execute(
         "SELECT kind FROM incidents WHERE kind='block_spans_engine_epochs'").fetchone()
     assert incident is not None
+
+
+def test_logical_cell_key_does_not_change_when_vllm_restarts():
+    """Boot identity is execution provenance, not a license to duplicate an assignment."""
+    from shapeflow_p1.experiment.ledger import Ledger
+
+    coordinates = {
+        "protocol_sha": "p" * 64,
+        "split": "FORMATIVE_SCREEN",
+        "phase_id": "e2e-screen",
+        "task_id": "T1",
+        "arm_id": "H",
+        "variant_id": "H02+P0",
+        "replicate_id": "0",
+        "checkpoint_hash": "B1",
+        "stage_version": "v1",
+    }
+    assert Ledger.work_key(**coordinates, engine_epoch="a" * 32) == Ledger.work_key(
+        **coordinates, engine_epoch="b" * 32)
+
+
+def test_runner_records_a_within_cell_engine_restart_as_an_invalid_epoch(
+    harness, monkeypatch, tmp_path
+):
+    runner = harness.runner()
+    runner._engine_epoch_override = None
+    epoch_file = tmp_path / "engine_epoch"
+    epoch_file.write_text("a" * 32 + "\n", encoding="ascii")
+    monkeypatch.setenv("SHAPEFLOW_ENGINE_EPOCH_FILE", str(epoch_file))
+    work_key = runner.ledger.ensure_work_item(
+        protocol_sha="p" * 64, split="s", phase_id="phase", task_id="t",
+        arm_id="a", variant_id="v")
+    start = runner._current_engine_epoch()
+    epoch_file.write_text("b" * 32 + "\n", encoding="ascii")
+    recorded, end, stable = runner._execution_epoch(work_key, start)
+    assert not stable
+    assert end == "b" * 32
+    assert recorded == f"SPANS:{'a' * 32}:{'b' * 32}"

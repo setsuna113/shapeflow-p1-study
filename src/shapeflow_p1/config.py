@@ -1,10 +1,10 @@
 """Loading configuration as hash-locked protocol constants, not tunable defaults.
 
-Every config file is loaded, canonicalized and hashed. Those hashes are what
-``protocol/launch_approval.json`` pins, so the decision thresholds and budgets that were
-approved cannot drift after approval without minting a new protocol SHA and invalidating the
-approval. The loader therefore never fills in a missing value with a default -- a missing key is
-an error, because a silently-defaulted threshold is exactly the kind of change the hash lock
+Every config file is loaded, canonicalized and hashed. Those hashes are what the external
+append-only approval store pins, so the decision thresholds and budgets that were approved
+cannot drift after approval without minting a new execution binding and invalidating the
+approval. The loader therefore never fills in a missing value with a default -- a missing key
+is an error, because a silently-defaulted threshold is exactly the kind of change the hash lock
 exists to catch.
 """
 

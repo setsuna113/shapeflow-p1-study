@@ -11,4 +11,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+
+@pytest.fixture(autouse=True)
+def _explicit_model_tokenizer_double(monkeypatch):
+    """Unit/integration tests use one named tokenizer double; live code cannot opt into it."""
+    monkeypatch.setenv("SHAPEFLOW_TEST_TOKENIZER", "whitespace-v1")

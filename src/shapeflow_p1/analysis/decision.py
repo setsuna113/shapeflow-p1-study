@@ -52,9 +52,15 @@ class NodeEvidence:
     min_saving: float = 0.10
     thesis_speedup: float = 1.5
     coverage_min: float = 0.30
+    # A broken measurement/provenance path does not prove the mechanism is structurally bad.
+    # ``structural_pass=False`` is reserved for a verified deterministic P1 contract or
+    # publication failure; study invalidity instead yields NOT_ESTABLISHED.
+    study_valid: bool = True
 
 
 def decide(ev: NodeEvidence) -> Verdict:
+    if not ev.study_valid:
+        return Verdict.NOT_ESTABLISHED
     # Deterministic structural failure and harm dominate everything.
     if not ev.structural_pass:
         return Verdict.KILL_STRUCTURAL

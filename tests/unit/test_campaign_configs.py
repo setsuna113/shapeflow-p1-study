@@ -82,18 +82,140 @@ def test_every_canary_arm_names_registered_variants(settings):
 
 
 def test_the_canary_covers_the_arms_the_protocol_requires(settings):
-    """P0, H-ID, H-typed, C_VISIBLE, H+C and both controls, or the canary cannot show why."""
-    arms = {a["arm_id"] for a in settings.get("week1", "canary", "arms")}
-    assert arms == {"P0", "H_ID", "H_TYPED", "C_VISIBLE", "H_PLUS_C", "CPU_LEXICAL",
-                    "SHORT_PROSE"}
+    """Every expensive screen arm is exercised before the remaining 700+ cells are admitted."""
+    canary = settings.get("week1", "canary", "arms")
+    screen = settings.get("week1", "screen_arms", "arms")
+    assert canary == screen
+    assert len(canary) == 19
 
 
 def test_a_close_only_arm_leaves_the_page_node_at_p0(settings):
     """Otherwise the C contrast is confounded with an H effect."""
     by_id = {a["arm_id"]: a for a in settings.get("week1", "canary", "arms")}
-    assert by_id["C_VISIBLE"]["page_variant"] == "P0"
-    assert by_id["CPU_LEXICAL"]["close_variant"] == "P0"
-    assert by_id["SHORT_PROSE"]["close_variant"] == "P0"
+    assert by_id["C_ID"]["page_variant"] == "P0"
+    assert by_id["H_CPU_CONTROL"]["close_variant"] == "P0"
+    assert by_id["H_PROSE_CONTROL"]["close_variant"] == "P0"
+
+
+def test_the_weeklong_screen_exercises_every_runnable_p1_design_axis(settings):
+    from shapeflow_p1.strategies.factory import load_registry
+
+    arms = settings.get("week1", "screen_arms", "arms")
+    registry = load_registry(REPO / "configs")
+    variants = {
+        variant
+        for arm in arms
+        for variant in (arm["page_variant"], arm["close_variant"])
+    }
+    assert settings.get("week1", "screen", "arms_block") == "screen_arms"
+    assert {
+        "P0",
+        "H00-CPU", "H00-PROSE", "H01", "H02", "H_TYPED_STABLE", "H03",
+        "H_HIER_COVERAGE", "H04", "H05",
+        "C00-CPU", "C00-PROSE", "C01", "C_TYPED_STABLE", "C02", "C03",
+    } <= variants
+    assert any(
+        arm["page_variant"] == "H02" and arm["close_variant"] == "C01"
+        for arm in arms
+    )
+    assert len({arm["arm_id"] for arm in arms}) == len(arms)
+    for arm in arms:
+        for variant_id in (arm["page_variant"], arm["close_variant"]):
+            assert variant_id in registry
+            assert registry[variant_id].runnable
+
+
+def test_matched_contrasts_change_exactly_the_declared_factor(settings):
+    """Resolve arm IDs and prove every named ablation is one-factor-at-a-time."""
+    from shapeflow_p1.analysis.matched import resolve_arm_semantics
+
+    week1 = settings.configs["week1"]
+    variant_data = settings.configs["variants"]["variants"]
+    variants = {variant["variant_id"]: variant for variant in variant_data}
+    arms = {
+        arm["arm_id"]: arm
+        for arm in settings.get("week1", "screen_arms", "arms")
+    }
+    matched = settings.get("week1", "matched_contrasts")
+    executable_fields = matched["executable_variant_fields"]
+    fields = set(executable_fields)
+    required_kinds = {
+        "ID_vs_TYPED",
+        "stable_vs_coverage",
+        "per_page_vs_hierarchical",
+        "typed_vs_bridge",
+        "LLM_vs_CPU",
+        "structured_selection_vs_prose",
+    }
+
+    seen_ids = set()
+    seen_kinds = set()
+    for pair in matched["pairs"]:
+        assert pair["contrast_id"] not in seen_ids
+        seen_ids.add(pair["contrast_id"])
+        seen_kinds.add(pair["kind"])
+        left = resolve_arm_semantics(
+            pair["left_arm_id"],
+            arms[pair["left_arm_id"]],
+            variants,
+            executable_fields,
+        )
+        right = resolve_arm_semantics(
+            pair["right_arm_id"],
+            arms[pair["right_arm_id"]],
+            variants,
+            executable_fields,
+        )
+        target = pair["target_factor"]
+        factor_fields = set(pair["factor_fields"])
+        assert target in factor_fields
+        assert factor_fields <= fields
+        assert left.get(target) == pair["left_level"]
+        assert right.get(target) == pair["right_level"]
+        observed_differences = {
+            field
+            for field in fields
+            if left.get(field) != right.get(field)
+        }
+        assert observed_differences == factor_fields, (
+            f"{pair['contrast_id']} is confounded: expected differences "
+            f"{sorted(factor_fields)}, observed {sorted(observed_differences)}"
+        )
+        if isinstance(pair["left_level"], dict):
+            assert pair["factor_scope"] == "JOINT_E2E_POLICY"
+            assert pair["affected_nodes"] == ["WEBPAGE_P1", "C_VISIBLE"]
+            assert pair["first_treatment_boundary"] == "WEBPAGE_P1"
+
+    assert required_kinds <= seen_kinds
+    # The block is part of the already approval-bound week1 config, not an unhashed sidecar.
+    from shapeflow_p1.config import config_sha
+
+    without_contrasts = dict(week1)
+    without_contrasts.pop("matched_contrasts")
+    assert config_sha(without_contrasts) != settings.shas["week1"]
+
+
+def test_the_matched_screen_freezes_an_honest_gpu_break_even(settings):
+    """Freeze the cell count and honest break-even budget; do not call a request a cell."""
+    arms = settings.get("week1", "screen_arms", "arms")
+    screen_tasks = settings.get("task_source", "splits", "FORMATIVE_SCREEN")
+    canary_tasks = settings.get("week1", "canary", "tasks")
+    canary_arms = settings.get("week1", "canary", "arms")
+    replicated_screen_tasks = round(
+        screen_tasks * settings.get("week1", "screen", "second_seed_fraction")
+    )
+    offered_cells = (
+        len(arms) * (screen_tasks + replicated_screen_tasks)
+        + len(canary_arms) * canary_tasks
+    )
+    assert offered_cells == 836
+    assert settings.get("week1", "screen", "second_seed_fraction") == 0.25
+    assert settings.get("week1", "screen", "seeds") == [1, 2]
+    # This is the maximum *observed campaign mean* that can complete under the hard cap.
+    # provider.gpu_seconds_worst_case is a per-inference-request reservation and must never
+    # be multiplied by cells as if every complete graph issued exactly one request.
+    break_even_seconds_per_cell = settings.budget_caps()["gpu_seconds"] / offered_cells
+    assert break_even_seconds_per_cell == pytest.approx(645.933014, rel=1e-6)
 
 
 # --- budgets and splits --------------------------------------------------------------------
@@ -268,6 +390,48 @@ def test_the_authoring_envelope_comes_from_the_frozen_config(settings):
     assert envelope.top_p == block["top_p"]
     assert envelope.seed == block["seed"]
     assert envelope.max_tokens == block["max_tokens"]
+
+
+def test_the_judge_request_and_retry_envelopes_come_from_frozen_config(settings):
+    envelope = settings.judge_sampling()
+    block = settings.get("judge", "model")
+    assert envelope.request_fields() == {
+        "temperature": block["temperature"],
+        "top_p": block["top_p"],
+        "seed": block["seed"],
+        "max_tokens": block["max_tokens"],
+    }
+    assert envelope.enable_thinking is block["enable_thinking"]
+    assert envelope.send_thinking_switch is block["send_thinking_switch"]
+    assert settings.judge_max_retries() == settings.get(
+        "judge", "retry", "max_retries")
+    assert settings.get("judge", "prompts", "truth_version") == (
+        "judge_truth_v2_full_world")
+
+
+def test_judge_config_versions_must_match_the_code_that_is_actually_run(settings):
+    settings.validate_judge_policy_versions()
+    drifted = dict(settings.configs["judge"])
+    drifted["prompts"] = dict(
+        drifted["prompts"], truth_version="stale_truth_prompt")
+    settings.configs["judge"] = drifted
+    with pytest.raises(ConfigError, match="policy drift"):
+        settings.judge_sampling()
+
+
+def test_atomizer_truth_and_report_measurements_have_distinct_code_identities(settings):
+    from shapeflow_p1.campaign.evaluate import relation_prompt_sha256
+    from shapeflow_p1.campaign.truth import truth_prompt_sha256
+    from shapeflow_p1.evaluation.atomizer import atomize_protocol_sha256
+
+    assert len({
+        atomize_protocol_sha256(), truth_prompt_sha256(), relation_prompt_sha256(),
+    }) == 3
+    declared = settings.get("stack", "evaluation")
+    assert set(declared) == {
+        "atomize_prompt_sha256", "truth_prompt_sha256", "report_prompt_sha256",
+    }
+    assert all(value == "@STEWARD_FREEZES@" for value in declared.values())
 
 
 def test_a_missing_key_is_an_error_not_a_default(settings):

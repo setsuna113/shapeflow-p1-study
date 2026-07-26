@@ -5,13 +5,16 @@ from __future__ import annotations
 import numpy as np
 
 from shapeflow_p1.analysis.factorial import ArmOutcomes, estimate_contrasts
+from shapeflow_p1.canonical import canonical_json
 from shapeflow_p1.evaluation.trajectory_eval import (
     Trajectory,
     facet_followup_rate,
     query_redundancy,
     retrieval_failure_rate,
+    summarize_frozen_events,
     summarize_trajectory,
 )
+from shapeflow_p1.hashing import sha256_hex
 
 
 def _traj(**over):
@@ -50,6 +53,146 @@ def test_summarize_has_all_metrics():
     for k in ("waves", "fan_out", "query_redundancy", "facet_followup_rate",
               "retrieval_failure_rate", "premature_completes"):
         assert k in s
+
+
+def _event(index, kind, *, position="PRE_TREATMENT", **payload):
+    body = {
+        "event_index": index,
+        "kind": kind,
+        "position": position,
+        **payload,
+    }
+    body["event_sha256"] = sha256_hex(canonical_json(body))
+    return body
+
+
+def test_frozen_event_summary_measures_divergence_instead_of_rejecting_it():
+    events = [
+        _event(
+            0,
+            "SEARCH_QUERY",
+            query="battery safety evidence",
+            result_count=2,
+            source_occurrence_ids=["O1", "O2"],
+        ),
+        _event(
+            1,
+            "PAGE_BATCH_REDUCED",
+            position="TREATMENT",
+            checkpoint="H1",
+            siblings=1,
+        ),
+        _event(
+            2,
+            "SEARCH_QUERY",
+            position="POST_TREATMENT",
+            query="battery safety evidence",
+            result_count=0,
+            source_occurrence_ids=[],
+        ),
+        _event(
+            3,
+            "MODEL_TOOL_DECISION",
+            position="POST_TREATMENT",
+            tool_names=["ConductResearch", "think_tool"],
+        ),
+        _event(
+            4,
+            "CLOSE_REDUCED",
+            position="POST_TREATMENT",
+            close_reason="RESEARCH_COMPLETE",
+        ),
+    ]
+    metrics = summarize_frozen_events(events)
+    assert metrics["status"] == "OK"
+    assert metrics["query_count"] == 2
+    assert metrics["query_redundancy"] == 0.5
+    assert metrics["retrieval_empty_rate"] == 0.5
+    assert metrics["post_treatment_query_count"] == 1
+    assert metrics["conduct_research_calls"] == 1
+    assert metrics["close_reason"] == "RESEARCH_COMPLETE"
+
+
+def test_frozen_event_summary_rejects_tampering_not_natural_arm_difference():
+    events = [
+        _event(
+            0,
+            "SEARCH_QUERY",
+            query="x",
+            result_count=1,
+            source_occurrence_ids=["O1"],
+        )
+    ]
+    events[0]["result_count"] = 999
+    with np.testing.assert_raises_regex(ValueError, "does not verify"):
+        summarize_frozen_events(events)
+
+
+def test_frozen_event_summary_counts_production_checkpoint_incidents_once():
+    """NODE_SELECTION and the reducer event describe one incident, not two."""
+    events = [
+        _event(
+            0,
+            "NODE_SELECTION",
+            position="TREATMENT",
+            checkpoint="H1",
+            direct_node_record={
+                "node": "H",
+                "checkpoint_hash": "H1",
+                "fell_back": True,
+                "failure": {"reason": "INVALID_OUTPUT"},
+            },
+        ),
+        _event(
+            1,
+            "PAGE_BATCH_REDUCED",
+            position="POST_TREATMENT",
+            checkpoint="H1",
+            fell_back=True,
+            failure="INVALID_OUTPUT",
+            siblings=2,
+        ),
+        _event(
+            2,
+            "NODE_SELECTION",
+            position="POST_TREATMENT",
+            checkpoint="C1",
+            direct_node_record={
+                "node": "C_VISIBLE",
+                "checkpoint_hash": "C1",
+                "fell_back": False,
+                "failure": None,
+            },
+        ),
+        _event(
+            3,
+            "CLOSE_REDUCED",
+            position="POST_TREATMENT",
+            checkpoint="C1",
+            close_reason="RESEARCH_COMPLETE",
+        ),
+    ]
+
+    metrics = summarize_frozen_events(events)
+
+    assert metrics["h_checkpoint_count"] == 1
+    assert metrics["c_checkpoint_count"] == 1
+    assert metrics["fallback_count"] == 1
+    assert metrics["failure_count"] == 1
+
+
+def test_frozen_event_summary_rejects_unattributable_failure_incident():
+    events = [
+        _event(
+            0,
+            "PAGE_BATCH_REDUCED",
+            position="TREATMENT",
+            failure="INVALID_OUTPUT",
+            siblings=1,
+        )
+    ]
+    with np.testing.assert_raises_regex(ValueError, "node-scoped checkpoint"):
+        summarize_frozen_events(events)
 
 
 # --- factorial ------------------------------------------------------------------------

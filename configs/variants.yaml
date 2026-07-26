@@ -7,32 +7,44 @@
 version: v1
 
 # Sharing one SOURCE header across a contiguous run changes how many tokens P1 materializes
-# relative to P0, so it is part of the protocol, not an implementation detail. Declaring it in
-# a code comment did nothing; here config_sha digests it and changing it mints a new protocol
-# SHA. Asserted equal to renderer.RENDERER_GROUPING_VERSION by tests.
+# relative to P0, so it is part of the protocol, not an implementation detail. Visible spans
+# may share a header only when their capture-time byte-range source binding is identical; mere
+# message adjacency cannot assign Alpha's URL to Beta. This value is config-hashed and asserted
+# equal to renderer.RENDERER_GROUPING_VERSION by tests.
 renderer:
-  grouping_version: renderer_source_grouping_v1
+  grouping_version: renderer_visible_source_binding_and_order_v3
 
 variants:
-  - {variant_id: P0,            node: P0,          chunker: vendor,               scope: vendor,        contract: VENDOR_PROSE, aggregation: vendor,           close_mode: vendor,             is_control: true}
+  - {variant_id: P0,            node: P0,          chunker: vendor,               scope: vendor,        contract: VENDOR_PROSE, aggregation: vendor,           close_mode: vendor,             selector_backend: VENDOR,      publication_path: VENDOR_PROSE,         output_representation: PROSE,             is_control: true}
 
   # WEBPAGE_P1 family
-  - {variant_id: H00-CPU,       node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: CPU_LEXICAL,  aggregation: stable_union_v1, close_mode: none,               is_control: true}
-  - {variant_id: H00-PROSE,     node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: SHORT_PROSE,  aggregation: stable_union_v1,  close_mode: separate,           is_control: true}
-  - {variant_id: H01,           node: WEBPAGE_P1,  chunker: fixed_token_v1,        scope: per_page,      contract: P1_ID,        aggregation: stable_union_v1,  close_mode: separate}
-  - {variant_id: H02,           node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: P1_ID,        aggregation: stable_union_v1,  close_mode: separate}
-  - {variant_id: H03,           node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: P1_TYPED,     aggregation: coverage_budget_v1, close_mode: separate}
-  - {variant_id: H04,           node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: hierarchical,  contract: P1_TYPED,     aggregation: global_rerank_v1, close_mode: separate}
-  - {variant_id: H05,           node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: hierarchical,  contract: P1_BRIDGE,    aggregation: coverage_budget_v1, close_mode: separate}
+  - {variant_id: H00-CPU,       node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: P1_ID,        aggregation: stable_union_v1, close_mode: separate,           selector_backend: CPU_LEXICAL, publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS,      is_control: true}
+  - {variant_id: H00-PROSE,     node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: SHORT_PROSE,  aggregation: stable_union_v1, close_mode: separate,           selector_backend: LLM,         publication_path: DIRECT_PROSE,         output_representation: SHORT_PROSE,      is_control: true}
+  - {variant_id: H01,           node: WEBPAGE_P1,  chunker: fixed_token_v1,        scope: per_page,      contract: P1_ID,        aggregation: stable_union_v1, close_mode: separate,           selector_backend: LLM,         publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS}
+  - {variant_id: H02,           node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: P1_ID,        aggregation: stable_union_v1, close_mode: separate,           selector_backend: LLM,         publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS}
+  # Matched H ablations. These fill the missing cells needed to change exactly one factor at a
+  # time: H02 -> H_TYPED_STABLE changes only the output contract;
+  # H_TYPED_STABLE -> H03 changes only aggregation; H03 -> H_HIER_COVERAGE changes only scope;
+  # H_HIER_COVERAGE -> H05 changes only the typed/bridge contract (including bridge caps).
+  - {variant_id: H_TYPED_STABLE, node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: P1_TYPED,     aggregation: stable_union_v1,   close_mode: separate, selector_backend: LLM, publication_path: STRUCTURED_SELECTION, output_representation: TYPED_EVIDENCE}
+  - {variant_id: H03,           node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: P1_TYPED,     aggregation: coverage_budget_v1, close_mode: separate, selector_backend: LLM, publication_path: STRUCTURED_SELECTION, output_representation: TYPED_EVIDENCE}
+  - {variant_id: H_HIER_COVERAGE, node: WEBPAGE_P1, chunker: markdown_structure_v1, scope: hierarchical, contract: P1_TYPED,     aggregation: coverage_budget_v1, close_mode: separate, selector_backend: LLM, publication_path: STRUCTURED_SELECTION, output_representation: TYPED_EVIDENCE}
+  - {variant_id: H04,           node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: hierarchical,  contract: P1_TYPED,     aggregation: global_rerank_v1, close_mode: separate, selector_backend: LLM, publication_path: STRUCTURED_SELECTION, output_representation: TYPED_EVIDENCE}
+  - {variant_id: H05,           node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: hierarchical,  contract: P1_BRIDGE,    aggregation: coverage_budget_v1, close_mode: separate, selector_backend: LLM, publication_path: STRUCTURED_SELECTION, output_representation: BRIDGED_EVIDENCE, bridge_token_cap_each: 64, bridge_token_cap_total: 128}
 
   # RESEARCHER_CLOSE / C_VISIBLE family (compressor-only: sees only what P0's compressor saw)
-  - {variant_id: C00-CPU,       node: C_VISIBLE,   chunker: paragraph_sentence_v1, scope: per_researcher, contract: CPU_LEXICAL, aggregation: stable_union_v1, close_mode: none,               is_control: true}
-  - {variant_id: C00-PROSE,     node: C_VISIBLE,   chunker: paragraph_sentence_v1, scope: per_researcher, contract: SHORT_PROSE, aggregation: stable_union_v1,  close_mode: separate,           is_control: true}
-  - {variant_id: C01,           node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: P1_ID,       aggregation: stable_union_v1,  close_mode: dedicated_selector}
-  - {variant_id: C02,           node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: dedicated_selector}
-  - {variant_id: C03,           node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: P1_BRIDGE,   aggregation: coverage_budget_v1, close_mode: dedicated_selector}
-  - {variant_id: C04,           node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: prefix_preserving}
+  # Both controls deliberately share C01's candidate construction and publication mode. Thus
+  # C01 vs C00-CPU changes only who selects, and C01 vs C00-PROSE changes only the output
+  # language. Keeping paragraph chunking or a different close mode here would confound either
+  # control with a different visible candidate set/publication path.
+  - {variant_id: C00-CPU,       node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: P1_ID,       aggregation: stable_union_v1, close_mode: dedicated_selector, selector_backend: CPU_LEXICAL, publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS, is_control: true}
+  - {variant_id: C00-PROSE,     node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: SHORT_PROSE, aggregation: stable_union_v1, close_mode: dedicated_selector, selector_backend: LLM,         publication_path: DIRECT_PROSE,         output_representation: SHORT_PROSE, is_control: true}
+  - {variant_id: C01,           node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: P1_ID,       aggregation: stable_union_v1, close_mode: dedicated_selector, selector_backend: LLM,         publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS}
+  - {variant_id: C_TYPED_STABLE, node: C_VISIBLE,  chunker: markdown_structure_v1, scope: per_researcher, contract: P1_TYPED,    aggregation: stable_union_v1, close_mode: dedicated_selector, selector_backend: LLM,         publication_path: STRUCTURED_SELECTION, output_representation: TYPED_EVIDENCE}
+  - {variant_id: C02,           node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: dedicated_selector, selector_backend: LLM, publication_path: STRUCTURED_SELECTION, output_representation: TYPED_EVIDENCE}
+  - {variant_id: C03,           node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: P1_BRIDGE,   aggregation: coverage_budget_v1, close_mode: dedicated_selector, selector_backend: LLM, publication_path: STRUCTURED_SELECTION, output_representation: BRIDGED_EVIDENCE, bridge_token_cap_each: 64, bridge_token_cap_total: 128}
+  - {variant_id: C04,           node: C_VISIBLE,   chunker: markdown_structure_v1, scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: prefix_preserving, selector_backend: LLM, publication_path: PREFIX_PRESERVING_SELECTION, output_representation: TYPED_EVIDENCE, runnable: false, unavailable_reason: "Prefix preserving must preserve the selector input prefix and prove APC reuse; output wrapping is not the treatment."}
 
   # Extensions reported separately (never as compressor-only)
-  - {variant_id: C05-FUSED-EXT, node: C_FUSED_EXT, chunker: paragraph_sentence_v1, scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: fused_with_fallback}
-  - {variant_id: C06-REG,       node: C_REGISTRY,  chunker: markdown_structure_v1, scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: dedicated_selector}
+  - {variant_id: C05-FUSED-EXT, node: C_FUSED_EXT, chunker: paragraph_sentence_v1, scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: fused_with_fallback, selector_backend: LLM, publication_path: FUSED_SELECTION, output_representation: TYPED_EVIDENCE, runnable: false, unavailable_reason: "Requires a real ResearchCompleteWithSelection tool and checkpoint contract; dedicated fallback is not fused selection."}
+  - {variant_id: C06-REG,       node: C_REGISTRY,  chunker: markdown_structure_v1, scope: per_researcher, contract: P1_TYPED,    aggregation: coverage_budget_v1, close_mode: dedicated_selector, selector_backend: LLM, publication_path: STRUCTURED_SELECTION, output_representation: TYPED_EVIDENCE, runnable: false, unavailable_reason: "Runner/adapter does not yet supply raw registry spans plus frozen snapshots; C_VISIBLE fallback is forbidden."}

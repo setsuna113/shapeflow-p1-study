@@ -42,8 +42,23 @@ class VendorPageStrategy:
         rendered = await asyncio.gather(
             *(self._deferred[cid].render_vendor() for cid in call_ids)
         )
+        occurrences_by_call = {
+            call_id: tuple(dict.fromkeys(
+                str(result.source_occurrence_id)
+                for result in results
+                if result.source_occurrence_id
+            ))
+            for call_id, results in checkpoint.search_result_sets
+        }
         return [
-            ToolObservation(tool_call_id=cid, name="tavily_search", content=content)
+            ToolObservation(
+                tool_call_id=cid,
+                name="tavily_search",
+                content=content,
+                # Vendor rendered this call's complete frozen result set.  This is
+                # capture-time lineage, not a reverse lookup from the summary text.
+                source_occurrence_ids=occurrences_by_call[cid],
+            )
             for cid, content in zip(call_ids, rendered)
         ]
 

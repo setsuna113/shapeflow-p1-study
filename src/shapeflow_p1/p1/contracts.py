@@ -29,13 +29,16 @@ __all__ = [
     "ParsedGap",
     "ParsedBridge",
     "ParsedSelection",
+    "canonical_normalization_document",
     "parse_selection",
     "OVERALL_FACET",
     "validate_selector_output",
     "SelectionContractError",
+    "P1_CONTRACTS",
 ]
 
 _SCHEMA_PATH = Path(__file__).resolve().parents[3] / "schemas" / "selector_output.schema.json"
+P1_CONTRACTS = frozenset({"P1_ID", "P1_TYPED", "P1_BRIDGE"})
 
 
 # A role claimed without naming a facet is a claim about the question as a whole. Representing
@@ -124,6 +127,61 @@ class NormalizationRecord:
 
 _CLEAN = NormalizationRecord(0, 0, 0, 0)
 
+_NORMALIZATION_BASE_FIELDS = frozenset({
+    "raw_count",
+    "unique_count",
+    "duplicate_count",
+    "semantic_conflict_count",
+    "rejected_reason",
+})
+
+
+def canonical_normalization_document(value: object) -> dict:
+    """Closed-validate one selector-normalization trace and recompute its flags.
+
+    This document crosses the treatment/evaluator boundary, so callers must not accept an
+    arbitrary mapping or trust serialized ``was_repaired``/``strict_valid`` booleans.  The
+    five primitive fields are the complete wire contract; derived flags are produced here
+    from those primitives and checked again by the evaluator.
+    """
+    if not isinstance(value, dict):
+        raise ValueError("normalization must be an object")
+    actual = frozenset(map(str, value))
+    if actual != _NORMALIZATION_BASE_FIELDS:
+        missing = sorted(_NORMALIZATION_BASE_FIELDS - actual)
+        extra = sorted(actual - _NORMALIZATION_BASE_FIELDS)
+        raise ValueError(
+            f"normalization fields are not closed (missing={missing}, extra={extra})"
+        )
+    counts: dict[str, int] = {}
+    for key in (
+        "raw_count",
+        "unique_count",
+        "duplicate_count",
+        "semantic_conflict_count",
+    ):
+        raw = value.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            raise ValueError(f"normalization.{key} must be a non-negative integer")
+        counts[key] = raw
+    reason = value.get("rejected_reason")
+    if reason is not None and (not isinstance(reason, str) or not reason.strip()):
+        raise ValueError(
+            "normalization.rejected_reason must be null or a non-empty string"
+        )
+    repaired = (
+        counts["duplicate_count"] > 0
+        or counts["semantic_conflict_count"] > 0
+    )
+    rejected = reason is not None
+    return {
+        **counts,
+        "rejected_reason": reason,
+        "was_repaired": repaired,
+        "was_rejected": rejected,
+        "strict_valid": not repaired and not rejected,
+    }
+
 
 @dataclass(frozen=True)
 class ParsedSelection:
@@ -179,7 +237,12 @@ def _resolve(candidates: CandidateSet, label: str, *, kind: str, tally: "_Tally 
         ) from e
 
 
-def parse_selection(raw: dict, candidates: CandidateSet) -> ParsedSelection:
+def parse_selection(
+    raw: dict,
+    candidates: CandidateSet,
+    *,
+    expected_contract: str | None = None,
+) -> ParsedSelection:
     """Validate and resolve a raw selector output against the candidate set.
 
     Three layers, in order: the closed JSON Schema (shape, bounds, label kind), candidate
@@ -187,15 +250,30 @@ def parse_selection(raw: dict, candidates: CandidateSet) -> ParsedSelection:
     contract's own semantic rules. None of them consults truth -- whether the selection is any
     *good* is an evaluator question and deliberately not decidable here.
     """
+    if expected_contract is not None:
+        if expected_contract not in P1_CONTRACTS:
+            raise ValueError(
+                f"expected_contract must be one of {sorted(P1_CONTRACTS)}, "
+                f"got {expected_contract!r}"
+            )
+        actual = raw.get("contract") if isinstance(raw, dict) else None
+        if actual != expected_contract:
+            tally = _Tally(raw=_raw_element_count(raw) if isinstance(raw, dict) else 0)
+            raise SelectionContractError(
+                f"selector returned contract {actual!r}, but this experimental arm is locked "
+                f"to {expected_contract!r}; accepting it would cross treatment arms",
+                tally.record(rejected="contract_mismatch"),
+            )
     validate_selector_output(raw)
     contract = raw.get("contract")
     tally = _Tally()
 
     if contract == "P1_ID":
+        tally = _Tally(raw=len(raw.get("selected_ids", [])))
         resolved = [
-            _resolve(candidates, lbl, kind=EVIDENCE) for lbl in raw.get("selected_ids", [])
+            _resolve(candidates, lbl, kind=EVIDENCE, tally=tally)
+            for lbl in raw.get("selected_ids", [])
         ]
-        tally.raw += len(resolved)
         ids = tally.dedup(resolved)
         return ParsedSelection(
             contract=contract,
@@ -207,11 +285,13 @@ def parse_selection(raw: dict, candidates: CandidateSet) -> ParsedSelection:
         raw_selections = raw.get("selections", [])
         raw_gaps_in = raw.get("gaps", [])
         raw_bridges_in = raw.get("bridges", [])
-        tally.raw += len(raw_selections) + len(raw_gaps_in) + len(raw_bridges_in)
+        tally.raw = len(raw_selections) + len(raw_gaps_in) + len(raw_bridges_in)
 
         pairs: list[tuple[str, str, Optional[str]]] = []   # (span_id, facet_id, role)
         for sel in raw_selections:
-            span_id = _resolve(candidates, sel["span_id"], kind=EVIDENCE)
+            span_id = _resolve(
+                candidates, sel["span_id"], kind=EVIDENCE, tally=tally
+            )
             facets = tally.dedup(list(sel.get("facet_ids", []))) or [OVERALL_FACET]
             for facet in facets:
                 pairs.append((span_id, facet, sel["role"]))
@@ -223,7 +303,7 @@ def parse_selection(raw: dict, candidates: CandidateSet) -> ParsedSelection:
                     facet_id=g["facet_id"],
                     query_attempt_ids=tuple(
                         tally.dedup(
-                            [_resolve(candidates, q, kind=QUERY_ATTEMPT)
+                            [_resolve(candidates, q, kind=QUERY_ATTEMPT, tally=tally)
                              for q in g["query_attempt_ids"]]
                         )
                     ),
@@ -238,15 +318,20 @@ def parse_selection(raw: dict, candidates: CandidateSet) -> ParsedSelection:
             parsed: list[ParsedBridge] = []
             for b in raw_bridges_in:
                 evidence = tally.dedup(
-                    [_resolve(candidates, e, kind=EVIDENCE) for e in b["evidence_ids"]]
+                    [
+                        _resolve(candidates, e, kind=EVIDENCE, tally=tally)
+                        for e in b["evidence_ids"]
+                    ]
                 )
                 if not evidence:
                     raise SelectionContractError(
-                        "a bridge must bind at least one evidence id", tally.record()
+                        "a bridge must bind at least one evidence id",
+                        tally.record(rejected="semantic_invalid"),
                     )
                 if not b.get("text", "").strip():
                     raise SelectionContractError(
-                        "a bridge must have non-empty text", tally.record()
+                        "a bridge must have non-empty text",
+                        tally.record(rejected="semantic_invalid"),
                     )
                 bridge = ParsedBridge(text=b["text"], evidence_span_ids=tuple(evidence))
                 if bridge in parsed:
@@ -324,7 +409,7 @@ def _normalize_relations(
                 f"span {span_id[:12]} was given conflicting roles on facet {facet!r} "
                 f"({prior!r} and {role!r}); a span bears on one facet one way, and picking by "
                 "output order would let the model's line order decide the result",
-                tally.record(),
+                tally.record(rejected="semantic_conflict"),
             )
     return tuple(
         ParsedItem(span_id=sid, relations=tuple(by_span[sid].items())) for sid in order
@@ -385,5 +470,5 @@ def _check_facet_closure(selection: ParsedSelection, tally: "_Tally") -> None:
         raise SelectionContractError(
             f"facet(s) {sorted(overlap)} are both selected-for and declared a gap; "
             "a facet is either answered or explicitly unanswered, never both",
-            tally.record(),
+            tally.record(rejected="semantic_conflict"),
         )

@@ -41,6 +41,22 @@
      
 --- a/src/open_deep_research/deep_researcher.py
 +++ b/src/open_deep_research/deep_researcher.py
+@@ -303,0 +304,15 @@
++            # --- ShapeFlow P1 hook: one structural run identity per child -----------------
++            # The vendor comprehension above is the hooks-off fast path, unchanged. A bound
++            # run replaces those not-yet-awaited coroutines with nested ContextVar-bound
++            # children whose coordinate includes supervisor iteration, allowed ordinal and id.
++            from shapeflow_p1.odr import vendor_hooks as _sf
++
++            if _sf.child_researcher_binding_active():
++                research_tasks = _sf.refine_child_research_tasks(
++                    original_tasks=research_tasks,
++                    researcher_subgraph=researcher_subgraph,
++                    allowed_tool_calls=allowed_conduct_research_calls,
++                    config=config,
++                    supervisor_research_iteration=research_iterations,
++                )
++
 @@ -477,7 +477,22 @@
          for tool_call in tool_calls
      ]
@@ -65,7 +81,15 @@
      # Create tool messages from execution results
      tool_outputs = [
          ToolMessage(
-@@ -534,6 +549,23 @@
+@@ -489,0 +520,7 @@
++
++    # The reducer only staged bytes. Certify publication after every ToolMessage exists and
++    # immediately before the graph returns its one native Command for the complete batch.
++    _sf.record_tool_batch_publication(
++        tool_calls=tool_calls,
++        tool_outputs=tool_outputs,
++    )
+@@ -534,6 +556,23 @@
      # Step 2: Prepare messages for compression
      researcher_messages = state.get("researcher_messages", [])
      
@@ -89,7 +113,7 @@
      # Add instruction to switch from research mode to compression mode
      researcher_messages.append(HumanMessage(content=compress_research_simple_human_message))
      
-@@ -716,4 +748,41 @@
+@@ -716,4 +755,53 @@
  deep_researcher_builder.add_edge("final_report_generation", END)                   # Final exit point
  
  # Compile the complete deep researcher workflow
@@ -123,11 +147,23 @@
 +    from shapeflow_p1.odr.close_reason import classify_close
 +
 +    messages = state.get("researcher_messages", [])
-+    last = messages[-1] if messages else None
-+    tool_calls = list(getattr(last, "tool_calls", None) or [])
++    # On a late exit vendor has already appended ToolMessage results, so messages[-1] is not
++    # the assistant decision that closed the researcher. Walk back to the latest AIMessage;
++    # on the no-tool path that is still the last message.
++    last_ai = next(
++        (message for message in reversed(messages)
++         if getattr(message, "type", "") == "ai"),
++        None,
++    )
++    tool_calls = list(getattr(last_ai, "tool_calls", None) or [])
++    has_native_search = bool(
++        last_ai and (
++            openai_websearch_called(last_ai) or anthropic_websearch_called(last_ai)
++        )
++    )
 +    reason = classify_close(
 +        has_tool_calls=bool(tool_calls),
-+        has_native_search=False,
++        has_native_search=has_native_search,
 +        research_complete_called=any(tc.get("name") == "ResearchComplete" for tc in tool_calls),
 +        tool_call_iterations=state.get("tool_call_iterations", 0),
 +        max_react_tool_calls=configurable.max_react_tool_calls,

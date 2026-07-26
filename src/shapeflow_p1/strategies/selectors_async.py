@@ -16,6 +16,8 @@ import time
 from collections import Counter
 from typing import Any, Protocol
 
+from ..campaign.selector_client import selector_schema_name
+from ..p1.contracts import P1_CONTRACTS
 from .pipeline import WorkRecord
 
 __all__ = ["AsyncSelector", "LlmAsyncSelector", "CpuLexicalAsyncSelector", "ShortProseSelector"]
@@ -35,9 +37,15 @@ class LlmAsyncSelector:
     proxy -- which does admission, budgeting and telemetry -- is the only path to the engine.
     """
 
-    def __init__(self, model_call, *, op_class: str) -> None:
+    def __init__(self, model_call, *, op_class: str, expected_contract: str) -> None:
+        if expected_contract not in P1_CONTRACTS:
+            raise ValueError(
+                f"LLM selector expected_contract must be one of {sorted(P1_CONTRACTS)}, "
+                f"got {expected_contract!r}"
+            )
         self._call = model_call
         self._op_class = op_class
+        self.expected_contract = expected_contract
 
     async def select(self, *, task_ctx: Any, view: Any) -> tuple[dict, WorkRecord]:
         prompt = view.prompt_bytes.decode("utf-8")
@@ -45,7 +53,7 @@ class LlmAsyncSelector:
         parsed, usage = await self._call(
             prompt=prompt, op_class=self._op_class,
             max_tokens=max(64, view_token_ceiling(view)),
-            schema_name="selector_output",
+            schema_name=selector_schema_name(self.expected_contract),
         )
         return parsed, WorkRecord(
             selector_calls=1,
@@ -72,7 +80,10 @@ class CpuLexicalAsyncSelector:
     whether the LLM is doing anything an ordinary ranker could not.
     """
 
-    def __init__(self, *, max_selected: int = 8) -> None:
+    def __init__(self, *, max_selected: int = 64) -> None:
+        # 64 is the frozen post-hoc schema ceiling.  It is not the effective control budget:
+        # the greedy loop below charges the exact shared renderer and stops at the same
+        # selected-token budget as the LLM arm.
         self._max = max_selected
 
     async def select(self, *, task_ctx: Any, view: Any) -> tuple[dict, WorkRecord]:
@@ -86,7 +97,25 @@ class CpuLexicalAsyncSelector:
             if score > 0:
                 scored.append((score, cand.label, cand.span_id))
         scored.sort(key=lambda t: (-t[0], t[2]))
-        labels = [label for _, label, _ in scored[: self._max]]
+        from ..p1.aggregators import stable_union_v1
+        from ..p1.contracts import parse_selection
+
+        token_budget = int(getattr(task_ctx, "selected_token_budget", 0) or 0)
+        if token_budget <= 0:
+            raise ValueError("CPU control requires the frozen positive selected-token budget")
+        labels: list[str] = []
+        for _score, label, _span_id in scored:
+            if len(labels) >= self._max:
+                break
+            proposed = [*labels, label]
+            parsed = parse_selection(
+                {"contract": "P1_ID", "selected_ids": proposed},
+                view.candidate_set,
+                expected_contract="P1_ID",
+            )
+            rendered_tokens = view.cost(stable_union_v1(parsed, view.registry))
+            if rendered_tokens <= token_budget:
+                labels = proposed
         return ({"contract": "P1_ID", "selected_ids": labels},
                 WorkRecord(selector_calls=0, cpu_seconds=time.perf_counter() - started))
 
@@ -108,18 +137,64 @@ class ShortProseSelector:
         self._call = model_call
         self._op_class = op_class
 
-    async def summarize(self, *, task_ctx: Any, view: Any, token_budget: int
-                        ) -> tuple[str, WorkRecord]:
+    @staticmethod
+    def prompt_for(
+        *,
+        task_ctx: Any,
+        view: Any,
+        token_budget: int,
+        source_entries: tuple[tuple[str, str, str], ...] | None = None,
+    ) -> str:
         from ..p1.prompts import render_short_prose_prompt
 
-        prompt = render_short_prose_prompt(
+        return render_short_prose_prompt(
             topic=getattr(task_ctx, "research_topic", ""),
-            candidates=[(c.label, c.text, c.heading_path, c.context) for c in view.candidates],
+            candidates=[
+                (
+                    candidate.label,
+                    candidate.text,
+                    candidate.heading_path,
+                    candidate.context,
+                    candidate.origin_kind,
+                    candidate.message_role,
+                )
+                for candidate in view.candidates
+            ],
             budget=token_budget,
+            source_entries=source_entries,
         )
+
+    async def summarize(
+        self,
+        *,
+        task_ctx: Any,
+        view: Any,
+        token_budget: int,
+        max_completion_tokens: int | None = None,
+        source_entries: tuple[tuple[str, str, str], ...] | None = None,
+    ) -> tuple[str, WorkRecord]:
+        prompt = self.prompt_for(
+            task_ctx=task_ctx,
+            view=view,
+            token_budget=token_budget,
+            source_entries=source_entries,
+        )
+        completion_cap = (
+            token_budget
+            if max_completion_tokens is None
+            else int(max_completion_tokens)
+        )
+        if completion_cap <= 0 or completion_cap > token_budget:
+            raise ValueError(
+                "SHORT_PROSE completion cap must be positive and no larger than "
+                "the rendered-token budget"
+            )
         started = time.perf_counter()
         text, usage = await self._call(
-            prompt=prompt, op_class=self._op_class, max_tokens=token_budget, schema_name=None,
+            prompt=prompt,
+            op_class=self._op_class,
+            max_tokens=completion_cap,
+            schema_name=None,
         )
         return text, WorkRecord(
             selector_calls=1,

@@ -146,6 +146,37 @@ class ProviderClient:
         if status != 200:
             raise ProviderCallError(status, str(payload.get("error", payload)))
 
+    async def work_summary(self, *, work_key: str, require_isolated: bool) -> dict:
+        """Fetch sanitized durable telemetry after a cell reaches a terminal graph state."""
+
+        status, payload = await self._post(
+            "/v1/cells/work",
+            {"work_key": work_key, "require_isolated": require_isolated},
+        )
+        if status != 200:
+            raise ProviderCallError(status, str(payload.get("error", payload)))
+        return payload
+
+    async def canary_audit(self, *, work_keys: list[str]) -> dict:
+        """Fetch the runner-safe aggregate attestation for exactly these canary cells.
+
+        The response contains counts and budget totals only. Provider-owned prompt/response
+        bytes, request object references, credentials, and evaluator data never cross this
+        boundary.
+        """
+
+        if not work_keys:
+            # The wire schema deliberately has minItems=1. Refuse locally as well so an
+            # empty/malformed canary cannot later treat an empty attestation as evidence.
+            raise ProviderCallError(400, "canary audit requires at least one work_key")
+        status, payload = await self._post(
+            "/v1/canary/audit",
+            {"work_keys": sorted(work_keys)},
+        )
+        if status != 200:
+            raise ProviderCallError(status, str(payload.get("error", payload)))
+        return payload
+
     def cell_base_url(self, cell_token: str) -> str:
         """The ``OPENAI_BASE_URL`` for one cell.
 

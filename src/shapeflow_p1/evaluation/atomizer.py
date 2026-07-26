@@ -17,7 +17,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-__all__ = ["Claim", "atomize_report", "extract_anchors", "Anchors"]
+__all__ = [
+    "ATOMIZE_VERSION",
+    "Claim",
+    "atomize_protocol_sha256",
+    "atomize_report",
+    "extract_anchors",
+    "Anchors",
+]
+
+ATOMIZE_VERSION = "rule_atomize_v1"
 
 _SENTENCE = re.compile(r"[^.!?\n]+(?:[.!?]+|\n|$)")
 _NUMBER = re.compile(r"(?<![A-Za-z])\d[\d,]*(?:\.\d+)?%?")
@@ -27,6 +36,28 @@ _DATE = re.compile(
 )
 _ENTITY = re.compile(r"\b(?:[A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+)+)\b")
 _CITATION = re.compile(r"\[[EQ]\d+\]|\[\d+\]")
+
+
+def atomize_protocol_sha256() -> str:
+    """Identity of the rule-based claim parser used by every quality score.
+
+    It is not a model prompt, but it is just as much part of the measurement policy: changing
+    a sentence boundary or the factual-claim rule changes both metric numerators and
+    denominators.  Hash the executable rule inputs instead of writing the truth prompt's hash
+    into this slot.
+    """
+    from ..canonical import canonical_json
+    from ..hashing import sha256_hex
+
+    return sha256_hex(canonical_json({
+        "version": ATOMIZE_VERSION,
+        "sentence_regex": _SENTENCE.pattern,
+        "number_regex": _NUMBER.pattern,
+        "date_regex": _DATE.pattern,
+        "entity_regex": _ENTITY.pattern,
+        "citation_regex": _CITATION.pattern,
+        "factual_rule": "citation_or_number_or_date_or_multiword_proper_noun",
+    }))
 
 
 @dataclass(frozen=True)

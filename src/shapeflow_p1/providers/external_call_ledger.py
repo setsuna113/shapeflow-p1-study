@@ -342,7 +342,14 @@ class ExternalCallLedger:
             raise
         return group
 
-    def mark_sent(self, attempt: AttemptHandle, *, request_text: str) -> None:
+    def mark_sent(
+        self,
+        attempt: AttemptHandle,
+        *,
+        request_text: str,
+        dispatched_at: Optional[float] = None,
+        proxy_ingress_at: Optional[float] = None,
+    ) -> None:
         """Transition to SENT, storing the REDACTED request bytes. After this point a
         failure with no response is FAILED_UNKNOWN, never a clean release."""
         ref = self._store.put_bytes(self._redactor.redact(request_text).encode("utf-8"))
@@ -351,7 +358,11 @@ class ExternalCallLedger:
             stored_size=ref.stored_size, work_key=attempt.call_id,
         )
         self._advance(
-            attempt, "SENT", request_object_ref=ref.key, dispatched_at=self._now()
+            attempt,
+            "SENT",
+            request_object_ref=ref.key,
+            dispatched_at=self._now() if dispatched_at is None else dispatched_at,
+            proxy_ingress_at=proxy_ingress_at,
         )
 
     def store_response(
@@ -364,6 +375,8 @@ class ExternalCallLedger:
         returned_model: str = "",
         system_fingerprint: str = "",
         usage_json: str = "",
+        telemetry_json: str = "",
+        response_end_at: Optional[float] = None,
     ) -> None:
         ref = self._store.put_bytes(self._redactor.redact(response_text).encode("utf-8"))
         self._ledger.register_artifact(
@@ -379,6 +392,8 @@ class ExternalCallLedger:
             returned_model=returned_model,
             system_fingerprint=system_fingerprint,
             usage_json=usage_json,
+            telemetry_json=telemetry_json,
+            response_end_at=response_end_at,
         )
 
     def validate(self, attempt: AttemptHandle) -> None:
@@ -413,11 +428,22 @@ class ExternalCallLedger:
         actuals: Mapping[str, float],
         *,
         error_class: str,
+        response_end_at: Optional[float] = None,
+        telemetry_json: str = "",
     ) -> None:
         """A response came back but was an error or unusable. It was likely billed, so
         settle at the actual usage the provider reported rather than releasing."""
+        extra = {"response_end_at": response_end_at} if response_end_at is not None else {}
+        if telemetry_json:
+            extra["telemetry_json"] = telemetry_json
         self._settle_and_advance(
-            attempt, "FAILED_FINAL", group, actuals, mode="settle", error_class=error_class
+            attempt,
+            "FAILED_FINAL",
+            group,
+            actuals,
+            mode="settle",
+            error_class=error_class,
+            extra_cols=extra,
         )
 
     def _settle_and_advance(
@@ -429,6 +455,7 @@ class ExternalCallLedger:
         *,
         mode: str,
         error_class: Optional[str] = None,
+        extra_cols: Optional[Mapping[str, object]] = None,
     ) -> None:
         """Money and the state that explains it move together or not at all.
 
@@ -439,6 +466,8 @@ class ExternalCallLedger:
         cols = {"settled_at": self._now()}
         if error_class is not None:
             cols["error_class"] = error_class
+        if extra_cols:
+            cols.update(extra_cols)
         over: list = []
         with self._ledger.transaction() as cur:
             if group is not None:

@@ -6,9 +6,10 @@ command that checked nothing but a docstring would leave the whole UID separatio
 whoever typed it.
 
 Once ``reports/LAUNCH_GATE_PASSED.json`` exists, mutation commands accept only
-``--resume --protocol-sha <exact>``: a diagnostic override after launch would silently alter an
-approved run, and any real change to budget, sample or phase order mints a new protocol SHA and
-needs a new approval instead.
+``--resume --protocol-sha <exact>``: the historically named flag carries the complete approved
+execution-binding digest. A diagnostic override after launch would silently alter an approved
+run, and any real change to budget, sample or phase order mints a new execution binding and needs
+a new approval instead.
 """
 
 from __future__ import annotations
@@ -17,9 +18,10 @@ import asyncio
 import json
 import os
 import sys
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 
@@ -58,28 +60,74 @@ def _settings():
     return Settings.load(_REPO)
 
 
+def _verified_analysis_binding(
+    *,
+    execution_binding_sha256: str,
+    protocol_document_sha256: str,
+):
+    """Verify the clean analysis implementation without rewriting treatment identity.
+
+    ``execution_binding_sha256`` is the frozen treatment binding carried by the verified score
+    scope. It remains an input identity even when analysis runs from a later, separately
+    approved clean commit. The live approval therefore proves a second
+    ``analysis_execution_binding_sha256``; requiring it to equal the treatment digest would
+    make every legitimate post-campaign analysis-only revision impossible because the binding
+    includes ``approved_commit``.
+
+    The protocol itself may not drift: a later analysis implementation can fix code, but it
+    cannot silently change the hypotheses or thresholds attached to the frozen run.
+    """
+
+    from .protocol import ApprovalError, verified_execution_binding
+
+    frozen_execution = str(execution_binding_sha256)
+    if (
+        len(frozen_execution) != 64
+        or any(character not in "0123456789abcdef" for character in frozen_execution)
+    ):
+        _fail("frozen treatment execution binding is not a SHA-256 digest", code=2)
+    try:
+        binding = verified_execution_binding(_REPO)
+    except ApprovalError as exc:
+        _fail(f"refusing post-outcome analysis under unapproved code: {exc}", code=2)
+    if binding.protocol_sha != str(protocol_document_sha256):
+        _fail(
+            "refusing post-outcome analysis: live protocol document differs from the "
+            "frozen evaluation scope",
+            code=2,
+        )
+    return binding
+
+
 def _launched() -> bool:
     return (_REPO / "reports" / "LAUNCH_GATE_PASSED.json").exists()
 
 
 def _assert_post_launch_flags(protocol_sha: Optional[str], resume: bool) -> None:
-    """After the gate has passed, only `--resume --protocol-sha <exact>` may mutate a run."""
+    """After launch, resume only under the exact complete approved execution binding."""
     if not _launched():
         return
-    from .protocol import protocol_sha as document_sha
+    from .protocol import ApprovalError, verified_execution_binding
 
     if not resume:
         _fail("this run has already launched; mutation requires --resume", code=2)
-    expected = document_sha(_REPO)
-    if protocol_sha != expected:
+    if not protocol_sha:
         _fail(
-            f"--protocol-sha must be the exact approved SHA {expected[:12]}...; a budget, "
-            "sample or phase change mints a new protocol SHA and needs a new approval",
+            "this run has already launched; --protocol-sha must carry the exact approved "
+            "execution-binding digest",
+            code=2,
+        )
+    try:
+        verified_execution_binding(_REPO, expected_digest=protocol_sha)
+    except ApprovalError as exc:
+        _fail(
+            "--protocol-sha is the approved execution-binding digest after launch; "
+            f"resume identity did not verify: {exc}",
             code=2,
         )
 
 
-def _require_approval() -> None:
+def _require_approval():
     """Every command that can spend verifies the approval itself.
 
     Not in the launch script. A shell wrapper checks the approval once, at the top, for a
@@ -88,10 +136,10 @@ def _require_approval() -> None:
     returns immediately until reports/LAUNCH_GATE_PASSED.json exists, and reports/ is
     gitignored, so before the first launch it is a pass-through.
     """
-    from .protocol import ApprovalError, verify_approval_file
+    from .protocol import ApprovalError, verified_execution_binding
 
     try:
-        verify_approval_file(_REPO)
+        return verified_execution_binding(_REPO)
     except ApprovalError as e:
         _fail(f"refusing to run: the approval does not bind this configuration.\n{e}")
 
@@ -108,13 +156,22 @@ def _record_phase(phase_name: str, detail: dict) -> None:
     from .campaign.phases import PhaseStore
     from .experiment.ledger import Ledger
     from .experiment.state_machine import Phase
+    from .protocol import ApprovalError, verified_execution_binding
 
     settings = _settings()
-    path = settings.path("provider_ledger")
+    try:
+        binding = verified_execution_binding(_REPO)
+    except ApprovalError as exc:
+        _fail(f"cannot record phase without a verified execution binding: {exc}")
+    # Campaign phase ownership is the runner's ledger, the same ledger CampaignRunner reads.
+    # Writing gate phases into the provider ledger made the state machine split-brain: the
+    # canary saw NEW even though doctor/acquisition/parity had "completed" elsewhere. It also
+    # asked non-provider UIDs to open a 0700 provider directory.
+    path = settings.path("runs") / "ledger.sqlite"
     path.parent.mkdir(parents=True, exist_ok=True)
     ledger = Ledger(str(path))
     try:
-        phases = PhaseStore(ledger, protocol_sha=settings.shas["week1"])
+        phases = PhaseStore(ledger, protocol_sha=binding.digest)
         phase = Phase(phase_name)
         phases.begin(phase)
         phases.complete(phase, detail)
@@ -130,6 +187,238 @@ def _provider_client(settings, role: str = "runner"):
     port = settings.get("week1", "provider", "bind_port")
     return ProviderClient(base_url=f"http://{host}:{port}",
                           token=load_role_token(token_dir, role))
+
+
+def _unsigned_content_sha256(body: Mapping[str, Any],
+                             field: str = "content_sha256") -> str:
+    """Hash a content-addressed JSON wrapper without trusting its claimed digest."""
+    from .canonical import canonical_json
+    from .hashing import sha256_hex
+
+    return sha256_hex(canonical_json({
+        key: value for key, value in body.items() if key != field
+    }))
+
+
+def _load_content_addressed_json(path: Path, *,
+                                  hash_field: str = "content_sha256") -> dict:
+    """Load one exact JSON object and verify its wrapper digest."""
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid content-addressed JSON {path}: {exc}") from exc
+    if not isinstance(body, dict):
+        raise ValueError(f"content-addressed JSON {path} is not an object")
+    recorded = str(body.get(hash_field) or "")
+    actual = _unsigned_content_sha256(body, hash_field)
+    if recorded != actual:
+        raise ValueError(
+            f"{path} was edited: records {recorded!r}, hashes to {actual}")
+    return body
+
+
+def _load_e2e_analysis_design(settings, scope_receipt: Mapping[str, Any]) -> tuple[
+    dict[str, dict], dict, dict
+]:
+    """Verify the evaluator-side pre-treatment design against the evaluated scope.
+
+    The analysis-design receipt itself is runner-safe and deliberately not readable through
+    the evaluator tree.  Its digest is nevertheless frozen into the schedule and then into the
+    verified EVALUATION_SCOPE.  The two evaluator-owned objects can be checked more strongly:
+    their wrapper digests, every task-feature record digest, the registry index, the spec's
+    registry binding, and both scope bindings are all re-derived here.
+    """
+    from .analysis.design import (
+        ELIGIBILITY_SPEC_FILENAME,
+        EVALUATOR_RECEIPT_FILENAME,
+        REGISTRY_FILENAME,
+        build_eligibility_spec,
+    )
+    from .analysis.e2e_effects import task_feature_registry_sha256
+
+    design_dir = settings.path("evaluator_root") / "analysis_design"
+    registry = _load_content_addressed_json(design_dir / REGISTRY_FILENAME)
+    spec = _load_content_addressed_json(design_dir / ELIGIBILITY_SPEC_FILENAME)
+    design_receipt = _load_content_addressed_json(
+        design_dir / EVALUATOR_RECEIPT_FILENAME)
+    if registry.get("schema_version") != "frozen_task_feature_registry_v1":
+        raise ValueError("unsupported frozen task-feature registry schema")
+    if spec.get("schema_version") != "e2e_eligibility_spec_v2":
+        raise ValueError("unsupported frozen eligibility-spec schema")
+    raw_records = registry.get("records")
+    if not isinstance(raw_records, dict) or not raw_records:
+        raise ValueError("frozen task-feature registry has no records")
+    records: dict[str, dict] = {}
+    for raw_task_id, raw_record in raw_records.items():
+        task_id = str(raw_task_id)
+        if not task_id or not isinstance(raw_record, dict):
+            raise ValueError("frozen task-feature registry has an invalid task record")
+        record = dict(raw_record)
+        if (
+            str(record.get("task_id") or "") != task_id
+            or str(record.get("content_sha256") or "")
+            != _unsigned_content_sha256(record)
+        ):
+            raise ValueError(
+                f"frozen task-feature record {task_id!r} does not verify")
+        records[task_id] = record
+    derived_registry_sha = task_feature_registry_sha256(records)
+    recorded_registry_sha = str(
+        registry.get("task_feature_registry_sha256") or "")
+    if recorded_registry_sha != derived_registry_sha:
+        raise ValueError(
+            "task-feature registry index does not address its exact task records")
+    if str(spec.get("task_feature_registry_sha256") or "") != derived_registry_sha:
+        raise ValueError("eligibility spec does not bind the frozen task-feature registry")
+    expected_spec = build_eligibility_spec(settings, registry)
+    if spec != expected_spec:
+        raise ValueError(
+            "frozen eligibility spec differs from the hash-locked decision design"
+        )
+
+    analysis_receipt_sha = str(
+        scope_receipt.get("analysis_design_receipt_sha256") or "")
+    scope_registry_sha = str(
+        scope_receipt.get("task_feature_registry_sha256") or "")
+    scope_spec_sha = str(
+        scope_receipt.get("eligibility_spec_content_sha256") or "")
+    if analysis_receipt_sha != str(design_receipt.get("content_sha256") or ""):
+        raise ValueError(
+            "evaluation scope names a different analysis-design receipt")
+    if scope_registry_sha != derived_registry_sha:
+        raise ValueError(
+            "evaluation scope names a different task-feature registry")
+    if scope_spec_sha != str(spec["content_sha256"]):
+        raise ValueError(
+            "evaluation scope names a different eligibility specification")
+    expected_receipt_bindings = {
+        "task_feature_registry_sha256": derived_registry_sha,
+        "feature_registry_content_sha256": str(registry["content_sha256"]),
+        "eligibility_spec_content_sha256": str(spec["content_sha256"]),
+        "decision_config_sha256": str(settings.shas["decision"]),
+        "variants_config_sha256": str(settings.shas["variants"]),
+        "week1_config_sha256": str(settings.shas["week1"]),
+    }
+    for field, expected in expected_receipt_bindings.items():
+        if str(design_receipt.get(field) or "") != expected:
+            raise ValueError(
+                f"analysis-design receipt {field} does not bind evaluator artifacts/config")
+    bindings = {
+        "analysis_design_receipt_sha256": analysis_receipt_sha,
+        "task_feature_registry_sha256": derived_registry_sha,
+        "feature_registry_content_sha256": str(registry["content_sha256"]),
+        "eligibility_spec_content_sha256": str(spec["content_sha256"]),
+    }
+    return records, spec, bindings
+
+
+def _e2e_semantic_mappings(settings) -> tuple[
+    dict[str, str], dict[str, str], dict[str, dict]
+]:
+    """Resolve factorial and matched-ablation semantics from hash-locked configs."""
+    from .analysis.matched import resolve_arm_semantics
+
+    factorial = settings.get("decision", "e2e_analysis", "core_factorial")
+    if not isinstance(factorial, dict) or set(factorial) != {"p0", "h", "c", "hc"}:
+        raise ValueError("decision core_factorial must define exactly p0/h/c/hc")
+    arm_map: dict[str, str] = {}
+    expected_variants: dict[str, str] = {}
+    for semantic in ("p0", "h", "c", "hc"):
+        corner = factorial[semantic]
+        if not isinstance(corner, dict):
+            raise ValueError(f"decision core_factorial.{semantic} is not an object")
+        arm_id = str(corner.get("arm_id") or "")
+        page = str(corner.get("page_variant") or "")
+        close = str(corner.get("close_variant") or "")
+        if not arm_id or not page or not close:
+            raise ValueError(
+                f"decision core_factorial.{semantic} lacks arm/page/close identity")
+        arm_map[semantic] = arm_id
+        expected_variants[semantic] = f"{page}+{close}"
+    if len(set(arm_map.values())) != 4 or len(set(expected_variants.values())) != 4:
+        raise ValueError("core factorial corners must name four distinct arms and variants")
+
+    screen = settings.get("week1", "screen_arms", "arms")
+    if not isinstance(screen, list) or not screen:
+        raise ValueError("week1 screen arm registry is empty")
+    arms: dict[str, dict] = {}
+    for raw in screen:
+        if not isinstance(raw, dict):
+            raise ValueError("week1 screen arm is not an object")
+        arm_id = str(raw.get("arm_id") or "")
+        if not arm_id or arm_id in arms:
+            raise ValueError(f"week1 screen has duplicate/unnamed arm {arm_id!r}")
+        arms[arm_id] = dict(raw)
+    for semantic, arm_id in arm_map.items():
+        configured = arms.get(arm_id)
+        if configured is None:
+            raise ValueError(f"core factorial arm {arm_id!r} is absent from the screen")
+        actual = (
+            f"{configured.get('page_variant')}+{configured.get('close_variant')}")
+        if actual != expected_variants[semantic]:
+            raise ValueError(
+                f"decision core_factorial.{semantic} disagrees with screen arm {arm_id}")
+
+    raw_variants = settings.get("variants", "variants")
+    if not isinstance(raw_variants, list) or not raw_variants:
+        raise ValueError("variant registry is empty")
+    variants: dict[str, dict] = {}
+    for raw in raw_variants:
+        if not isinstance(raw, dict):
+            raise ValueError("variant registry entry is not an object")
+        variant_id = str(raw.get("variant_id") or "")
+        if not variant_id or variant_id in variants:
+            raise ValueError(f"duplicate/unnamed variant {variant_id!r}")
+        variants[variant_id] = dict(raw)
+
+    matched = settings.get("week1", "matched_contrasts")
+    if not isinstance(matched, dict):
+        raise ValueError("week1 matched_contrasts is not an object")
+    executable_fields = tuple(map(
+        str, matched.get("executable_variant_fields") or ()))
+    requested_arms = {
+        str(pair.get(side) or "")
+        for pair in matched.get("pairs") or ()
+        if isinstance(pair, dict)
+        for side in ("left_arm_id", "right_arm_id")
+    }
+    if "" in requested_arms:
+        raise ValueError("matched contrast has an unnamed arm")
+    arm_variants: dict[str, dict] = {}
+    for arm_id in sorted(requested_arms):
+        arm = arms.get(arm_id)
+        if arm is None:
+            raise ValueError(f"matched contrast arm {arm_id!r} is absent from the screen")
+        arm_variants[arm_id] = resolve_arm_semantics(
+            arm_id,
+            arm,
+            variants,
+            executable_fields,
+        )
+    return arm_map, expected_variants, arm_variants
+
+
+def _write_e2e_analysis_once(path: Path, body: Mapping[str, Any]) -> str:
+    """Exclusively create the controlled analysis artifact, or prove idempotence."""
+    expected = dict(body)
+    digest = str(expected.get("content_sha256") or "")
+    if digest != _unsigned_content_sha256(expected):
+        raise ValueError("E2E analysis body is not correctly content addressed")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(expected, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(path, 0o440)
+        return "CREATED"
+    except FileExistsError:
+        existing = _load_content_addressed_json(path)
+        if existing != expected:
+            raise ValueError(
+                f"{path} already seals a different E2E analysis; output is write-once"
+            ) from None
+        return "EXISTING_IDENTICAL"
 
 
 # --- read-only ---------------------------------------------------------------------------
@@ -163,7 +452,8 @@ def doctor(
 
 @app.command("verify-approval")
 def verify_approval(
-    approval: Path = typer.Option(..., "--approval", help="protocol/launch_approval.json"),
+    approval: Path = typer.Option(
+        ..., "--approval", help="External append-only approval store's current pointer"),
     config: Path = _CFG,
 ) -> None:
     """Assert the approval binds the whole live configuration, not just three of its hashes.
@@ -172,10 +462,10 @@ def verify_approval(
     caller supplies and then compares against itself is a gate that cannot fail. A caller who
     *claims* a different SHA is a disagreement about which experiment is running, and fatal.
     """
-    from .protocol import ApprovalError, verify_approval_file
+    from .protocol import ApprovalError, verified_execution_binding
 
     try:
-        binding = verify_approval_file(_REPO, approval)
+        binding = verified_execution_binding(_REPO, approval_path=approval)
     except ApprovalError as e:
         _fail(f"approval mismatch: {e}")
 
@@ -322,7 +612,7 @@ def freeze_approval(
     approved_commit: str = typer.Option("", "--approved-commit"),
     approval: Path = typer.Option(None, "--approval"),
 ) -> None:
-    """Steward-only: record the approval for the configuration that is live right now."""
+    """Steward-only: record approval outside the clean Git execution tree."""
     from .protocol import ApprovalError, write_approval_file
 
     _require_role("steward")
@@ -342,7 +632,9 @@ def freeze_stack(
                                     help="The engine's startup log, for its attention backend"),
 ) -> None:
     """Steward-only: resolve every @STEWARD_FREEZES@ field into protocol/stack_manifest.json."""
+    from .campaign.evaluate import relation_prompt_sha256
     from .campaign.truth import truth_prompt_sha256
+    from .evaluation.atomizer import atomize_protocol_sha256
     from .ops.live_stack import (
         StackError,
         attention_backend_from_log,
@@ -366,8 +658,8 @@ def freeze_stack(
     if backend:
         observation.values["attention_backend"] = backend
     observation.values["truth_prompt_sha256"] = truth_prompt_sha256()
-    observation.values["atomize_prompt_sha256"] = truth_prompt_sha256()
-    observation.values["report_prompt_sha256"] = truth_prompt_sha256()
+    observation.values["atomize_prompt_sha256"] = atomize_protocol_sha256()
+    observation.values["report_prompt_sha256"] = relation_prompt_sha256()
     try:
         body = do_freeze(_REPO, stack, observation, frozen_at_utc=_now())
     except StackError as e:
@@ -422,12 +714,6 @@ def acquire(config: Path = _CFG,
         return ExaCaptureClient(client.exa_transport(task_id=task_id), params)
 
     outcome = asyncio.run(acquire_all(settings, client_factory=factory, fetched_at_utc=_now()))
-    if not outcome.incomplete and not outcome.blocked_credential:
-        _record_phase("ACQUISITION_COMPLETE", {
-            "acquired": outcome.tasks_acquired, "skipped": outcome.tasks_skipped,
-            "campaign_sha256": outcome.campaign_sha256, "usd": round(outcome.spend_usd, 4)})
-        _record_phase("SNAPSHOTS_FROZEN", {
-            "campaign_sha256": outcome.campaign_sha256})
     typer.echo(f"acquired={outcome.tasks_acquired} skipped={outcome.tasks_skipped} "
                f"queries ok/empty/failed={outcome.queries_ok}/{outcome.queries_empty}/"
                f"{outcome.queries_failed} root={outcome.campaign_sha256[:12]}")
@@ -437,30 +723,61 @@ def acquire(config: Path = _CFG,
 
 @app.command("build-truth")
 def build_truth(config: Path = _CFG) -> None:
-    """Evaluator-only: build a TruthPacket per acquired task from the frozen sources."""
+    """Steward-only: build evaluator-readable TruthPackets from the frozen sources.
+
+    The host permission boundary deliberately makes the steward the owner of both the sealed
+    acquisition inputs and the evaluator tree.  The evaluator is read-only on that tree and
+    scores the resulting packets later; requiring the evaluator here would leave it unable to
+    read the steward inputs or create the output files.
+    """
     from .campaign.acquire import acquired_task_ids
     from .campaign.truth import build_truth_for_task
     from .evaluation.judge_client import DeepSeekJudge
     from .providers.provider_client import PROVIDER_KEY_PLACEHOLDER
 
-    _require_role("evaluator")
+    _require_role("steward")
     settings = _settings()
-    client = _provider_client(settings, "evaluator")
+    client = _provider_client(settings, "steward")
     judge = DeepSeekJudge(
         client.deepseek_transport(op_class="JUDGE_TRUTH"),
         settings.judge_model(), PROVIDER_KEY_PLACEHOLDER,
+        max_retries=settings.judge_max_retries(),
+        sampling=settings.judge_sampling(),
     )
-    steward_tasks = settings.path("tasks")
+    evaluator_tasks = settings.path("evaluator_root") / "tasks"
     built = 0
     for task_id in acquired_task_ids(settings):
-        record = json.loads((steward_tasks / f"{task_id}.json").read_text(encoding="utf-8"))
+        record = json.loads(
+            (evaluator_tasks / f"{task_id}.json").read_text(encoding="utf-8"))
         asyncio.run(build_truth_for_task(
             settings, judge=judge, task_id=task_id,
-            question=record["treatment_visible"]["original_question"],
-            required_facets=record["acquisition_spec"]["authored_facets"],
+            question=record["original_question"],
+            required_facets=record["authored_facets"],
         ))
         built += 1
     typer.echo(f"truth packets built: {built}")
+
+
+@app.command("freeze-analysis-design")
+def freeze_analysis_design_command(config: Path = _CFG) -> None:
+    """Steward-only: freeze outcome-blind features and the eligibility spec once."""
+    from .analysis.design import freeze_analysis_design
+
+    _require_role("steward")
+    body = freeze_analysis_design(_settings())
+    registry = body["registry"]
+    spec = body["eligibility_spec"]
+    typer.echo(json.dumps({
+        "ok": True,
+        "tasks": len(registry["records"]),
+        "task_feature_registry_sha256":
+            registry["task_feature_registry_sha256"],
+        "eligibility_spec_sha256": spec["content_sha256"],
+        "analysis_design_receipt_sha256": body["receipt"]["content_sha256"],
+        "registry_path": body["registry_path"],
+        "eligibility_spec_path": body["eligibility_spec_path"],
+        "receipt_path": body["receipt_path"],
+    }, indent=2, sort_keys=True))
 
 
 # --- gates --------------------------------------------------------------------------------
@@ -479,7 +796,28 @@ def test_p0_parity(config: Path = _CFG) -> None:
     if result.returncode != 0:
         typer.echo(result.stderr[-4000:], err=True)
         _fail("P0 parity failed; all GPU screening is barred")
-    _record_phase("P0_PARITY_PASSED", {"probe": "tests/integration/parity_probe.py"})
+    from .canonical import canonical_json
+    from .hashing import sha256_hex
+    from .protocol import protocol_sha
+
+    probe_paths = (
+        _REPO / "tests" / "integration" / "test_p0_parity.py",
+        _REPO / "tests" / "integration" / "parity_probe.py",
+        _REPO / "patches" / "odr_p1_hooks.patch",
+    )
+    report = {
+        "status": "PASS",
+        "protocol_sha": protocol_sha(_REPO),
+        "probe": "tests/integration/test_p0_parity.py",
+        "probe_inputs_sha256": sha256_hex(canonical_json({
+            str(path.relative_to(_REPO)): sha256_hex(path.read_bytes())
+            for path in probe_paths
+        })),
+    }
+    report["content_sha256"] = sha256_hex(canonical_json(report))
+    path = _REPO / "reports" / "P0_PARITY_PASSED.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     typer.echo("p0 parity: ok")
 
 
@@ -514,6 +852,28 @@ def preflight(
         typer.echo(f"  {check['status']:4}  {check['name']}: {check['detail']}")
     if not body["ok"]:
         _fail("preflight: FAILED")
+    # Preflight is run by the runner after acquisition. It has just re-derived the sealed
+    # registry, every frozen world, the acquisition manifest and the P0 parity receipt, so it
+    # is the one identity that can safely advance the runner-owned phase spine without giving
+    # the truth-holding steward write access to treatment state.
+    parity = json.loads(
+        (_REPO / "reports" / "P0_PARITY_PASSED.json").read_text(encoding="utf-8"))
+    _record_phase("ACQUISITION_COMPLETE", {
+        "preflight_protocol_sha": body["protocol_sha"],
+        "campaign_manifest": next(
+            c["detail"] for c in body["checks"]
+            if c["name"] == "campaign_manifest_receipt"),
+        "analysis_design_receipt_sha256":
+            body["analysis_design_receipt_sha256"],
+    })
+    _record_phase("SNAPSHOTS_FROZEN", {
+        "frozen_world": next(
+            c["detail"] for c in body["checks"] if c["name"] == "frozen_world"),
+    })
+    _record_phase("P0_PARITY_PASSED", {
+        "receipt_sha256": parity["content_sha256"],
+        "probe_inputs_sha256": parity["probe_inputs_sha256"],
+    })
     typer.echo("preflight: ok")
 
 
@@ -527,9 +887,14 @@ def smoke(config: Path = _CFG,
 
     _assert_post_launch_flags(protocol_sha, resume)
     _require_role("runner")
-    _require_approval()
+    binding = _require_approval()
     settings = _settings()
-    body = asyncio.run(run_canary(settings, repo=_REPO, task_limit=tasks))
+    body = asyncio.run(run_canary(
+        settings,
+        repo=_REPO,
+        task_limit=tasks,
+        execution_binding_sha256=binding.digest,
+    ))
     path = _REPO / "reports" / "GPU_SMOKE_REPORT.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body["markdown"], encoding="utf-8")
@@ -555,8 +920,13 @@ def run_screen(config: Path = _CFG,
 
     _assert_post_launch_flags(protocol_sha, resume)
     _require_role("runner")
-    _require_approval()
-    body = asyncio.run(run_screening(_settings(), repo=_REPO, max_cells=max_cells))
+    binding = _require_approval()
+    body = asyncio.run(run_screening(
+        _settings(),
+        repo=_REPO,
+        max_cells=max_cells,
+        execution_binding_sha256=binding.digest,
+    ))
     typer.echo(json.dumps(body, indent=2, sort_keys=True))
     if not body.get("ok", False):
         raise typer.Exit(code=1)
@@ -571,21 +941,484 @@ def run_week1(config: Path = _CFG,
 
     _assert_post_launch_flags(protocol_sha, resume)
     _require_role("runner")
-    _require_approval()
-    body = asyncio.run(run_screening(_settings(), repo=_REPO, max_cells=None))
+    binding = _require_approval()
+    body = asyncio.run(run_screening(
+        _settings(),
+        repo=_REPO,
+        max_cells=None,
+        execution_binding_sha256=binding.digest,
+    ))
     typer.echo(json.dumps(body, indent=2, sort_keys=True))
     if not body.get("ok", False):
         raise typer.Exit(code=1)
 
 
 @app.command()
-def evaluate(config: Path = _CFG) -> None:
-    """Evaluator-only: score frozen outputs against the truth packets."""
+def evaluate(
+    config: Path = _CFG,
+    run_id: str = typer.Option(..., "--run-id"),
+    phase_id: str = typer.Option(..., "--phase-id"),
+    frozen_blocks_dir: Path = typer.Option(..., "--frozen-blocks-dir"),
+) -> None:
+    """Evaluator-only: score one exact run/phase from its immutable block manifests."""
     from .campaign.evaluate import evaluate_frozen
 
     _require_role("evaluator")
-    body = asyncio.run(evaluate_frozen(_settings(), repo=_REPO))
+    binding = _require_approval()
+    body = asyncio.run(evaluate_frozen(
+        _settings(), repo=_REPO, run_id=run_id,
+        phase_id=phase_id, frozen_blocks_dir=frozen_blocks_dir,
+        execution_binding_sha256=binding.digest,
+        protocol_document_sha256=binding.protocol_sha,
+    ))
     typer.echo(json.dumps(body, indent=2, sort_keys=True))
+
+
+@app.command("prepare-human-audit")
+def prepare_human_audit_command(
+    config: Path = _CFG,
+    run_id: str = typer.Option(..., "--run-id"),
+    phase_id: str = typer.Option(..., "--phase-id"),
+) -> None:
+    """Evaluator-only: freeze the content-addressed human-review queue."""
+    from .evaluation.human_audit_workflow import prepare_human_audit
+
+    _require_role("evaluator")
+    try:
+        body = prepare_human_audit(
+            _settings(), run_id=run_id, phase_id=phase_id)
+    except (KeyError, TypeError, ValueError) as exc:
+        _fail(f"prepare-human-audit failed: {exc}", code=2)
+    typer.echo(json.dumps(body, indent=2, sort_keys=True))
+
+
+@app.command("finalize-human-audit")
+def finalize_human_audit_command(
+    config: Path = _CFG,
+    run_id: str = typer.Option(..., "--run-id"),
+    phase_id: str = typer.Option(..., "--phase-id"),
+    results_json: Path = typer.Option(..., "--results-json"),
+) -> None:
+    """Evaluator-only: verify reviewer results and emit an audit-gate receipt."""
+    from .evaluation.human_audit_workflow import finalize_human_audit
+
+    _require_role("evaluator")
+    try:
+        results = json.loads(results_json.read_text(encoding="utf-8"))
+        if not isinstance(results, dict):
+            raise ValueError("human-audit results JSON must be an object")
+        body = finalize_human_audit(
+            _settings(),
+            run_id=run_id,
+            phase_id=phase_id,
+            results=results,
+        )
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        _fail(f"finalize-human-audit failed: {exc}", code=2)
+    typer.echo(json.dumps(body, indent=2, sort_keys=True))
+
+
+@app.command("analyze-itt")
+def analyze_itt(
+    config: Path = _CFG,
+    run_id: str = typer.Option(..., "--run-id"),
+    phase_id: str = typer.Option(..., "--phase-id"),
+) -> None:
+    """Build the frozen all-offered ITT estimands for one exact run/phase.
+
+    Output location and bootstrap policy come from the hash-locked protocol; neither is an
+    analyst-selected post-outcome option.
+    """
+    from .analysis.estimands import (
+        build_verdict_inputs,
+        load_scoped_scores,
+        write_verdict_inputs,
+    )
+    from .evaluation.human_audit_workflow import load_human_audit_receipt
+    from .scoped_paths import resolve_scoped_path
+
+    _require_role("evaluator")
+    settings = _settings()
+    records = load_scoped_scores(
+        settings.path("judgments"), run_id=run_id, phase_id=phase_id)
+
+    scope_receipt = getattr(records, "scope_receipt", None)
+    if not isinstance(scope_receipt, Mapping):
+        _fail("verified all-offered evaluation scope is absent", code=2)
+    analysis_binding = _verified_analysis_binding(
+        execution_binding_sha256=str(
+            scope_receipt.get("execution_binding_sha256") or ""
+        ),
+        protocol_document_sha256=str(
+            scope_receipt.get("protocol_document_sha256") or ""
+        ),
+    )
+    try:
+        # Cluster ownership is a pre-treatment feature.  It must come from the exact registry
+        # whose digest is bound by EVALUATION_SCOPE and the evaluator-side design receipt, not
+        # from mutable task-view JSON that merely happens to carry a cluster_id field.
+        task_features, _eligibility_spec, _design_bindings = (
+            _load_e2e_analysis_design(settings, scope_receipt)
+        )
+        cluster_by_task = {
+            task_id: str(record.get("cluster_id") or "")
+            for task_id, record in task_features.items()
+        }
+        if not cluster_by_task or any(not value for value in cluster_by_task.values()):
+            raise ValueError(
+                "frozen task-feature registry has a task without cluster_id")
+        truth_sha_by_task: dict[str, str] = {}
+        score_sha_by_block: dict[str, str] = {}
+        for record in records:
+            task_id = str(record.get("task_id") or "")
+            block_id = str(record.get("block_id") or "")
+            truth_sha = str(record.get("truth_packet_sha256") or "")
+            score_sha = str(record.get("content_sha256") or "")
+            if (
+                not task_id
+                or not block_id
+                or len(truth_sha) != 64
+                or len(score_sha) != 64
+            ):
+                raise ValueError(
+                    "evaluated score lacks task/block/truth/score content identity")
+            previous = truth_sha_by_task.setdefault(task_id, truth_sha)
+            if previous != truth_sha:
+                raise ValueError(
+                    f"task {task_id!r} was scored against multiple truth packets")
+            if block_id in score_sha_by_block:
+                raise ValueError(f"duplicate evaluated block {block_id!r}")
+            score_sha_by_block[block_id] = score_sha
+        human_audit_receipt = load_human_audit_receipt(
+            settings,
+            run_id=run_id,
+            phase_id=phase_id,
+            evaluation_scope_sha256=str(
+                scope_receipt["evaluation_scope_sha256"]),
+            execution_binding_sha256=str(
+                scope_receipt["execution_binding_sha256"]),
+            protocol_document_sha256=str(
+                scope_receipt["protocol_document_sha256"]),
+            truth_packet_sha256_by_task=truth_sha_by_task,
+            score_content_sha256_by_block=score_sha_by_block,
+        )
+        destination = resolve_scoped_path(
+            settings.path("judgments"),
+            run_id=run_id,
+            phase_id=phase_id,
+            tail=("analysis", "ITT_VERDICT_INPUTS.json"),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        _fail(f"analyze-itt failed: {exc}", code=2)
+
+    body = build_verdict_inputs(
+        records,
+        cluster_by_task=cluster_by_task,
+        n_boot=int(settings.get("decision", "e2e_analysis", "n_boot")),
+        seed_namespace=str(
+            settings.get("decision", "e2e_analysis", "seed_namespace")),
+        human_audit_receipt=human_audit_receipt,
+    )
+    body = dict(body)
+    body["analysis_execution_binding_sha256"] = analysis_binding.digest
+    body["analysis_approved_commit"] = analysis_binding.approved_commit
+    body["content_sha256"] = _unsigned_content_sha256(body)
+    digest = write_verdict_inputs(body, destination)
+    typer.echo(json.dumps({
+        "ok": True,
+        "run_id": run_id,
+        "phase_id": phase_id,
+        "blocks_offered": body["blocks_offered"],
+        "content_sha256": digest,
+        "output": str(destination),
+        "verdict_ready_arms": sorted(
+            arm for arm, value in body["arms"].items() if value["verdict_ready"]),
+    }, indent=2, sort_keys=True))
+
+
+@app.command("analyze-e2e")
+def analyze_e2e(
+    config: Path = _CFG,
+    run_id: str = typer.Option(..., "--run-id"),
+    phase_id: str = typer.Option(..., "--phase-id"),
+) -> None:
+    """Evaluator-only: build frozen factorial, eligibility, and matched-ablation results.
+
+    There is intentionally no output-path option.  An analyst cannot redirect a post-outcome
+    result over an arbitrary file; one exact run/phase owns one write-once
+    ``analysis/E2E_ANALYSIS.json`` under the evaluator judgment tree.
+    """
+    from .analysis.e2e_effects import build_e2e_effects
+    from .analysis.estimands import load_scoped_scores
+    from .analysis.matched import build_matched_contrasts
+    from .canonical import canonical_json
+    from .hashing import sha256_hex
+    from .scoped_paths import resolve_scoped_path
+
+    _require_role("evaluator")
+    settings = _settings()
+    records = load_scoped_scores(
+        settings.path("judgments"), run_id=run_id, phase_id=phase_id)
+    scope_receipt = getattr(records, "scope_receipt", None)
+    if not isinstance(scope_receipt, Mapping):
+        _fail("verified all-offered evaluation scope is absent", code=2)
+    analysis_binding = _verified_analysis_binding(
+        execution_binding_sha256=str(
+            scope_receipt.get("execution_binding_sha256") or ""
+        ),
+        protocol_document_sha256=str(
+            scope_receipt.get("protocol_document_sha256") or ""
+        ),
+    )
+
+    try:
+        task_features, eligibility_spec, design_bindings = (
+            _load_e2e_analysis_design(settings, scope_receipt)
+        )
+        arm_map, expected_variants, arm_variants = (
+            _e2e_semantic_mappings(settings)
+        )
+        analysis_cfg = settings.get("decision", "e2e_analysis")
+        n_boot = int(analysis_cfg["n_boot"])
+        seed_namespace = str(analysis_cfg["seed_namespace"])
+        quality_view = str(analysis_cfg["primary_quality_view"])
+        quality_metric = str(analysis_cfg["primary_quality_metric"])
+        if quality_view not in set(map(str, analysis_cfg["quality_views"])):
+            raise ValueError(
+                "primary quality view is absent from e2e_analysis")
+        if quality_metric not in set(map(str, analysis_cfg["quality_metrics"])):
+            raise ValueError(
+                "primary quality metric is absent from e2e_analysis")
+
+        e2e = build_e2e_effects(
+            records,
+            task_features=task_features,
+            eligibility_spec=eligibility_spec,
+            scope_receipt=scope_receipt,
+            arm_map=arm_map,
+            expected_variant_ids=expected_variants,
+            quality_view=quality_view,
+            quality_metric=quality_metric,
+            task_level_joint_outcomes_policy=settings.get(
+                "decision", "task_level_joint_outcomes"
+            ),
+            n_boot=n_boot,
+            seed_namespace=seed_namespace,
+        )
+        if str(e2e.get("content_sha256") or "") != _unsigned_content_sha256(e2e):
+            raise ValueError("E2E effects builder returned a non-verifying artifact")
+
+        cluster_by_task = {
+            task_id: str(record.get("cluster_id") or "")
+            for task_id, record in task_features.items()
+        }
+        seed_digest = sha256_hex(canonical_json({
+            "namespace": seed_namespace,
+            "run_id": run_id,
+            "phase_id": phase_id,
+            "week1_config_sha256": settings.shas["week1"],
+        }))
+        matched_seed = int(seed_digest[:8], 16)
+        matched = build_matched_contrasts(
+            records,
+            scope_receipt=scope_receipt,
+            cluster_by_task=cluster_by_task,
+            matched_contrasts=settings.get("week1", "matched_contrasts"),
+            arm_variants=arm_variants,
+            quality_views=analysis_cfg["quality_views"],
+            quality_metrics=analysis_cfg["quality_metrics"],
+            structured_increment_policy=settings.get(
+                "decision", "structured_increment"
+            ),
+            n_boot=n_boot,
+            seed=matched_seed,
+        )
+        if (
+            str(matched.get("content_sha256") or "")
+            != _unsigned_content_sha256(matched)
+        ):
+            raise ValueError(
+                "matched-contrast builder returned a non-verifying artifact")
+
+        body: dict[str, Any] = {
+            "schema_version": "e2e_analysis_bundle_v1",
+            "run_id": run_id,
+            "phase_id": phase_id,
+            "execution_binding_sha256":
+                str(scope_receipt["execution_binding_sha256"]),
+            "protocol_document_sha256":
+                str(scope_receipt["protocol_document_sha256"]),
+            "evaluation_scope_sha256":
+                str(scope_receipt["evaluation_scope_sha256"]),
+            "design_bindings": design_bindings,
+            "config_sha256": {
+                "decision": settings.shas["decision"],
+                "variants": settings.shas["variants"],
+                "week1": settings.shas["week1"],
+            },
+            "semantic_mapping": {
+                "core_arm_map": arm_map,
+                "core_expected_variant_ids": expected_variants,
+                "matched_arm_variants": arm_variants,
+            },
+            "analysis_policy": {
+                "n_boot": n_boot,
+                "seed_namespace": seed_namespace,
+                "matched_seed": matched_seed,
+                "analysis_execution_binding_sha256": analysis_binding.digest,
+                "analysis_approved_commit": analysis_binding.approved_commit,
+                "trajectory_checkpoint_divergence":
+                    "mediated_end_to_end_outcome_not_pairing_error",
+            },
+            "e2e_effects": e2e,
+            "matched_contrasts": matched,
+        }
+        body["content_sha256"] = sha256_hex(canonical_json(body))
+        destination = resolve_scoped_path(
+            settings.path("judgments"),
+            run_id=run_id,
+            phase_id=phase_id,
+            tail=("analysis", "E2E_ANALYSIS.json"),
+        )
+        write_status = _write_e2e_analysis_once(destination, body)
+    except (KeyError, TypeError, ValueError) as exc:
+        _fail(f"analyze-e2e failed: {exc}", code=2)
+
+    typer.echo(json.dumps({
+        "ok": True,
+        "run_id": run_id,
+        "phase_id": phase_id,
+        "blocks_offered": e2e["all_offered_blocks"],
+        "tasks": e2e["tasks"],
+        "clusters": e2e["clusters"],
+        "matched_contrasts": len(matched["contrasts"]),
+        "eligibility_status": e2e["eligibility"]["status"],
+        "content_sha256": body["content_sha256"],
+        "output": str(destination),
+        "write_status": write_status,
+    }, indent=2, sort_keys=True))
+
+
+@app.command("finalize-decision")
+def finalize_decision(
+    config: Path = _CFG,
+    run_id: str = typer.Option(..., "--run-id"),
+    phase_id: str = typer.Option(..., "--phase-id"),
+) -> None:
+    """Evaluator-only: render one provenance-bound P1 decision at fixed scoped paths.
+
+    There are intentionally no caller-selected input, output, threshold, or operational paths.
+    The command reads the two write-once analyses owned by this run/phase and writes JSON and
+    Markdown derived from one typed object.  It is an offline analysis command: it neither
+    spends resources nor treats the currently-invalidated launch approval as permission to run.
+    """
+    from .analysis.finalize import build_final_decision, write_final_decision
+    from .protocol import protocol_sha
+    from .scoped_paths import resolve_scoped_path
+
+    _require_role("evaluator")
+    settings = _settings()
+    analysis_dir = resolve_scoped_path(
+        settings.path("judgments"),
+        run_id=run_id,
+        phase_id=phase_id,
+        tail=("analysis",),
+    )
+    itt_path = analysis_dir / "ITT_VERDICT_INPUTS.json"
+    e2e_path = analysis_dir / "E2E_ANALYSIS.json"
+    json_path = analysis_dir / "WEEK1_P1_DECISION.json"
+    markdown_path = analysis_dir / "WEEK1_P1_DECISION.md"
+    audit_path = resolve_scoped_path(
+        settings.path("judgments"),
+        run_id=run_id,
+        phase_id=phase_id,
+        tail=("human_audit", "AUDITED_RECEIPT.json"),
+    )
+    # A future operational campaign has its own run/phase. Its fixed parent-binding receipt is
+    # placed beside the causal analysis it extends; the finalizer verifies the independent
+    # operational scope plus both parent causal hashes before using it.
+    operational_path = analysis_dir / "OPERATIONAL_EVIDENCE.json"
+    try:
+        itt = _load_content_addressed_json(itt_path)
+        e2e = _load_content_addressed_json(e2e_path)
+        audit = (
+            _load_content_addressed_json(audit_path)
+            if audit_path.is_file()
+            else None
+        )
+        operational = (
+            _load_content_addressed_json(operational_path)
+            if operational_path.is_file()
+            else None
+        )
+        analysis_binding = _verified_analysis_binding(
+            execution_binding_sha256=str(
+                itt.get("execution_binding_sha256") or ""
+            ),
+            protocol_document_sha256=str(
+                itt.get("protocol_document_sha256") or ""
+            ),
+        )
+        policy = e2e.get("analysis_policy")
+        if (
+            not isinstance(policy, Mapping)
+            or str(itt.get("analysis_execution_binding_sha256") or "")
+            != analysis_binding.digest
+            or str(itt.get("analysis_approved_commit") or "")
+            != analysis_binding.approved_commit
+            or str(policy.get("analysis_execution_binding_sha256") or "")
+            != analysis_binding.digest
+            or str(policy.get("analysis_approved_commit") or "")
+            != analysis_binding.approved_commit
+            or str(e2e.get("execution_binding_sha256") or "")
+            != str(itt.get("execution_binding_sha256") or "")
+            or str(e2e.get("protocol_document_sha256") or "")
+            != analysis_binding.protocol_sha
+        ):
+            raise ValueError(
+                "ITT/E2E analysis artifacts are not bound to the same live approved "
+                "analysis implementation and frozen treatment/protocol"
+            )
+        if markdown_path.exists() and not json_path.exists():
+            raise ValueError(
+                "partial final decision exists (Markdown without JSON); generated identity "
+                "cannot be recovered safely"
+            )
+        if json_path.exists():
+            previous = _load_content_addressed_json(json_path)
+            generated_at_utc = str(previous.get("generated_at_utc") or "")
+        else:
+            generated_at_utc = _now()
+        decision = build_final_decision(
+            itt,
+            e2e,
+            decision_config=settings.configs["decision"],
+            week1_config=settings.configs["week1"],
+            variants_config=settings.configs["variants"],
+            operational_evidence=operational,
+            human_audit_receipt=audit,
+            protocol_sha=protocol_sha(_REPO),
+            generated_at_utc=generated_at_utc,
+        )
+        write_status = write_final_decision(
+            decision,
+            json_path=json_path,
+            markdown_path=markdown_path,
+        )
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        _fail(f"finalize-decision failed: {exc}", code=2)
+    typer.echo(json.dumps({
+        "ok": True,
+        "run_id": run_id,
+        "phase_id": phase_id,
+        "content_sha256": decision.to_json_obj()["content_sha256"],
+        "verdict_status": decision.verdict_status,
+        "operational_status": decision.operational_status,
+        "claim_scope": decision.claim_scope,
+        "json_output": str(json_path),
+        "markdown_output": str(markdown_path),
+        "write_status": write_status,
+    }, indent=2, sort_keys=True))
 
 
 @app.command("stop-safely")
@@ -614,9 +1447,10 @@ def release_holdout(config: Path = _CFG) -> None:
     if not bool(settings.get("week1", "campaign", "open_holdout")):
         _fail("configs/week1.yaml sets open_holdout: false -- this corpus is FORMATIVE_ONLY and "
               "has no confirmatory holdout to release")
+    binding = _require_approval()
     ledger = Ledger(str(settings.data_root / str(settings.get("week1", "paths", "runs"))
                         / "ledger.sqlite"))
-    phases = PhaseStore(ledger, protocol_sha=settings.shas["week1"])
+    phases = PhaseStore(ledger, protocol_sha=binding.digest)
     if not phases.is_complete(Phase.POLICY_FROZEN):
         ledger.close()
         _fail("holdout release requires POLICY_FROZEN; releasing earlier would let the holdout "

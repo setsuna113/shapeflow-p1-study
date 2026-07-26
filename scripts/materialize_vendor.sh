@@ -18,7 +18,12 @@ rm -rf .build/odr-pristine .build/open_deep_research-patched
 mkdir -p .build/odr-pristine .build/open_deep_research-patched
 git -C vendor/open_deep_research archive HEAD | tar -x -C .build/odr-pristine
 git -C vendor/open_deep_research archive HEAD | tar -x -C .build/open_deep_research-patched
-git apply --directory=.build/open_deep_research-patched patches/odr_p1_hooks.patch
+# The publication hook is a pure insertion immediately after vendor's list-comprehension.
+# A zero-context hunk avoids copying the vendor line that contains intentional trailing
+# whitespace into this tracked patch (which would fail the repository whitespace gate). The
+# vendor commit pin and the final patched-tree hash still bind the exact input and output bytes.
+git apply --unidiff-zero --directory=.build/open_deep_research-patched \
+  patches/odr_p1_hooks.patch
 
 # Prefer the project venv when it exists, then python3: a bare `python` is absent
 # on the run host and the hash check would silently not run.

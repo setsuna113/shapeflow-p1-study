@@ -19,9 +19,11 @@ consulted: reverse-mapping a model-written page summary back to the page it summ
 credit the compressor with text it never received, which is the ``C_REGISTRY`` treatment and a
 different experiment.
 
-**AI reasoning is context, never evidence.** Spans whose message is assistant-authored stay
-``MODEL_DERIVED_CONTEXT``. They may carry a plan or a gap marker, but they can never make a
-truth atom count as visible, because the model asserting something is not the source saying it.
+**Only capture-time-attributed tool output is evidence.** Spans whose message is
+assistant-authored stay ``MODEL_DERIVED_CONTEXT``. Tool messages with no capture-time source
+occurrence stay ``TOOL_UNATTRIBUTED_CONTEXT``. Both may carry useful context, but neither can
+make a truth atom count as visible: the model asserting something is not the source saying it,
+and a tool-shaped string is not a citable source when its provenance was never captured.
 
 **Evaluator-only.** This module runs after treatment output is frozen, under the evaluator
 identity, and nothing it produces is ever handed back to a selector, aggregator or preflight.
@@ -29,8 +31,9 @@ identity, and nothing it produces is ever handed back to a selector, aggregator 
 
 from __future__ import annotations
 
+import math
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Optional, Sequence
 
 from ..canonical import canonical_json
 from ..hashing import sha256_hex
@@ -49,7 +52,7 @@ EXPLICITLY_VISIBLE = "EXPLICITLY_VISIBLE"
 NOT_VISIBLE = "NOT_VISIBLE"
 AMBIGUOUS = "AMBIGUOUS"
 
-#: Only tool output can carry evidence. An assistant message is the model talking to itself.
+#: Only tool output with capture-time source provenance can carry evidence.
 _EVIDENCE_KINDS = frozenset({"TOOL_EVIDENCE"})
 
 
@@ -139,7 +142,7 @@ def project_visible_truth(
     spans: Sequence[dict],
     span_texts: dict,
     atoms: Iterable[tuple[str, str]],
-    decider: Optional[VisibilityDecider] = None,
+    decider: VisibilityDecider | None = None,
     projection_prompt_hash: str = "",
 ) -> VisibleTruthProjection:
     """Decide, for each truth atom, whether the compressor's input carried it.
@@ -147,10 +150,11 @@ def project_visible_truth(
     ``spans`` are visible-message spans; ``span_texts`` maps span id to its exact bytes decoded
     as text; ``atoms`` is ``(atom_id, atom_text)``.
 
-    Only ``TOOL_EVIDENCE`` spans can make an atom visible. A ``MODEL_DERIVED_CONTEXT`` span --
-    the researcher's own reasoning -- may mention the same fact, but the model asserting
-    something is not the source saying it, and treating it as visible evidence would let the
-    compressor be credited for information nothing in its input actually established.
+    Only ``TOOL_EVIDENCE`` spans can make an atom visible. A
+    ``MODEL_DERIVED_CONTEXT`` span -- the researcher's own reasoning -- may mention the same
+    fact, and a ``TOOL_UNATTRIBUTED_CONTEXT`` span may look like a search result, but neither
+    has source provenance. Treating either as visible evidence would credit the compressor
+    with evidence the capture-time record cannot establish.
     """
     decide = decider or _lexical_decider()
     evidence_spans = [s for s in spans if s.get("kind") in _EVIDENCE_KINDS]
@@ -191,7 +195,21 @@ def project_visible_truth(
         projection_model_prompt_hash=projection_prompt_hash,
         notes={
             "evidence_spans": len(evidence_spans),
-            "model_derived_spans": len(spans) - len(evidence_spans),
+            "model_derived_spans": sum(
+                1 for span in spans
+                if span.get("kind") == "MODEL_DERIVED_CONTEXT"
+            ),
+            "unattributed_tool_spans": sum(
+                1 for span in spans
+                if span.get("kind") == "TOOL_UNATTRIBUTED_CONTEXT"
+            ),
+            "user_context_spans": sum(
+                1 for span in spans
+                if span.get("kind") == "USER_CONTEXT"
+            ),
+            "non_citable_context_spans": sum(
+                1 for span in spans if span.get("kind") not in _EVIDENCE_KINDS
+            ),
         },
     )
 
@@ -200,8 +218,8 @@ def visible_recall(
     projection: VisibleTruthProjection,
     retained_atom_ids: Iterable[str],
     *,
-    weights: Optional[dict] = None,
-) -> Optional[float]:
+    weights: dict | None = None,
+) -> float | None:
     """Weighted recall over the ``EXPLICITLY_VISIBLE`` atoms only.
 
     Returns ``None`` when nothing was visible: with an empty denominator there is no question to
@@ -210,8 +228,32 @@ def visible_recall(
     visible = projection.explicitly_visible_ids
     if not visible:
         return None
-    weights = weights or {}
     retained = set(retained_atom_ids)
-    total = sum(float(weights.get(a, 1.0)) for a in visible)
-    kept = sum(float(weights.get(a, 1.0)) for a in visible if a in retained)
+    if weights is None:
+        resolved_weights = {atom_id: 1.0 for atom_id in visible}
+    else:
+        missing = set(visible) - set(weights)
+        if missing:
+            raise ValueError(
+                "visible truth atoms lack frozen weights: "
+                f"{sorted(missing)}"
+            )
+        resolved_weights: dict[str, float] = {}
+        for atom_id in visible:
+            raw = weights[atom_id]
+            if isinstance(raw, bool):
+                raise ValueError(
+                    f"visible truth atom {atom_id!r} has a boolean weight")
+            try:
+                weight = float(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"visible truth atom {atom_id!r} has a non-numeric weight"
+                ) from exc
+            if not math.isfinite(weight) or weight < 0:
+                raise ValueError(
+                    f"visible truth atom {atom_id!r} has an invalid weight {raw!r}")
+            resolved_weights[atom_id] = weight
+    total = sum(resolved_weights[a] for a in visible)
+    kept = sum(resolved_weights[a] for a in visible if a in retained)
     return kept / total if total else None

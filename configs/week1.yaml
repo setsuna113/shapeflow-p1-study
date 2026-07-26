@@ -1,8 +1,8 @@
 # The Week-1 campaign configuration (plan §4.2, §14).
 #
-# Hash-locked like every other config: its config_sha enters protocol/launch_approval.json, so a
-# changed arm set, split size or canary definition invalidates the approval instead of quietly
-# altering what runs.
+# Hash-locked like every other config: its config_sha enters the external append-only approval
+# binding, so a changed arm set, split size or canary definition invalidates the approval
+# instead of quietly altering what runs.
 #
 # Deliberately host-independent. Absolute paths live in SHAPEFLOW_DATA_ROOT (an environment
 # variable, not hashed) and only the relative layout is declared here -- otherwise the authoring
@@ -126,33 +126,129 @@ measurement:
 # results look is outcome-dependent design.
 canary:
   tasks: 4
+  # Run every arm that the full screen will run.  This is slightly more expensive than a
+  # seven-arm smoke, but it prevents an untested hierarchical/bridge/C arm from consuming the
+  # remaining 700+ cells and makes the cost forecast arm-stratified rather than extrapolating
+  # cheap core arms onto more expensive variants.
   arms:
     - {arm_id: P0, page_variant: P0, close_variant: P0}
-    - {arm_id: H_ID, page_variant: H02, close_variant: P0}
-    - {arm_id: H_TYPED, page_variant: H03, close_variant: P0}
-    - {arm_id: C_VISIBLE, page_variant: P0, close_variant: C01}
+    - {arm_id: H_FIXED_ID, page_variant: H01, close_variant: P0}
+    - {arm_id: H_MARKDOWN_ID, page_variant: H02, close_variant: P0}
+    - {arm_id: H_TYPED_STABLE, page_variant: H_TYPED_STABLE, close_variant: P0}
+    - {arm_id: H_TYPED_COVERAGE, page_variant: H03, close_variant: P0}
+    - {arm_id: H_HIER_COVERAGE, page_variant: H_HIER_COVERAGE, close_variant: P0}
+    - {arm_id: H_HIERARCHICAL, page_variant: H04, close_variant: P0}
+    - {arm_id: H_BRIDGE, page_variant: H05, close_variant: P0}
+    - {arm_id: C_ID, page_variant: P0, close_variant: C01}
+    - {arm_id: C_TYPED_STABLE, page_variant: P0, close_variant: C_TYPED_STABLE}
+    - {arm_id: C_TYPED_COVERAGE, page_variant: P0, close_variant: C02}
+    - {arm_id: C_BRIDGE, page_variant: P0, close_variant: C03}
     - {arm_id: H_PLUS_C, page_variant: H02, close_variant: C01}
-    - {arm_id: CPU_LEXICAL, page_variant: H00-CPU, close_variant: P0}
-    - {arm_id: SHORT_PROSE, page_variant: H00-PROSE, close_variant: P0}
+    - {arm_id: H_PLUS_C_CPU_CONTROL, page_variant: H00-CPU, close_variant: C00-CPU}
+    - {arm_id: H_PLUS_C_PROSE_CONTROL, page_variant: H00-PROSE, close_variant: C00-PROSE}
+    - {arm_id: H_CPU_CONTROL, page_variant: H00-CPU, close_variant: P0}
+    - {arm_id: H_PROSE_CONTROL, page_variant: H00-PROSE, close_variant: P0}
+    - {arm_id: C_CPU_CONTROL, page_variant: P0, close_variant: C00-CPU}
+    - {arm_id: C_PROSE_CONTROL, page_variant: P0, close_variant: C00-PROSE}
 
-# Forked-state component screening (plan §14.4): every boundary state always carries P0, and the
-# assigned P1/control variants fork from the same checkpoint hash so the contrast is within a
-# state rather than across two different worlds.
+# Full formative E2E screen. The canary is intentionally shallow in tasks but deliberately runs
+# the exact same 19-arm semantic set, so every expensive mechanism has an engineering and cost
+# observation before the screen. Complete within-task blocks keep comparisons paired while
+# exercising every currently runnable H/C mechanism and both node-specific controls. The
+# explicit one-factor matched contrasts below remove contract/aggregation/scope confounding
+# without making an HTML/DOM claim.
+screen_arms:
+  arms:
+    - {arm_id: P0, page_variant: P0, close_variant: P0}
+    - {arm_id: H_FIXED_ID, page_variant: H01, close_variant: P0}
+    - {arm_id: H_MARKDOWN_ID, page_variant: H02, close_variant: P0}
+    - {arm_id: H_TYPED_STABLE, page_variant: H_TYPED_STABLE, close_variant: P0}
+    - {arm_id: H_TYPED_COVERAGE, page_variant: H03, close_variant: P0}
+    - {arm_id: H_HIER_COVERAGE, page_variant: H_HIER_COVERAGE, close_variant: P0}
+    - {arm_id: H_HIERARCHICAL, page_variant: H04, close_variant: P0}
+    - {arm_id: H_BRIDGE, page_variant: H05, close_variant: P0}
+    - {arm_id: C_ID, page_variant: P0, close_variant: C01}
+    - {arm_id: C_TYPED_STABLE, page_variant: P0, close_variant: C_TYPED_STABLE}
+    - {arm_id: C_TYPED_COVERAGE, page_variant: P0, close_variant: C02}
+    - {arm_id: C_BRIDGE, page_variant: P0, close_variant: C03}
+    - {arm_id: H_PLUS_C, page_variant: H02, close_variant: C01}
+    - {arm_id: H_PLUS_C_CPU_CONTROL, page_variant: H00-CPU, close_variant: C00-CPU}
+    - {arm_id: H_PLUS_C_PROSE_CONTROL, page_variant: H00-PROSE, close_variant: C00-PROSE}
+    - {arm_id: H_CPU_CONTROL, page_variant: H00-CPU, close_variant: P0}
+    - {arm_id: H_PROSE_CONTROL, page_variant: H00-PROSE, close_variant: P0}
+    - {arm_id: C_CPU_CONTROL, page_variant: P0, close_variant: C00-CPU}
+    - {arm_id: C_PROSE_CONTROL, page_variant: P0, close_variant: C00-PROSE}
+
+# Pre-declared one-factor contrasts. Each entry names two full E2E arm IDs and every executable
+# variant field that is allowed to differ. Tests resolve the arms through variants.yaml and
+# require the observed difference set to equal factor_fields exactly. Bridge caps belong to the
+# bridge contract, so they are contract-owned fields in the two typed-vs-bridge contrasts.
+# Because this block lives in week1.yaml, changing a pair, level, or allowed field changes
+# week1_sha and invalidates the launch approval.
+matched_contrasts:
+  version: matched_contrasts_v2
+  executable_variant_fields:
+    - node
+    - chunker
+    - scope
+    - contract
+    - aggregation
+    - close_mode
+    - selector_backend
+    - publication_path
+    - output_representation
+    - bridge_token_cap_each
+    - bridge_token_cap_total
+  pairs:
+    - {contrast_id: H_ID_VS_TYPED, kind: ID_vs_TYPED, left_arm_id: H_MARKDOWN_ID, right_arm_id: H_TYPED_STABLE, target_factor: contract, left_level: P1_ID, right_level: P1_TYPED, factor_fields: [contract, output_representation]}
+    - {contrast_id: C_ID_VS_TYPED, kind: ID_vs_TYPED, left_arm_id: C_ID, right_arm_id: C_TYPED_STABLE, target_factor: contract, left_level: P1_ID, right_level: P1_TYPED, factor_fields: [contract, output_representation]}
+    - {contrast_id: H_STABLE_VS_COVERAGE, kind: stable_vs_coverage, left_arm_id: H_TYPED_STABLE, right_arm_id: H_TYPED_COVERAGE, target_factor: aggregation, left_level: stable_union_v1, right_level: coverage_budget_v1, factor_fields: [aggregation]}
+    - {contrast_id: C_STABLE_VS_COVERAGE, kind: stable_vs_coverage, left_arm_id: C_TYPED_STABLE, right_arm_id: C_TYPED_COVERAGE, target_factor: aggregation, left_level: stable_union_v1, right_level: coverage_budget_v1, factor_fields: [aggregation]}
+    - {contrast_id: H_PER_PAGE_VS_HIERARCHICAL, kind: per_page_vs_hierarchical, left_arm_id: H_TYPED_COVERAGE, right_arm_id: H_HIER_COVERAGE, target_factor: scope, left_level: per_page, right_level: hierarchical, factor_fields: [scope]}
+    - {contrast_id: H_TYPED_VS_BRIDGE, kind: typed_vs_bridge, left_arm_id: H_HIER_COVERAGE, right_arm_id: H_BRIDGE, target_factor: contract, left_level: P1_TYPED, right_level: P1_BRIDGE, factor_fields: [contract, output_representation, bridge_token_cap_each, bridge_token_cap_total]}
+    - {contrast_id: C_TYPED_VS_BRIDGE, kind: typed_vs_bridge, left_arm_id: C_TYPED_COVERAGE, right_arm_id: C_BRIDGE, target_factor: contract, left_level: P1_TYPED, right_level: P1_BRIDGE, factor_fields: [contract, output_representation, bridge_token_cap_each, bridge_token_cap_total]}
+    # CPU is now a genuinely one-factor selector-backend control: it emits P1_ID, uses the same
+    # stable aggregator/renderer/preflight, and greedily obeys the exact same rendered-token
+    # budget. A fixed top-k control would confound backend with selected cardinality.
+    - {contrast_id: H_LLM_VS_CPU, kind: LLM_vs_CPU, left_arm_id: H_MARKDOWN_ID, right_arm_id: H_CPU_CONTROL, target_factor: selector_backend, left_level: LLM, right_level: CPU_LEXICAL, factor_fields: [selector_backend]}
+    # SHORT_PROSE deliberately uses another publication path. It is a whole-mechanism control
+    # for structured pointers versus generic short summarization, not a contract-only ablation.
+    - {contrast_id: H_ID_VS_PROSE, kind: structured_selection_vs_prose, left_arm_id: H_MARKDOWN_ID, right_arm_id: H_PROSE_CONTROL, target_factor: publication_path, left_level: STRUCTURED_SELECTION, right_level: DIRECT_PROSE, factor_fields: [contract, publication_path, output_representation]}
+    - {contrast_id: C_LLM_VS_CPU, kind: LLM_vs_CPU, left_arm_id: C_ID, right_arm_id: C_CPU_CONTROL, target_factor: selector_backend, left_level: LLM, right_level: CPU_LEXICAL, factor_fields: [selector_backend]}
+    - {contrast_id: C_ID_VS_PROSE, kind: structured_selection_vs_prose, left_arm_id: C_ID, right_arm_id: C_PROSE_CONTROL, target_factor: publication_path, left_level: STRUCTURED_SELECTION, right_level: DIRECT_PROSE, factor_fields: [contract, publication_path, output_representation]}
+    # These two comparisons randomize the entire H+C policy from the same pre-H state. The
+    # first H input must match, while later C inputs/trajectories may differ as mediated E2E
+    # outcomes. They identify a joint configuration increment, not a fixed-C-checkpoint reducer.
+    - {contrast_id: HC_LLM_VS_CPU, kind: LLM_vs_CPU, left_arm_id: H_PLUS_C, right_arm_id: H_PLUS_C_CPU_CONTROL, target_factor: selector_backend, left_level: {page: LLM, close: LLM}, right_level: {page: CPU_LEXICAL, close: CPU_LEXICAL}, factor_fields: [selector_backend], factor_scope: JOINT_E2E_POLICY, affected_nodes: [WEBPAGE_P1, C_VISIBLE], first_treatment_boundary: WEBPAGE_P1}
+    - {contrast_id: HC_ID_VS_PROSE, kind: structured_selection_vs_prose, left_arm_id: H_PLUS_C, right_arm_id: H_PLUS_C_PROSE_CONTROL, target_factor: publication_path, left_level: {page: STRUCTURED_SELECTION, close: STRUCTURED_SELECTION}, right_level: {page: DIRECT_PROSE, close: DIRECT_PROSE}, factor_fields: [contract, publication_path, output_representation], factor_scope: JOINT_E2E_POLICY, affected_nodes: [WEBPAGE_P1, C_VISIBLE], first_treatment_boundary: WEBPAGE_P1}
+
+# The primary screening estimand is coupled-seed end-to-end ITT. Every arm runs the complete
+# graph from the same task/replicate seed. Search results, reasoning trajectory and later
+# checkpoints may diverge after P1's first intervention; that divergence is part of P1's effect.
+# A separate component-only command may replay reducers at exactly the same H/C checkpoint, but
+# it is unavailable until the actual graph has a validated boundary-resume backend.
 screen:
   split: FORMATIVE_SCREEN
-  # Which arm set screening runs. `canary` is the primary 2x2 (P0, H, C_VISIBLE, H+C) plus
-  # H-typed and both controls -- seven arms, run as COMPLETE blocks so every task sees every arm.
-  #
-  # This is a deliberate, declared narrowing of plan section 14.4, which assigns 2-3 P1 variants
-  # per boundary state from the full sixteen-variant registry under a balanced incomplete design.
-  # Complete blocks over seven arms answer "does P1 work, and is it the pointer mechanism or just
-  # fewer tokens" with the controls in every block; the full registry sweep would cost roughly
-  # five times the GPU hours and explores design space this formative round does not need to
-  # settle. The nine unrun variants are unrun, not eliminated, and the report says so.
-  arms_block: canary
+  primary_estimand: COUPLED_SEED_E2E_ITT
+  component_estimand: SAME_CHECKPOINT_REDUCER_REQUIRES_BOUNDARY_BACKEND
+  # The small canary proves the plumbing. The actual screen uses every runnable H/C mechanism,
+  # their node-specific controls, and the core 2x2. Non-runnable extensions stay explicitly
+  # unrun; they may not be substituted by a differently-defined fallback.
+  arms_block: screen_arms
   max_h_states: 48
   max_c_states: 48
   variants_per_state: 5
+  # 19 arms x (32 primary tasks + an exact 8-task second-seed subset) = 760 screen cells.
+  # The 4-task x 19-arm canary adds 76, for 836 total. The 150 GPU-hour cap therefore permits a
+  # campaign-wide weighted mean of about 646 GPU-seconds per completed cell, including retries.
+  # provider.gpu_seconds_worst_case is per inference request, not per graph cell, so multiplying
+  # a request ceiling by the cell count would be a false budget proof: each cell makes a
+  # treatment-dependent number of requests. The canary must report an arm-stratified forecast
+  # using each arm's observed canary maximum; the hard ledger cap remains authoritative.
+  #
+  # The partial second seed is not a second independent task sample. It is a pre-treatment,
+  # hash-ranked sensitivity sample that reveals whether the observed task-level effect is
+  # brittle to model/search stochasticity without silently doubling the whole campaign.
   second_seed_fraction: 0.25
   seeds: [1, 2]
   # A block enters the primary comparison only when every cell in it is terminal. A partial

@@ -7,6 +7,8 @@ version: v0.1
 model:
   repo: Qwen/Qwen3-14B-AWQ
   path: /storage/nvme/reme/models/Qwen3-14B-AWQ
+  tokenizer_file: tokenizer.json
+  tokenizer_runtime: tokenizers.Tokenizer.from_file:add_special_tokens=false
   enable_thinking: false
   quantization: awq
   kv_dtype: auto
@@ -68,6 +70,14 @@ host:
 determinism:
   pythonhashseed: 0
   timezone: UTC
+
+evaluation:
+  # Code-derived measurement identities, frozen by the steward and re-derived read-only by
+  # doctor.  They belong in the live stack manifest: changing any of them changes the answer
+  # key or scoring policy even when model weights and runtime bytes are unchanged.
+  atomize_prompt_sha256: "@STEWARD_FREEZES@"
+  truth_prompt_sha256: "@STEWARD_FREEZES@"
+  report_prompt_sha256: "@STEWARD_FREEZES@"
 
 isolation:
   # Two measurement layers, two SEPARATE vLLM units. These values are the source of truth for

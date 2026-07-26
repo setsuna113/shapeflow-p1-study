@@ -102,10 +102,21 @@ def _source_key(span: dict) -> str:
 
 
 def _order_key(span: dict) -> tuple:
+    if span.get("namespace") == "VISIBLE_MESSAGE":
+        # The compressor saw one byte stream.  message_id does not encode its order and may be
+        # random, so it cannot be the primary key for C_VISIBLE publication.
+        return (
+            "VISIBLE_MESSAGE",
+            span.get("visible_compressor_view_hash", ""),
+            span.get("byte_start", 0),
+            span.get("byte_end", 0),
+            span.get("visible_span_id") or span.get("span_id", ""),
+        )
     return (
         span.get("namespace", ""),
         _source_key(span),
         span.get("char_start", span.get("byte_start", 0)),
+        span.get("char_end", span.get("byte_end", 0)),
         span.get("span_id") or span.get("visible_span_id", ""),
     )
 
@@ -150,6 +161,7 @@ def coverage_budget_v1(
     token_budget: int,
     coster: Coster,
     min_sources: int = 1,
+    _selection_rank: Optional[dict[str, int]] = None,
 ) -> AggregatedEvidence:
     """Greedily include selections under a rendered-token budget, keeping contradiction pairs
     intact and a minimum number of distinct sources."""
@@ -178,7 +190,17 @@ def coverage_budget_v1(
         roles = {r for _, r in it.relations if r}
         return min((_ROLE_RANK.get(r, 2) for r in roles), default=2)
 
-    items.sort(key=lambda it: (rank(it), _order_key(registry[it.span_id])))
+    if _selection_rank is None:
+        items.sort(key=lambda it: (rank(it), _order_key(registry[it.span_id])))
+    else:
+        # The global selector's output order is its reranking signal. Canonical source order is
+        # restored for rendering below, but budget admission must honor the ranking or
+        # global_rerank_v1 is just coverage_budget_v1 under another label.
+        items.sort(key=lambda it: (
+            _selection_rank.get(it.span_id, len(_selection_rank)),
+            rank(it),
+            _order_key(registry[it.span_id]),
+        ))
 
     kept: list[AggregatedItem] = []
     kept_sources: set[str] = set()
@@ -243,12 +265,22 @@ def global_rerank_v1(
     """Rerank a hierarchical shortlist by an optional score (desc), then apply the same
     budgeted inclusion. Still emits ids only; its own LLM work is accounted separately by the
     caller, never hidden here."""
-    scores = scores or {}
-    reordered = sorted(
-        sel.items,
-        key=lambda it: (-scores.get(it.span_id, 0.0), _order_key(registry[it.span_id])),
-    )
+    if scores is None:
+        # Structured output has no score field. Its stable list order is therefore the only
+        # ranking the global model emitted; discarding it made this aggregator behaviorally
+        # identical to coverage_budget_v1.
+        rank_by_id = {item.span_id: i for i, item in enumerate(sel.items)}
+    else:
+        ranked = sorted(
+            sel.items,
+            key=lambda it: (-scores.get(it.span_id, 0.0), _order_key(registry[it.span_id])),
+        )
+        rank_by_id = {item.span_id: i for i, item in enumerate(ranked)}
+    reordered = sorted(sel.items, key=lambda it: rank_by_id[it.span_id])
     reranked = ParsedSelection(
         contract=sel.contract, items=tuple(reordered), gaps=sel.gaps, bridges=sel.bridges
     )
-    return coverage_budget_v1(reranked, registry, token_budget=token_budget, coster=coster)
+    return coverage_budget_v1(
+        reranked, registry, token_budget=token_budget, coster=coster,
+        _selection_rank=rank_by_id,
+    )

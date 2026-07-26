@@ -26,6 +26,7 @@ VLLM_VENV="${SHAPEFLOW_VLLM_VENV:-/storage/nvme/drbat/.venv}"
 MODEL_PATH="${SHAPEFLOW_MODEL_PATH:-/storage/nvme/reme/models/Qwen3-14B-AWQ}"
 GPU_UUID="${SHAPEFLOW_GPU_UUID:-GPU-ef013951-e496-78da-da70-a5a289dcc634}"
 PORT="${SHAPEFLOW_VLLM_PORT:-8000}"
+ENGINE_EPOCH_FILE="${SHAPEFLOW_ENGINE_EPOCH_FILE:-/run/shapeflow-vllm-causal/engine_epoch}"
 
 [ "$(id -u)" -eq 0 ] || { echo "start_engine.sh switches identity and must run as root" >&2; exit 1; }
 
@@ -36,6 +37,11 @@ if [ "${FOREIGN:-0}" -gt 0 ] && [ "${MINE:-0}" -eq 0 ]; then
   echo "the GPU has $FOREIGN compute process(es) that are not ours; refusing to start" >&2
   exit 1
 fi
+
+# Manual/supervised launches need the same per-boot identity as the systemd unit.  This happens
+# once immediately before the supervisor takes ownership of the engine process.
+"${SHAPEFLOW_PYTHON:-$REPO/.venv/bin/python}" \
+  "$REPO/scripts/write_engine_epoch.py" "$ENGINE_EPOCH_FILE"
 
 exec setsid /usr/local/bin/sfsupervise vllm-causal sfinfer "$REPO" "$DATA_ROOT" -- \
   env HOME=/tmp \

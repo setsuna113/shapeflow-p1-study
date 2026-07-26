@@ -46,6 +46,8 @@ __all__ = [
     "OfferedCandidate",
     "ViewConstructionError",
     "guard_publication",
+    "compact_publication_handle",
+    "MAX_PUBLICATION_HANDLE_TOKENS",
 ]
 
 
@@ -58,14 +60,66 @@ class ViewConstructionError(ValueError):
     """
 
 
+MAX_PUBLICATION_HANDLE_TOKENS = 8
+
+
+def _base36(value: int) -> str:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("publication coordinates must be non-negative integers")
+    alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+    if value == 0:
+        return "0"
+    out = ""
+    while value:
+        value, remainder = divmod(value, 36)
+        out = alphabet[remainder] + out
+    return out
+
+
+def compact_publication_handle(
+    assistant_turn_index: int,
+    toolset_ordinal: int,
+    evidence_ordinal: int,
+    *,
+    researcher_coordinate: tuple[int, int] | None = None,
+) -> str:
+    """A collision-free handle inside one cell's nested researcher trajectories.
+
+    The handle is an encoding of structural ordinals, not a truncated hash.  Its scope is one
+    ConductResearch child (when present) -> assistant turn -> ordered sibling search-result set
+    -> evidence ordinal in that atomic publication batch.  The child pair
+    ``(supervisor iteration, allowed-call ordinal)`` is Cantor-paired into one non-negative
+    integer, keeping the handle compact without truncation collisions. The exact tool-call id
+    remains in HCheckpoint.researcher_coordinate and detects structural-slot reuse.
+    """
+    if evidence_ordinal <= 0:
+        raise ValueError("evidence_ordinal must be positive")
+    prefix = "H"
+    if researcher_coordinate is not None:
+        iteration, child_ordinal = researcher_coordinate
+        _base36(iteration)
+        _base36(child_ordinal)
+        total = iteration + child_ordinal
+        structural_ordinal = total * (total + 1) // 2 + child_ordinal
+        prefix += _base36(structural_ordinal) + "_"
+    return (
+        f"{prefix}{_base36(assistant_turn_index)}_"
+        f"{_base36(toolset_ordinal)}_{_base36(evidence_ordinal)}"
+    )
+
+
 @dataclass(frozen=True)
 class OfferedCandidate:
     """One candidate exactly as the selector will see it, with its bytes already resolved."""
 
     label: str
+    publication_handle: str
+    publication_handle_tokens: int
     span_id: str
     namespace: str
     text: str
+    origin_kind: str = ""
+    message_role: str = ""
     heading_path: tuple[str, ...] = ()
     context: tuple[str, ...] = ()
 
@@ -75,6 +129,8 @@ class OfferedCandidate:
             "label": self.label,
             "span_id": self.span_id,
             "namespace": self.namespace,
+            "origin_kind": self.origin_kind,
+            "message_role": self.message_role,
             "text_sha256": sha256_hex(self.text.encode("utf-8")),
             "heading_sha256": [sha256_hex(h.encode("utf-8")) for h in self.heading_path],
             "context_sha256": [sha256_hex(c.encode("utf-8")) for c in self.context],
@@ -103,6 +159,7 @@ class CandidateViewRecord:
     renderer_grouping_version: str
     query_status: Mapping[str, str] = field(default_factory=dict)
     source_meta: Mapping[str, dict] = field(default_factory=dict)
+    source_meta_sha256: str = ""
     visible_views: Mapping[str, bytes] = field(default_factory=dict)
     snapshot_texts: Mapping[str, str] = field(default_factory=dict)
 
@@ -123,10 +180,62 @@ class CandidateViewRecord:
         visible_views: Optional[Mapping[str, bytes]] = None,
         source_meta: Optional[Mapping[str, dict]] = None,
         query_status: Optional[Mapping[str, str]] = None,
+        publication_scope: tuple[int, ...] | None = None,
+        publication_ordinals: Mapping[str, int] | None = None,
     ) -> "CandidateViewRecord":
         snapshot_texts = dict(snapshot_texts or {})
         visible_views = dict(visible_views or {})
+        source_meta = {
+            str(span_id): dict(meta)
+            for span_id, meta in dict(source_meta or {}).items()
+        }
         candidates: list[OfferedCandidate] = []
+        spans = list(spans)
+
+        if namespace == "RAW_SOURCE":
+            scope = publication_scope or (0, 0)
+            if len(scope) == 2:
+                researcher_coordinate = None
+                turn_index, toolset_ordinal = scope
+            elif len(scope) == 4:
+                researcher_iteration, child_ordinal, turn_index, toolset_ordinal = scope
+                researcher_coordinate = (researcher_iteration, child_ordinal)
+            else:
+                raise ViewConstructionError(
+                    "H publication scope must be (turn, toolset) or "
+                    "(researcher iteration, child ordinal, turn, toolset)"
+                )
+            # Validate coordinates even for an empty view.
+            if researcher_coordinate is not None:
+                _base36(researcher_coordinate[0])
+                _base36(researcher_coordinate[1])
+            _base36(turn_index)
+            _base36(toolset_ordinal)
+            if publication_ordinals is None:
+                publication_ordinals = {
+                    _span_id_of(span): index for index, span in enumerate(spans, 1)
+                }
+            else:
+                publication_ordinals = {
+                    str(span_id): ordinal
+                    for span_id, ordinal in publication_ordinals.items()
+                }
+            ordinal_values = list(publication_ordinals.values())
+            if any(
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                for value in ordinal_values
+            ):
+                raise ViewConstructionError(
+                    "publication ordinals must be positive integers"
+                )
+            if len(ordinal_values) != len(set(ordinal_values)):
+                raise ViewConstructionError(
+                    "publication ordinals collide inside one atomic H batch"
+                )
+        elif publication_scope is not None or publication_ordinals is not None:
+            raise ViewConstructionError(
+                "publication ordinals belong only to RAW_SOURCE/H views"
+            )
 
         for index, span in enumerate(spans, start=1):
             span_id = _span_id_of(span)
@@ -137,15 +246,90 @@ class CandidateViewRecord:
                     f"{namespace!r}. The selector reads the whole offered set, so a foreign "
                     "candidate breaks the boundary even if it is never selected."
                 )
+            origin_kind = str(span.get("kind") or "")
+            message_role = str(span.get("message_role") or "")
+            if namespace == "VISIBLE_MESSAGE":
+                allowed_origins = {
+                    "TOOL_EVIDENCE",
+                    "TOOL_UNATTRIBUTED_CONTEXT",
+                    "MODEL_DERIVED_CONTEXT",
+                    "USER_CONTEXT",
+                }
+                if origin_kind not in allowed_origins:
+                    raise ViewConstructionError(
+                        f"candidate {span_id[:12]} has unknown visible-message origin "
+                        f"{origin_kind!r}; without a frozen origin it cannot be classified as "
+                        "citable evidence or non-citable context"
+                    )
+                allowed_roles = {
+                    "TOOL_EVIDENCE": {"tool"},
+                    "TOOL_UNATTRIBUTED_CONTEXT": {"tool"},
+                    "MODEL_DERIVED_CONTEXT": {"ai"},
+                    "USER_CONTEXT": {"human", "system"},
+                }
+                if message_role not in allowed_roles[origin_kind]:
+                    raise ViewConstructionError(
+                        f"candidate {span_id[:12]} declares {origin_kind} but has message role "
+                        f"{message_role!r}; visible origin must be derived from the frozen role"
+                    )
+                if (
+                    origin_kind != "TOOL_EVIDENCE"
+                    and span.get("source_occurrence_ids")
+                ):
+                    raise ViewConstructionError(
+                        f"candidate {span_id[:12]} is non-citable {origin_kind} but carries "
+                        "source occurrences"
+                    )
+            if namespace == "RAW_SOURCE":
+                try:
+                    publication_ordinal = publication_ordinals[span_id]
+                except KeyError as exc:
+                    raise ViewConstructionError(
+                        f"candidate {span_id[:12]} has no publication ordinal in its atomic "
+                        "H batch"
+                    ) from exc
+                publication_handle = compact_publication_handle(
+                    turn_index,
+                    toolset_ordinal,
+                    publication_ordinal,
+                    researcher_coordinate=researcher_coordinate,
+                )
+            else:
+                publication_handle = f"E{index}"
+            publication_handle_tokens = tokenizer.count(
+                f"[{publication_handle}]"
+            )
+            if (
+                namespace == "RAW_SOURCE"
+                and publication_handle_tokens > MAX_PUBLICATION_HANDLE_TOKENS
+            ):
+                raise ViewConstructionError(
+                    f"publication handle {publication_handle!r} costs "
+                    f"{publication_handle_tokens} exact model tokens, exceeding the frozen cap "
+                    f"{MAX_PUBLICATION_HANDLE_TOKENS}"
+                )
             candidates.append(OfferedCandidate(
                 label=f"E{index}",
+                # E-labels are prompt-local compression.  H publication uses a compact
+                # trajectory-scoped ordinal whose exact tokenizer cost is gated above.
+                publication_handle=publication_handle,
+                publication_handle_tokens=publication_handle_tokens,
                 span_id=span_id,
                 namespace=namespace,
                 text=_resolve_body(span, snapshot_texts, visible_views),
+                origin_kind=origin_kind,
+                message_role=message_role,
                 heading_path=_resolve_refs(span, "heading_refs", snapshot_texts),
                 context=_resolve_refs(span, "context_refs", snapshot_texts),
             ))
 
+        _validate_source_meta(
+            spans=spans,
+            namespace=namespace,
+            source_meta=source_meta,
+            visible_views=visible_views,
+        )
+        source_meta_digest = _source_meta_sha256(source_meta)
         candidate_set = CandidateSet.build(
             [c.span_id for c in candidates],
             [qid for qid, _ in query_attempts],
@@ -153,7 +337,17 @@ class CandidateViewRecord:
         )
         prompt = render_selector_prompt(
             topic=topic,
-            candidates=[(c.label, c.text, c.heading_path, c.context) for c in candidates],
+            candidates=[
+                (
+                    c.label,
+                    c.text,
+                    c.heading_path,
+                    c.context,
+                    c.origin_kind,
+                    c.message_role,
+                )
+                for c in candidates
+            ],
             query_attempts=[(f"Q{j}", text) for j, (_, text) in enumerate(query_attempts, 1)],
             budget=token_budget,
             contract=contract,
@@ -168,7 +362,8 @@ class CandidateViewRecord:
             prompt_bundle_version=PROMPT_BUNDLE_VERSION,
             renderer_grouping_version=_renderer_version(),
             query_status=dict(query_status or {}),
-            source_meta=dict(source_meta or {}),
+            source_meta=source_meta,
+            source_meta_sha256=source_meta_digest,
             visible_views=visible_views,
             snapshot_texts=snapshot_texts,
         )
@@ -193,6 +388,7 @@ class CandidateViewRecord:
             "prompt_bundle_version": self.prompt_bundle_version,
             "renderer_grouping_version": self.renderer_grouping_version,
             "prompt_sha256": self.prompt_sha256,
+            "source_meta_sha256": self.source_meta_sha256,
             "candidates": [c.identity() for c in self.candidates],
         }))
 
@@ -203,6 +399,34 @@ class CandidateViewRecord:
 
     def label_for(self, span_id: str) -> str:
         return self._by_id()[span_id].label
+
+    def publication_handle_for(self, span_id: str) -> str:
+        return self._by_id()[span_id].publication_handle
+
+    @property
+    def publication_handle_map(self) -> tuple[tuple[str, str], ...]:
+        """The auditable publication-handle -> stable-span mapping."""
+        return tuple(
+            (candidate.publication_handle, candidate.span_id)
+            for candidate in self.candidates
+        )
+
+    @property
+    def publication_handle_token_counts(self) -> tuple[tuple[str, int], ...]:
+        return tuple(
+            (candidate.publication_handle, candidate.publication_handle_tokens)
+            for candidate in self.candidates
+        )
+
+    @property
+    def publication_map_sha256(self) -> str:
+        """Bind publication identity separately from the selector-visible candidate digest."""
+        return sha256_hex(canonical_json({
+            "handle_to_span": [list(item) for item in self.publication_handle_map],
+            "handle_token_counts": [
+                list(item) for item in self.publication_handle_token_counts
+            ],
+        }))
 
     def _by_id(self) -> dict[str, OfferedCandidate]:
         return {c.span_id: c for c in self.candidates}
@@ -216,7 +440,7 @@ class CandidateViewRecord:
             evidence,
             self.registry,
             source_text_for=lambda span: by_id[_span_id_of(span)].text,
-            label_for=self.label_for,
+            label_for=self.publication_handle_for,
             tokenizer=self.tokenizer,
             source_meta=self.source_meta,
             visible_views=self.visible_views,
@@ -243,6 +467,10 @@ class CandidateViewRecord:
         """
         by_id = self._by_id()
         errors: list[str] = []
+        if _source_meta_sha256(self.source_meta) != self.source_meta_sha256:
+            errors.append(
+                "source affordance metadata has drifted since the selector call"
+            )
         for span_id in span_ids:
             candidate = by_id.get(span_id)
             span = self.registry.get(span_id)
@@ -255,8 +483,15 @@ class CandidateViewRecord:
             except ViewConstructionError as e:
                 errors.append(f"span {span_id[:12]}: no longer resolvable ({e})")
                 continue
-            if (text, headings, context) != (candidate.text, candidate.heading_path,
-                                             candidate.context):
+            origin = str(span.get("kind") or "")
+            message_role = str(span.get("message_role") or "")
+            if (text, headings, context, origin, message_role) != (
+                candidate.text,
+                candidate.heading_path,
+                candidate.context,
+                candidate.origin_kind,
+                candidate.message_role,
+            ):
                 errors.append(
                     f"span {span_id[:12]}: the candidate view has drifted since the selector "
                     "saw it; the bytes offered to the model are not the bytes now recorded"
@@ -315,6 +550,142 @@ def _resolve_refs(
             )
         out.append(exact)
     return tuple(out)
+
+
+_VISIBLE_SOURCE_META_FIELDS = frozenset({
+    "binding_version",
+    "title",
+    "url",
+    "message_id",
+    "visible_compressor_view_hash",
+    "byte_start",
+    "byte_end",
+    "title_byte_start",
+    "title_byte_end",
+    "url_byte_start",
+    "url_byte_end",
+    "source_occurrence_ids",
+    "source_label",
+})
+
+
+def _source_meta_sha256(source_meta: Mapping[str, dict]) -> str:
+    return sha256_hex(canonical_json({
+        str(span_id): dict(meta)
+        for span_id, meta in sorted(source_meta.items())
+    }))
+
+
+def _validate_source_meta(
+    *,
+    spans: Sequence[dict],
+    namespace: str,
+    source_meta: Mapping[str, dict],
+    visible_views: Mapping[str, bytes],
+) -> None:
+    """For C_VISIBLE, accept only exact byte-range-bound title/URL metadata."""
+
+    if namespace != "VISIBLE_MESSAGE":
+        return
+    by_id = {_span_id_of(span): span for span in spans}
+    unknown = sorted(set(source_meta) - set(by_id))
+    if unknown:
+        raise ViewConstructionError(
+            f"source metadata names candidate {unknown[0][:12]} outside the offered view"
+        )
+    for span_id, meta in source_meta.items():
+        span = by_id[span_id]
+        if span.get("kind") != "TOOL_EVIDENCE":
+            raise ViewConstructionError(
+                f"candidate {span_id[:12]} is non-citable context but carries source metadata"
+            )
+        if set(meta) != _VISIBLE_SOURCE_META_FIELDS:
+            missing = sorted(_VISIBLE_SOURCE_META_FIELDS - set(meta))
+            extra = sorted(set(meta) - _VISIBLE_SOURCE_META_FIELDS)
+            raise ViewConstructionError(
+                f"candidate {span_id[:12]} source metadata is not the closed "
+                f"byte-range binding (missing={missing}, extra={extra})"
+            )
+        if meta.get("binding_version") != "visible_source_byte_range_v1":
+            raise ViewConstructionError(
+                f"candidate {span_id[:12]} source metadata has unknown binding version"
+            )
+        view_hash = str(meta.get("visible_compressor_view_hash") or "")
+        if view_hash != str(span.get("visible_compressor_view_hash") or ""):
+            raise ViewConstructionError(
+                f"candidate {span_id[:12]} source metadata addresses another compressor view"
+            )
+        if str(meta.get("message_id") or "") != str(span.get("message_id") or ""):
+            raise ViewConstructionError(
+                f"candidate {span_id[:12]} source metadata addresses another message"
+            )
+        view_bytes = visible_views.get(view_hash)
+        if view_bytes is None:
+            raise ViewConstructionError(
+                f"candidate {span_id[:12]} source metadata has no frozen compressor view"
+            )
+        coordinate_names = (
+            "byte_start",
+            "byte_end",
+            "title_byte_start",
+            "title_byte_end",
+            "url_byte_start",
+            "url_byte_end",
+        )
+        if any(
+            isinstance(meta.get(name), bool) or not isinstance(meta.get(name), int)
+            for name in coordinate_names
+        ):
+            raise ViewConstructionError(
+                f"candidate {span_id[:12]} source metadata has non-integer byte coordinates"
+            )
+        block_start = int(meta["byte_start"])
+        block_end = int(meta["byte_end"])
+        span_start = int(span["byte_start"])
+        span_end = int(span["byte_end"])
+        if not (
+            0 <= block_start <= span_start <= span_end <= block_end <= len(view_bytes)
+        ):
+            raise ViewConstructionError(
+                f"candidate {span_id[:12]} is not wholly contained in its declared source range"
+            )
+        for meta_field in ("title", "url"):
+            field_start = int(meta[f"{meta_field}_byte_start"])
+            field_end = int(meta[f"{meta_field}_byte_end"])
+            if not (
+                block_start <= field_start <= field_end <= block_end
+            ):
+                raise ViewConstructionError(
+                    f"candidate {span_id[:12]} {meta_field} byte range escapes its source block"
+                )
+            expected = str(meta.get(meta_field) or "")
+            actual = view_bytes[field_start:field_end].decode("utf-8", errors="strict")
+            if expected == "(untitled source)" and field_start == field_end:
+                # The empty title is explicit; the URL remains capture-time bytes. The
+                # display-only placeholder does not claim to have appeared in the prompt.
+                continue
+            if actual != expected:
+                raise ViewConstructionError(
+                    f"candidate {span_id[:12]} {meta_field} does not reconstruct from its "
+                    "capture-time byte range"
+                )
+        occurrences = meta.get("source_occurrence_ids")
+        if (
+            not isinstance(occurrences, list)
+            or not occurrences
+            or any(not isinstance(value, str) or not value for value in occurrences)
+        ):
+            raise ViewConstructionError(
+                f"candidate {span_id[:12]} source metadata has no occurrence lineage"
+            )
+        span_occurrences = {
+            str(value) for value in (span.get("source_occurrence_ids") or ())
+        }
+        if not set(occurrences).issubset(span_occurrences):
+            raise ViewConstructionError(
+                f"candidate {span_id[:12]} source metadata occurrence lineage disagrees "
+                "with the visible span"
+            )
 
 
 def _renderer_version() -> str:

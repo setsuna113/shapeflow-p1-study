@@ -18,7 +18,6 @@ from shapeflow_p1.experiment.randomization import (
     williams_square,
 )
 
-
 # --- randomization --------------------------------------------------------------------
 
 
@@ -33,7 +32,7 @@ def test_williams_first_order_carryover_is_balanced_even_n():
     sq = williams_square(4)
     pairs = Counter()
     for row in sq:
-        for a, b in zip(row, row[1:]):
+        for a, b in zip(row, row[1:], strict=False):
             pairs[(a, b)] += 1
     counts = set(pairs.values())
     assert len(counts) == 1  # perfectly balanced
@@ -72,7 +71,7 @@ def _samples_where_big_evidence_helps():
     samples = []
     for t in range(20):
         big = t % 2 == 0
-        for b in range(2):
+        for _b in range(2):
             samples.append(Sample(
                 task_id=f"t{t}",
                 features={"candidate_tokens": 5000 if big else 200, "source_count": 3},
@@ -97,6 +96,24 @@ def test_cart_respects_min_tasks_per_leaf():
         _samples_where_big_evidence_helps(), ["candidate_tokens"], min_tasks_per_leaf=50,
     )
     assert rule.root_split_feature is None  # could not split with >=50 tasks/side
+
+
+def test_cart_refuses_zero_gain_split_for_constant_labels():
+    samples = [
+        Sample(
+            task_id=f"t{index}",
+            features={"candidate_tokens": float(index), "source_count": float(index % 3)},
+            training_success=True,
+        )
+        for index in range(24)
+    ]
+    rule = fit_eligibility_tree(
+        samples,
+        ["candidate_tokens", "source_count"],
+        min_tasks_per_leaf=8,
+    )
+    assert rule.root_split_feature is None
+    assert rule.predict({"candidate_tokens": 0.0, "source_count": 0.0}) is True
 
 
 def test_rule_stability_high_for_clean_signal():

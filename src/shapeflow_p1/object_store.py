@@ -34,6 +34,7 @@ from pathlib import Path
 
 import zstandard as zstd
 
+from .fsmode import chmod_shared
 from .hashing import sha256_hex
 
 __all__ = ["ObjectRef", "ObjectStore", "CorruptObject"]
@@ -58,8 +59,7 @@ class ObjectStore:
     def __init__(self, root: str | os.PathLike[str], *, level: int = 10) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
-        self._cctx = zstd.ZstdCompressor(level=level)
-        self._dctx = zstd.ZstdDecompressor()
+        self._level = level
 
     @property
     def root(self) -> Path:
@@ -88,7 +88,12 @@ class ObjectStore:
             return ObjectRef(key=key, raw_size=len(raw), stored_size=final.stat().st_size)
 
         final.parent.mkdir(parents=True, exist_ok=True)
-        compressed = self._cctx.compress(raw)
+        # zstandard compressor/decompressor contexts are not safe for simultaneous use.
+        # Provider request handlers write telemetry from multiple threads, so sharing one
+        # context can produce intermittent ``Src size is incorrect`` failures. A fresh context
+        # per operation keeps the store thread-safe; unique temp files below already make
+        # concurrent same-key publication crash-atomic.
+        compressed = zstd.ZstdCompressor(level=self._level).compress(raw)
 
         # temp -> fsync -> atomic rename, all on the same directory (same filesystem)
         # so os.replace is a true atomic swap.
@@ -99,6 +104,11 @@ class ObjectStore:
                 fh.write(compressed)
                 fh.flush()
                 os.fsync(fh.fileno())
+            # Widen from mkstemp's 0600 *before* the rename, so the blob is never visible at
+            # its final key with an ACL mask that would deny the readers it was written for:
+            # the steward publishes page bytes the runner must read, and the runner publishes
+            # treatment outputs the evaluator must score. See shapeflow_p1.fsmode.
+            chmod_shared(tmp)
             os.replace(tmp, final)
         except BaseException:
             tmp.unlink(missing_ok=True)
@@ -114,7 +124,7 @@ class ObjectStore:
         if not path.exists():
             raise KeyError(key)
         try:
-            raw = self._dctx.decompress(path.read_bytes())
+            raw = zstd.ZstdDecompressor().decompress(path.read_bytes())
         except zstd.ZstdError as e:
             # A blob that will not even decompress is corrupt just as surely as one whose
             # bytes hash wrong; both are a hard stop, never a silent skip.
