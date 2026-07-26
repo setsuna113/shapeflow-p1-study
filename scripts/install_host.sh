@@ -316,15 +316,15 @@ new_unshared_probe() {  # <owner-uid> <path>
 
 # Mask liveness: if this read were to succeed, every "can read" assertion below would be
 # meaningless, because the mask would not be constraining anything.
-mask_probe="$DATA_ROOT/approvals/.acl-mask-liveness-probe-$$"
-new_unshared_probe sfsteward "$mask_probe"
-if runuser -u sfrunner -- cat "$mask_probe" >/dev/null 2>&1; then
-  rm -f "$mask_probe"
+effective_probe="$DATA_ROOT/approvals/.acl-effective-entry-probe-$$"
+new_unshared_probe sfsteward "$effective_probe"
+if runuser -u sfrunner -- cat "$effective_probe" >/dev/null 2>&1; then
+  rm -f "$effective_probe"
   echo "FATAL: a 0600 file under $DATA_ROOT/approvals is readable by sfrunner; the ACL mask" >&2
   echo "       is not constraining access, so the isolation probes below prove nothing" >&2
   exit 1
 fi
-rm -f "$mask_probe"
+rm -f "$effective_probe"
 
 probe="$DATA_ROOT/approvals/.approval-read-probe-$$"
 denied="$DATA_ROOT/approvals/.runner-approval-write-denied-probe-$$"
