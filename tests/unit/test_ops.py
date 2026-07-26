@@ -7,7 +7,6 @@ import pytest
 from shapeflow_p1.ops.gpu_lease import GpuLease, LeaseHeld
 from shapeflow_p1.ops.watchdog import DriftGuard, check_drift, evaluate_auto_stop
 
-
 # --- GPU lease ------------------------------------------------------------------------
 
 

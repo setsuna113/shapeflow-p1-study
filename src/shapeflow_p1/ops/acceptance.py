@@ -16,7 +16,6 @@ import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from ..campaign.settings import Settings
 
@@ -169,7 +168,7 @@ async def _unusable_model_call(**_kw):  # pragma: no cover - never invoked
 
 
 def run_preflight(settings: Settings, *, repo: Path,
-                  approved_protocol_sha: Optional[str] = None) -> dict:
+                  approved_protocol_sha: str | None = None) -> dict:
     """The last check before treatment: approval, corpus, world, and the runner's own view."""
     from ..analysis.design import load_runner_analysis_design_receipt
     from ..protocol import ApprovalError, protocol_sha, verify_approval_file
