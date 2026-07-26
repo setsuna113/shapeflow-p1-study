@@ -303,15 +303,33 @@ done
 # passed unconditionally. The Python writers ask for 0600 explicitly (tempfile.mkstemp), which
 # collapses the mask to `---`. The probe therefore certified an access path that did not exist.
 #
-# `new_shared_probe` reproduces the real sequence: create restricted, widen to 0640 before
-# publishing, exactly as shapeflow_p1.fsmode.chmod_shared does.
-new_shared_probe() {  # <owner-uid> <path>
-  runuser -u "$1" -- sh -c 'install -m 0600 /dev/null "$1" && chmod 0640 "$1"' sh "$2"
+# The file must be created by an `open()` that *requests* mode 0600, because that is what
+# tempfile.mkstemp does and the whole question is what the kernel does with the inherited
+# default ACL when it folds that mode in.
+#
+# Shell redirection cannot express this: `: > file` always requests 0666, and the umask is
+# ignored outright when a default ACL is present, so the file lands with a permissive mask and
+# the probe passes no matter what. `install -m 0600` is worse than useless here -- coreutils
+# treats an explicit mode as authoritative and *strips the inherited ACL entirely*, so the
+# probe file ends up with no ACL at all and tests nothing that production does.
+#
+# python3 is already a hard dependency of every service on this host, so use it and request the
+# mode directly.
+new_probe_at_mode() {  # <owner-uid> <path> <octal-mode>
+  runuser -u "$1" -- python3 -c \
+    'import os,sys; os.close(os.open(sys.argv[1], os.O_CREAT|os.O_WRONLY|os.O_EXCL, int(sys.argv[2], 8)))' \
+    "$2" "$3"
 }
-# ...and `new_unshared_probe` creates one *without* the widening, so the assertions below are
-# proved non-vacuous: on a filesystem where ACLs are live this file must NOT be readable.
+# The real publication sequence: create restricted, widen to 0640 before publishing, exactly as
+# shapeflow_p1.fsmode.chmod_shared does.
+new_shared_probe() {  # <owner-uid> <path>
+  new_probe_at_mode "$1" "$2" 0600
+  runuser -u "$1" -- chmod 0640 "$2"
+}
+# ...and `new_unshared_probe` omits the widening, so the assertions below are proved
+# non-vacuous: where ACLs are live this file must NOT be readable by the granted role.
 new_unshared_probe() {  # <owner-uid> <path>
-  runuser -u "$1" -- sh -c 'install -m 0600 /dev/null "$1"' sh "$2"
+  new_probe_at_mode "$1" "$2" 0600
 }
 
 # Mask liveness: if this read were to succeed, every "can read" assertion below would be
