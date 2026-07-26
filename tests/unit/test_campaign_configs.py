@@ -251,9 +251,16 @@ def test_the_holdout_is_not_opened_this_round(settings):
 
 
 def test_budget_caps_are_the_hash_locked_values(settings):
+    """Pins the caps so a change has to be deliberate, not a default that drifted.
+
+    deepseek_usd was raised from 10 to 200 on 2026-07-26 on explicit instruction: measured on
+    this corpus, building the answer key costs ~$3.50 per task, so the original ceiling covered
+    2 of 48 TruthPackets and could not produce a usable denominator at all.
+    """
     caps = settings.budget_caps()
-    assert caps["tavily_max_requests" if False else "tavily_requests"] == 500.0
-    assert caps["deepseek_usd"] == 10.0
+    assert caps["tavily_requests"] == 500.0
+    assert caps["deepseek_usd"] == 200.0
+    assert caps["deepseek_requests"] == 20000.0
     assert caps["gpu_seconds"] == 150 * 3600.0
 
 

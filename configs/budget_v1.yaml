@@ -12,11 +12,25 @@ api_budget:
   exa_max_usd: 5.00
   tavily_max_requests: 500
   tavily_max_credits: 1000
-  deepseek_max_requests: 2000
-  deepseek_max_input_tokens: 20000000
-  deepseek_max_output_tokens: 3000000
-  deepseek_max_usd: 10.00
-  max_remote_calls: 2500
+  # Raised on 2026-07-26, on explicit instruction, after the original caps were shown to be
+  # unable to build the answer key at all. They were not sized from a measurement: at the
+  # observed rate the $10 ceiling covered 2 of 48 TruthPackets.
+  #
+  # Measured on this corpus, from the first two completed packets:
+  #   ~290 JUDGE_TRUTH calls per task   (~4 per candidate atom, most of which are rejected)
+  #   $0.01195 per request, 2512 input / 867 output tokens per request
+  # So the remaining 46 tasks are ~13,300 calls, ~$160, ~33M input and ~12M output tokens.
+  #
+  # Each cap below is that projection plus roughly a quarter for variance -- a ceiling, not a
+  # spend plan. They stay hard: the provider may still only tighten them, and hitting one stops
+  # the campaign rather than quietly buying past it. The request and token caps are raised
+  # alongside the dollar cap on purpose; leaving any one of them at the old value would stop
+  # the build just as dead, having spent the others.
+  deepseek_max_requests: 20000
+  deepseek_max_input_tokens: 50000000
+  deepseek_max_output_tokens: 18000000
+  deepseek_max_usd: 200.00
+  max_remote_calls: 22000
 
 campaign_budget:
   max_gpu_hours: 150
