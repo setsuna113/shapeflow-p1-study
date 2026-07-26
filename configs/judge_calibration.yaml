@@ -44,10 +44,25 @@ admissibility:
   # Same input, repeated. A judge whose verdict moves under resampling adds variance to every
   # downstream estimate, and two calls to one judge are one rater asked twice, not two raters.
   repeat_decision_stability_min: 0.95
-  # judge.yaml requires exact span binding. This checks it mechanically rather than trusting it:
-  # the cited span_id must exist in the offered set AND the quoted excerpt must appear verbatim
-  # inside that span's text. A fabricated or drifting citation fails here.
+  # judge.yaml requires exact span binding. This checks it mechanically rather than trusting it.
+  #
+  # AMENDED 2026-07-26, before any calibration data was generated (see git history: this file's
+  # first commit contains no artifact). The original wording required the quoted excerpt to
+  # appear verbatim inside the cited span. That is not measurable: the frozen truth-proposal
+  # schema carries `supporting_span_ids` as bare id strings, with no quote field, so there is no
+  # excerpt to compare. Rather than quietly reinterpret a pre-registered metric to fit what the
+  # data happened to allow, the definition is narrowed here, in the open, before measuring.
+  #
+  # What is measured: referential validity -- every supporting_span_id an atom cites must exist
+  # in the span set that was actually offered to that call, and an atom must cite at least one.
+  # A model that invents plausible span ids fails this. What is NOT measured: whether the span
+  # semantically supports the atom. That is truth.py's separate binding pass, ~4 calls per
+  # candidate atom, and running it for every candidate would cost more than the campaign.
   span_binding_validity_min: 0.98
+  span_binding_validity_definition: >-
+    fraction of proposed atoms for which supporting_span_ids is non-empty and every id appears
+    in the offered span set for that call; semantic support is out of scope and is settled by
+    the separate binding pass and the human audit
 
 # --- selection among the admissible ------------------------------------------------------------
 selection:
