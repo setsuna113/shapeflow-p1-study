@@ -16,7 +16,18 @@ CRED_DIR="/etc/shapeflow"
 TOKEN_DIR="/etc/shapeflow-tokens"
 VLLM_VENV="${SHAPEFLOW_VLLM_VENV:-/storage/nvme/drbat/.venv}"
 MODEL_PATH="${SHAPEFLOW_MODEL_PATH:-/storage/nvme/reme/models/Qwen3-14B-AWQ}"
-GPU_UUID="${SHAPEFLOW_GPU_UUID:-GPU-ef013951-e496-78da-da70-a5a289dcc634}"
+# The permitted devices, mirroring configs/stack.yaml host.gpu_uuid_pool. Which one a run
+# actually leases is resolved from what is idle at launch (shapeflow_p1.ops.gpu_pool) and
+# recorded by freeze-stack into the stack manifest -- it is not decided here.
+SHAPEFLOW_GPU_UUID_POOL="${SHAPEFLOW_GPU_UUID_POOL:-\
+GPU-ef013951-e496-78da-da70-a5a289dcc634 \
+GPU-d1f5d8c4-2f0f-45f7-0574-ac90018440db \
+GPU-11b9da9d-6149-3c1b-79c8-011d74a180d2 \
+GPU-99847987-522a-5889-1066-a21512dff220}"
+# Only substituted into the unit templates, which this host renders for the record and never
+# starts (systemd is not PID 1 here). Defaults to the first permitted device rather than a
+# separately hard-coded card, so the two can no longer drift apart.
+GPU_UUID="${SHAPEFLOW_GPU_UUID:-${SHAPEFLOW_GPU_UUID_POOL%% *}}"
 VLLM_PORT="${SHAPEFLOW_VLLM_PORT:-8000}"
 MIN_FREE_BYTES=12884901888   # 12 GiB floor (plan §5.2)
 
@@ -44,17 +55,24 @@ FREE="$(df -B1 --output=avail "$REPO" | tail -1 | tr -d ' ')"
 [ "$FREE" -ge "$MIN_FREE_BYTES" ] || {
   echo "free ${FREE}B is under the ${MIN_FREE_BYTES}B floor" >&2; exit 1; }
 
-# A foreign process on the leased GPU is a reason to stop, never a reason to kill anything.
+# Installation creates users, directories and ACLs; it does not touch a GPU. Refusing to
+# install because *some* card on a shared host is busy blocked setup for no reason -- and in
+# practice the busy card was usually our own engine from the previous round. Device selection
+# happens later, from the hash-locked pool, and start_engine.sh does the per-card check.
+#
+# What is still verified here is that at least one permitted device exists at all, because an
+# install against a host with none of them is a misconfiguration worth catching now.
 if command -v nvidia-smi >/dev/null 2>&1; then
-  FOREIGN="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader | tr -d ' ' | grep -c . || true)"
-  if [ "${FOREIGN:-0}" -gt 0 ]; then
-    echo "GPUs have $FOREIGN compute process(es); refusing to install over someone else's run" >&2
-    nvidia-smi --query-compute-apps=pid,used_memory --format=csv >&2
+  PRESENT=0
+  for uuid in $(nvidia-smi --query-gpu=uuid --format=csv,noheader | tr -d ' '); do
+    case " $SHAPEFLOW_GPU_UUID_POOL " in *" $uuid "*) PRESENT=$((PRESENT + 1)) ;; esac
+  done
+  if [ -n "${SHAPEFLOW_GPU_UUID_POOL:-}" ] && [ "$PRESENT" -eq 0 ]; then
+    echo "none of the permitted GPUs are present on this host" >&2
+    nvidia-smi --query-gpu=uuid,name --format=csv >&2
     exit 1
   fi
 fi
-nvidia-smi --query-gpu=uuid --format=csv,noheader | grep -qx "$GPU_UUID" \
-  || { echo "leased GPU $GPU_UUID is not present on this host" >&2; exit 1; }
 
 # --- credentials: only sfprovider may read them ------------------------------------------------
 say "credential isolation"

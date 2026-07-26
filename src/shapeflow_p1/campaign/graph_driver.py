@@ -621,6 +621,13 @@ class CellResult:
     first_treatment_checkpoint_digest: str = ""
     seed_applied: bool = False
     error: Optional[str] = None
+    #: The root/supervisor state a C fork needs to write a report, captured mid-run because
+    #: ``final_report_generation`` overrides ``notes`` to [] on its way out -- so by the time
+    #: the graph returns, the note vector every fork has to substitute into is already gone.
+    #: ``None`` when this cell is not usable as a fork anchor; never a partial envelope.
+    continuation: Optional[dict] = None
+    #: Digest of the stored envelope, when a continuation store was supplied.
+    continuation_digest: str = ""
 
     @property
     def ok(self) -> bool:
@@ -825,6 +832,86 @@ def odr_config(settings: Settings, *, cell: CellSpec) -> dict:
     }}
 
 
+async def _stream_graph(graph, initial_state: dict, config: dict):
+    """Drive the graph and return ``(final_state, supervisor_update, pre_report_values)``.
+
+    Streaming rather than ``ainvoke`` because two things a C fork needs exist only *during* the
+    run. ``final_report_generation`` returns ``{"notes": {"type": "override", "value": []}}``,
+    so the note vector every fork substitutes into is empty by the time the graph returns; and
+    the supervisor's own ``supervisor_messages`` -- which carry the ``ConductResearch``
+    tool-call ids that identify *which* note each child produced -- are likewise only visible
+    at the node update that produced them.
+
+    The final state is reconstructed from the last ``values`` chunk, which is exactly what
+    ``ainvoke`` returns for this graph, so every existing caller sees no behavioural change.
+    """
+    final_state: dict = {}
+    supervisor_update: dict = {}
+    pre_report_values: dict = {}
+    stream = graph.astream(initial_state, config, stream_mode=["updates", "values"])
+    async for mode, chunk in stream:
+        if mode == "updates":
+            for node, update in (chunk or {}).items():
+                if node == "research_supervisor" and isinstance(update, dict):
+                    supervisor_update = dict(update)
+                if node == "final_report_generation":
+                    # The values chunk *before* this node ran still holds the note vector.
+                    pre_report_values = dict(final_state)
+        elif mode == "values" and isinstance(chunk, dict):
+            final_state = dict(chunk)
+    if not pre_report_values:
+        # No report node ran (an early exit, or a graph that ends at research). The last
+        # observed state is the closest thing to a pre-report snapshot.
+        pre_report_values = dict(final_state)
+    return final_state, supervisor_update, pre_report_values
+
+
+def _continuation_from(
+    supervisor_update: dict, pre_report_values: dict, *, task_id: str, seed: int
+) -> Optional[dict]:
+    """Build the fork continuation, or return None rather than a partial one.
+
+    Every field here is held byte-identical across the arms of a boundary, so a missing or
+    inconsistent one is a reason to refuse the whole anchor -- before any arm is offered, which
+    leaves the ITT denominator untouched. Guessing a note vector would silently attribute one
+    child's output to another child's slot.
+    """
+    from ..odr.adapter import freeze_messages
+    from ..odr.continuation import note_slots_from_supervisor_messages
+
+    notes = supervisor_update.get("notes")
+    if notes is None:
+        notes = pre_report_values.get("notes")
+    supervisor_messages = (
+        supervisor_update.get("supervisor_messages")
+        or pre_report_values.get("supervisor_messages")
+    )
+    research_brief = (
+        supervisor_update.get("research_brief")
+        or pre_report_values.get("research_brief")
+    )
+    root_messages = pre_report_values.get("messages")
+    if not notes or not supervisor_messages or not research_brief or not root_messages:
+        return None
+    try:
+        slots = note_slots_from_supervisor_messages(
+            supervisor_messages, [str(n) for n in notes]
+        )
+    except ValueError:
+        # The note vector could not be attributed to the tool calls that produced it. That is
+        # exactly the ambiguity a fork must not paper over.
+        return None
+    if not any(slot.tool_call_id for slot in slots):
+        return None
+    return {
+        "task_id": task_id,
+        "seed": seed,
+        "research_brief": str(research_brief),
+        "root_messages": freeze_messages(root_messages),
+        "notes": slots,
+    }
+
+
 async def run_cell(
     settings: Settings,
     cell: CellSpec,
@@ -835,6 +922,7 @@ async def run_cell(
     provider_base_url: str,
     runner_token: str,
     store_checkpoint: Optional[Callable[[Any], str]] = None,
+    store_continuation: Optional[Callable[[dict], str]] = None,
     graph: Any = None,
 ) -> CellResult:
     """Run one cell on the real graph and return what it produced.
@@ -936,9 +1024,8 @@ async def run_cell(
         try:
             config = odr_config(settings, cell=cell)
             config["callbacks"] = [_trajectory_callback(recorder)]
-            state = await graph.ainvoke(
-                {"messages": [HumanMessage(content=cell.question)]},
-                config,
+            state, supervisor_update, pre_report_values = await _stream_graph(
+                graph, {"messages": [HumanMessage(content=cell.question)]}, config
             )
         except Exception as e:  # noqa: BLE001 - recorded, never converted into a P0 result
             result.error = f"{type(e).__name__}: {e}"
@@ -946,6 +1033,12 @@ async def run_cell(
             result.first_treatment_checkpoint_digest = \
                 recorder.first_treatment_checkpoint_digest
             return result
+
+    result.continuation = _continuation_from(
+        supervisor_update, pre_report_values, task_id=cell.task_id, seed=cell.seed
+    )
+    if result.continuation is not None and store_continuation is not None:
+        result.continuation_digest = store_continuation(result.continuation)
 
     result.final_report = str(state.get("final_report", "") or "")
     result.notes = tuple(str(n) for n in (state.get("notes") or ()))

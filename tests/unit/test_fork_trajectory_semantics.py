@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -395,7 +396,9 @@ def test_primary_screen_is_e2e_and_does_not_require_resume_backend(settings, mon
         observed.update(kwargs)
         return {"ok": True, "execution_semantics": "COUPLED_SEED_E2E_ITT"}
 
-    monkeypatch.setattr(screen, "_gpu_lease", lambda _settings: None)
+    # A no-op lease, not None: production now refuses to run unleased, because a lease
+    # that silently did not engage is how two workers end up on one card.
+    monkeypatch.setattr(screen, "_gpu_lease", lambda _settings: nullcontext())
     monkeypatch.setattr(screen, "_run_screening_leased", fake_leased)
     monkeypatch.setattr(
         screen,

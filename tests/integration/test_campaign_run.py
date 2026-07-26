@@ -127,6 +127,66 @@ async def test_a_block_of_two_arms_runs_and_freezes(harness, settings, tmp_path)
         for block in root["blocks"] for cell in block["cells"])
 
 
+async def test_an_anchor_cell_captures_the_continuation_a_c_fork_needs(
+    harness, settings, tmp_path
+):
+    """The C fork's report input has to be taken mid-run, on the actual graph.
+
+    ``final_report_generation`` returns ``{"notes": {"type": "override", "value": []}}``, so
+    by the time the graph returns, the note vector every fork substitutes into is gone. The
+    supervisor's ``ConductResearch`` tool-call ids -- which say *which* note each child
+    produced -- are only visible at the node update that emitted them. This asserts both
+    survive a real run, because the fork is unbuildable without them.
+    """
+    from shapeflow_p1.odr.continuation import ContinuationStore, child_slot_key
+
+    tasks = available_tasks(settings, "FORMATIVE_SCREEN")[:1]
+    runner = harness.runner()
+    manifest = runner.build_schedule(task_ids=tasks, arms=ARMS, split="FORMATIVE_SCREEN")
+
+    await runner.run_cells(manifest, phase_id="run-screen", split="FORMATIVE_SCREEN",
+                           questions=questions_for(settings, tasks))
+    states = runner.cell_states(manifest, phase_id="run-screen", split="FORMATIVE_SCREEN")
+    assert set(states.values()) == {"COMMITTED"}, states
+
+    store = ContinuationStore(settings.path("checkpoints") / "continuations")
+    stored = sorted(p.stem for p in store.root.rglob("*.json"))
+    assert stored, "no anchor continuation survived the run"
+
+    envelope = store.get(stored[0])          # get() re-derives and verifies the digest
+    assert envelope.research_brief
+    assert envelope.root_messages
+    assert envelope.anchor_engine_epoch, "the pair has no engine boot to be voided against"
+
+    slots = envelope.notes
+    assert slots, "the note vector was empty by the time it was captured"
+    forkable = [slot for slot in slots if slot.tool_call_id]
+    assert forkable, "no note could be attributed to a ConductResearch child"
+
+    # Ordinals are dense and ordered, and every child's slot key is the one its researcher_id
+    # carries -- that identity is what makes the substitution exact under concurrency.
+    assert [slot.ordinal for slot in slots] == list(range(len(slots)))
+    for slot in forkable:
+        assert slot.slot_key == child_slot_key(slot.tool_call_id)
+    assert len({slot.slot_key for slot in forkable}) == len(forkable), "ambiguous slot keys"
+
+    # And a stored envelope whose notes were edited must not load at all. Tamper the file
+    # backing *this* digest, then restore it, so the corruption cannot leak into another test.
+    import json as _json
+
+    path = store._path(stored[0])
+    original = path.read_text(encoding="utf-8")
+    try:
+        body = _json.loads(original)
+        body["notes"][0]["content_sha256"] = "0" * 64
+        path.write_text(_json.dumps(body), encoding="utf-8")
+        with pytest.raises(ValueError, match="not the one it claims"):
+            store.get(stored[0])
+    finally:
+        path.write_text(original, encoding="utf-8")
+    assert store.get(stored[0]).digest == stored[0]
+
+
 async def test_new_execution_binding_cannot_reuse_old_committed_cell(harness, settings):
     tasks = available_tasks(settings, "FORMATIVE_SCREEN")[:1]
     old = harness.runner(execution_binding_sha256="e" * 64)

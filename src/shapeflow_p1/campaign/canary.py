@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import math
 from collections import Counter
-from contextlib import nullcontext
 from pathlib import Path
 
 from ..canonical import canonical_json
@@ -79,7 +78,7 @@ async def run_canary(settings: Settings, *, repo: Path,
     binding = verified_execution_binding(
         repo, expected_digest=execution_binding_sha256)
     lease = _gpu_lease(settings)
-    with lease if lease is not None else nullcontext():
+    with lease:
         return await _run_canary_leased(
             settings,
             repo=repo,

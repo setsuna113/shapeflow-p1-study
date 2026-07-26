@@ -37,6 +37,21 @@ def _parse(path: Path) -> configparser.ConfigParser:
     return cp
 
 
+def _environment(unit: Path) -> str:
+    """Every ``Environment=`` value in one string.
+
+    ``_parse`` keeps only the *last* value of a repeated key, so an assertion written against
+    ``cp.get("Service", "Environment")`` silently stops checking what it was written to check
+    the moment another Environment line is added below it -- it does not fail, it just tests a
+    different line. Reading them all is what makes these assertions stable.
+    """
+    return "\n".join(
+        line.split("=", 1)[1].strip()
+        for line in unit.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("Environment=")
+    )
+
+
 def test_there_is_at_least_one_unit():
     assert UNITS
 
@@ -197,12 +212,25 @@ def test_no_unit_still_references_the_removed_single_vllm_service():
 
 def test_causal_engine_mints_and_runner_reads_a_per_boot_epoch():
     causal = _parse(SYSTEMD / "shapeflow-vllm-causal.service.template")
-    runner = _parse(SYSTEMD / "shapeflow-p1-week1.service.template")
     start_pre = causal.get("Service", "ExecStartPre")
     assert "write_engine_epoch.py" in start_pre
     assert "/run/shapeflow-vllm-causal/engine_epoch" in start_pre
     assert "SHAPEFLOW_ENGINE_EPOCH_FILE=/run/shapeflow-vllm-causal/engine_epoch" in (
-        runner.get("Service", "Environment"))
+        _environment(SYSTEMD / "shapeflow-p1-week1.service.template"))
+
+
+def test_the_coordinator_receives_the_leased_device():
+    """The coordinator takes an flock on this UUID; without it the lease never engages.
+
+    Nothing passed SHAPEFLOW_GPU_UUID through -- not this unit, not sfsupervise, not the
+    bootstrap privilege-drop helper -- so `_gpu_lease` returned None in production and the
+    mutual exclusion that stops two workers sharing a card was silently absent.
+    """
+    assert "SHAPEFLOW_GPU_UUID=" in _environment(
+        SYSTEMD / "shapeflow-p1-week1.service.template")
+    for launcher in ("sfsupervise.sh", "bootstrap_and_run.sh"):
+        body = (SUPERVISOR.parent / launcher).read_text(encoding="utf-8")
+        assert "SHAPEFLOW_GPU_UUID" in body, f"{launcher} does not pass the leased device through"
 
 
 def test_coordinator_unit_receives_the_approved_execution_binding():

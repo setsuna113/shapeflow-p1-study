@@ -37,6 +37,9 @@ Environment=SHAPEFLOW_DATA_ROOT=@DATA_ROOT@
 Environment=SHAPEFLOW_APPROVAL_FILE=@DATA_ROOT@/approvals/launch_approval.json
 Environment=SHAPEFLOW_REPO=@REPO@
 Environment=SHAPEFLOW_ENGINE_EPOCH_FILE=/run/shapeflow-vllm-causal/engine_epoch
+# The leased device. The coordinator takes an flock on it, which is what stops a second worker
+# from using the same card; without this variable the lease was silently skipped entirely.
+Environment=SHAPEFLOW_GPU_UUID=@GPU_UUID@
 
 # Redacted logs (the app's SecretRedactor runs before every handler; journald captures stdio).
 StandardOutput=append:@REPO@/logs/coordinator.log

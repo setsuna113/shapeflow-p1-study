@@ -105,8 +105,7 @@ async def run_screening(
         repo, expected_digest=execution_binding_sha256)
     lease = _gpu_lease(settings)
     with contextlib.ExitStack() as stack:
-        if lease is not None:
-            stack.enter_context(lease)
+        stack.enter_context(lease)
         return await _run_screening_leased(
             settings, repo=repo, max_cells=max_cells, run_id=run_id, arms_block=arms_block,
             fork_backend=fork_backend, component_only=component_only,
@@ -115,18 +114,29 @@ async def run_screening(
 
 
 def _gpu_lease(settings: Settings):
-    """The lease for the device this run will use, or None when no UUID is pinned.
+    """The lease for the device this run will use.
 
     The UUID comes from the environment the engine was started with (CUDA_VISIBLE_DEVICES is
     set to a UUID by start_engine.sh, never an index -- plan §5.2 is explicit that an index
     is not a device identity).
+
+    Returning None when nothing was pinned -- which is what this did -- meant the lease was
+    silently skipped exactly when it mattered: neither ``sfsupervise`` nor ``bootstrap``'s
+    privilege-drop helper passed these variables through, so in production the mutual
+    exclusion never engaged at all. On a host with several cards and more than one worker,
+    that is how two runs end up on one device, and nothing downstream would show it. An
+    unleasable run is refused instead.
     """
     from ..ops.gpu_lease import GpuLease
 
     uuid = (os.environ.get("SHAPEFLOW_GPU_UUID")
             or os.environ.get("CUDA_VISIBLE_DEVICES") or "").strip()
     if not uuid.startswith("GPU-"):
-        return None
+        raise RuntimeError(
+            "no GPU UUID in the environment: set SHAPEFLOW_GPU_UUID (or CUDA_VISIBLE_DEVICES) "
+            "to the leased device UUID. Refusing to run unleased, because the GPU lease is "
+            f"what stops a second worker using the same card (saw {uuid!r})"
+        )
     lock_file = settings.data_root / str(settings.get("week1", "runtime", "gpu_lease_file"))
     return GpuLease(uuid, lock_dir=lock_file.parent)
 

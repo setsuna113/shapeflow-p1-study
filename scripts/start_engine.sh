@@ -24,17 +24,26 @@ REPO="${SHAPEFLOW_REPO:-/storage/nvme/shapeflow-p1-study}"
 DATA_ROOT="${SHAPEFLOW_DATA_ROOT:-/storage/nvme/shapeflow-data}"
 VLLM_VENV="${SHAPEFLOW_VLLM_VENV:-/storage/nvme/drbat/.venv}"
 MODEL_PATH="${SHAPEFLOW_MODEL_PATH:-/storage/nvme/reme/models/Qwen3-14B-AWQ}"
-GPU_UUID="${SHAPEFLOW_GPU_UUID:-GPU-ef013951-e496-78da-da70-a5a289dcc634}"
+# No default device. A hard-coded UUID meant the campaign could only ever run on one card and
+# refused to start whenever that card was busy -- including when it was busy with our own
+# previous engine. The caller resolves a free device from the hash-locked pool
+# (shapeflow_p1.ops.gpu_pool) and passes it in.
+GPU_UUID="${SHAPEFLOW_GPU_UUID:?SHAPEFLOW_GPU_UUID is required; select one from host.gpu_uuid_pool}"
 PORT="${SHAPEFLOW_VLLM_PORT:-8000}"
 ENGINE_EPOCH_FILE="${SHAPEFLOW_ENGINE_EPOCH_FILE:-/run/shapeflow-vllm-causal/engine_epoch}"
 
 [ "$(id -u)" -eq 0 ] || { echo "start_engine.sh switches identity and must run as root" >&2; exit 1; }
 
-# Never start over a foreign process on the leased card.
-FOREIGN="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader | tr -d ' ' | grep -c . || true)"
-MINE="$(pgrep -u sfinfer -f api_server | wc -l || true)"
+# Never start over a foreign process on the LEASED card. Both halves of this were host-wide and
+# therefore wrong: `--query-compute-apps` without `-i` counts processes on every GPU, so a
+# neighbour's job on a card we do not want blocked us; and a bare `pgrep -f api_server` counts
+# any engine of ours anywhere, so "ours" on another card looked like permission to start here.
+FOREIGN="$(nvidia-smi -i "$GPU_UUID" --query-compute-apps=pid --format=csv,noheader \
+  | tr -d ' ' | grep -c . || true)"
+MINE="$(pgrep -u sfinfer -f "api_server.*--port $PORT" | wc -l || true)"
 if [ "${FOREIGN:-0}" -gt 0 ] && [ "${MINE:-0}" -eq 0 ]; then
-  echo "the GPU has $FOREIGN compute process(es) that are not ours; refusing to start" >&2
+  echo "GPU $GPU_UUID has $FOREIGN compute process(es) that are not ours; refusing to start" >&2
+  nvidia-smi -i "$GPU_UUID" --query-compute-apps=pid,used_memory --format=csv >&2
   exit 1
 fi
 

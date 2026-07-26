@@ -695,6 +695,11 @@ async def test_run_canary_wires_seed_layer_and_provider_work_summary(
         ],
     )
 
+    # The canary holds the same UUID-scoped lease as the campaign, and running unleased is now
+    # refused -- a lease that silently did not engage is how two workers share one card. Set
+    # the device the way the launcher does, so the real lock path is exercised here too.
+    monkeypatch.setenv("SHAPEFLOW_GPU_UUID", "GPU-ef013951-e496-78da-da70-a5a289dcc634")
+
     await canary.run_canary(settings, repo=REPO, task_limit=1)
 
     selector = captured["model_call_factory"]("cell-token", seed=47)

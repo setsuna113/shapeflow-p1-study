@@ -84,6 +84,20 @@ class CellOutcome:
     counts: dict = field(default_factory=dict)
 
 
+def _vendor_today_str() -> str:
+    """Vendor's own ``get_today_str``, so the recorded date is the one the prompts rendered.
+
+    Read through the vendor module rather than reimplemented: a second date formatter would
+    drift from the string actually interpolated into the compressor and final-report prompts,
+    which is the whole thing this value exists to detect.
+    """
+    try:
+        from open_deep_research.utils import get_today_str
+    except ImportError:  # pragma: no cover - vendor tree absent in pure-unit environments
+        return ""
+    return str(get_today_str())
+
+
 def _engine_epoch(settings: Settings) -> str:
     """Read the identity of the concrete vLLM boot serving cells.
 
@@ -486,6 +500,7 @@ class CampaignRunner:
                 provider_base_url=self.config.provider_base_url,
                 runner_token=self.config.runner_token,
                 store_checkpoint=self._store_checkpoint,
+                store_continuation=self._store_continuation,
                 graph=self._graph,
             )
         except Exception as e:  # noqa: BLE001 - a cell that died may have already spent tokens
@@ -618,6 +633,34 @@ class CampaignRunner:
         digest = CheckpointStore(self.settings.path("checkpoints")).put(checkpoint)
         ref = self.store.put_bytes(canonical_json(to_document(checkpoint)))
         self.ledger.register_artifact(ref.key, kind="checkpoint", raw_size=ref.raw_size,
+                                      stored_size=ref.stored_size)
+        return digest
+
+    def _store_continuation(self, continuation: dict) -> str:
+        """Persist the root/supervisor state a C fork writes its report into.
+
+        Stamped here rather than in the driver because the two fields that make a pair valid
+        are the runner's to know: which engine boot produced the shared upstream work, and
+        which UTC date the prompts were rendered under. ``get_today_str`` is ``datetime.now()``
+        and is formatted into both the compressor and the final-report prompt, so a boundary
+        whose arms straddle midnight differs by more than its treatment.
+        """
+        from ..odr.continuation import ContinuationEnvelope, ContinuationStore
+
+        envelope = ContinuationEnvelope(
+            task_id=str(continuation["task_id"]),
+            seed=int(continuation["seed"]),
+            research_brief=str(continuation["research_brief"]),
+            root_messages=tuple(continuation["root_messages"]),
+            notes=tuple(continuation["notes"]),
+            anchor_today_str=_vendor_today_str(),
+            anchor_engine_epoch=self._current_engine_epoch(),
+            anchor_run_ref=self.config.run_id,
+        )
+        digest = ContinuationStore(self.settings.path("checkpoints") / "continuations").put(
+            envelope)
+        ref = self.store.put_bytes(canonical_json(envelope.content()))
+        self.ledger.register_artifact(ref.key, kind="continuation", raw_size=ref.raw_size,
                                       stored_size=ref.stored_size)
         return digest
 
