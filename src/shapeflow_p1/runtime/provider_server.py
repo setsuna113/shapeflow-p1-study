@@ -683,19 +683,38 @@ class ProviderService:
             if key is None:
                 results[name] = {"configured": False, "ok": None, "detail": "no credential loaded"}
                 continue
-            try:
-                status, payload, _elapsed = self._upstream(
-                    url, headers, body, self._cfg.request_timeout_seconds)
-            except Exception as e:  # noqa: BLE001 - an unreachable upstream is a failed probe
+            # A transient connection error is not a rejected credential, and the two must not
+            # be reported the same way: one is retried, the other stops the campaign. Observed
+            # on the run host, where a single ConnectError to one upstream failed this gate and
+            # would have cost a full re-run of the whole 18-gate chain. Retried here, bounded,
+            # because the probe costs nothing.
+            outcome: Optional[tuple[int, Any]] = None
+            last_error = ""
+            for attempt in range(3):
+                try:
+                    status, payload, _elapsed = self._upstream(
+                        url, headers, body, self._cfg.request_timeout_seconds)
+                    outcome = (status, payload)
+                    break
+                except Exception as e:  # noqa: BLE001 - an unreachable upstream is retried
+                    last_error = type(e).__name__
+                    self._emit("CREDENTIAL_PROBE_RETRY", {"provider": name, "attempt": attempt})
+            if outcome is None:
                 results[name] = {
                     "configured": True, "ok": False,
-                    "detail": f"probe failed: {type(e).__name__}",
+                    "reachable": False,
+                    "detail": (
+                        f"upstream unreachable after 3 attempts ({last_error}); this is a "
+                        "connectivity failure, not a rejected credential"
+                    ),
                 }
                 continue
+            status, payload = outcome
             rejected = status in (401, 403)
             results[name] = {
                 "configured": True,
                 "ok": not rejected,
+                "reachable": True,
                 "status": status,
                 "detail": (
                     f"upstream rejected the credential with HTTP {status}"

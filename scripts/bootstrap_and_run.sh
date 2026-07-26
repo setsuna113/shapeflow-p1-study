@@ -226,9 +226,17 @@ PROBE_STATUS="$(as sfsteward curl -sS -o /tmp/sf-credential-probe.json -w '%{htt
   -H "Authorization: Bearer $(cat /etc/shapeflow-tokens/steward.token)" \
   -X POST "$PROBE_URL/v1/credentials/probe" 2>/dev/null || echo 000)"
 if [ "$PROBE_STATUS" != "200" ]; then
-  blocked "CREDENTIAL_REJECTED" \
-    "the provider's upstream credential probe returned HTTP $PROBE_STATUS: $(
-      head -c 400 /tmp/sf-credential-probe.json 2>/dev/null)"
+  # A rejected credential and an unreachable upstream both stop the launch, but they are
+  # different problems: one needs a new key, the other needs a retry. Naming them the same
+  # sent an operator looking for a bad credential after a transient connection error.
+  PROBE_BODY="$(head -c 500 /tmp/sf-credential-probe.json 2>/dev/null)"
+  case "$PROBE_BODY" in
+    *unreachable*) SLUG="UPSTREAM_UNREACHABLE" ;;
+    *)             SLUG="CREDENTIAL_REJECTED" ;;
+  esac
+  rm -f /tmp/sf-credential-probe.json
+  blocked "$SLUG" \
+    "the provider's upstream credential probe returned HTTP $PROBE_STATUS: $PROBE_BODY"
 fi
 rm -f /tmp/sf-credential-probe.json
 
