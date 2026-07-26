@@ -1351,7 +1351,7 @@ class ProviderService:
         prompt_sha = sha256_hex(json.dumps(outbound.get("messages", []), sort_keys=True)
                                 .encode("utf-8"))
         url = self._cfg.vllm_base_url.rstrip("/") + "/chat/completions"
-        gate = self._inference_gate if self._inference_gate is not None else contextlib.nullcontext()
+        gate = self._inference_gate or contextlib.nullcontext()
         with gate:
             # Queue wait ends here. SENT is recorded immediately before the only upstream call, so
             # the durable dispatch timestamp denotes service rather than time waiting at ingress.
