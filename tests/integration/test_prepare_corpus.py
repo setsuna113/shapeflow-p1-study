@@ -12,12 +12,11 @@ import json
 from pathlib import Path
 
 import pytest
+from fixtures.scripted_author import ScriptedAuthor
 
 from shapeflow_p1.campaign.prepare import load_sealed_registry, prepare_corpus
 from shapeflow_p1.campaign.settings import Settings
 from shapeflow_p1.evaluation.judge_client import DeepSeekJudge
-
-from fixtures.scripted_author import ScriptedAuthor
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -49,33 +48,67 @@ async def test_prepare_seals_a_registry_and_both_task_views(settings):
     assert result.audit.ok
 
 
-async def test_the_registry_is_write_once(settings):
-    await _prepare(settings)
-    with pytest.raises((RuntimeError, FileExistsError)):
-        await _prepare(settings)
+async def test_the_registry_itself_is_write_once(settings):
+    """The seal cannot be rewritten, whatever the caller intends.
 
-
-async def test_a_second_prepare_refuses_before_authoring_anything(settings):
-    """The write-once refusal must cost nothing.
-
-    It used to happen at seal time, after a full corpus had been authored: on the run host a
-    re-run paid DeepSeek to write 64 tasks and then discarded all of them, $2.07 for an error
-    that was knowable before the first request. The author is counted here because "refused"
-    and "refused without spending" are different guarantees.
+    Asserted directly against ``seal`` rather than through ``prepare_corpus``, because prepare
+    now resumes an existing corpus instead of failing on it -- and the guarantee that matters is
+    that the sealed bytes are never replaced.
     """
-    await _prepare(settings)
+    result = await _prepare(settings)
+    with pytest.raises((RuntimeError, FileExistsError)):
+        result.registry.seal(result.registry_path)
+
+
+async def test_a_second_prepare_resumes_without_authoring_anything(settings):
+    """A re-run must re-derive, not re-author, and must cost nothing.
+
+    The write-once check used to happen at seal time -- after a full corpus had been authored --
+    so on the run host a re-run paid DeepSeek to write 64 tasks and then discarded all of them:
+    $2.07 for an outcome knowable before the first request. The author's request log is what is
+    asserted, because "did not re-author" and "raised an exception" are different claims.
+    """
+    first = await _prepare(settings)
+    sealed_bytes = first.registry_path.read_bytes()
 
     author = ScriptedAuthor(clusters=16, per_cluster=4)
     judge = DeepSeekJudge(author, "deepseek-chat", "@SHAPEFLOW_PROVIDER@")
+    second = await prepare_corpus(
+        settings, judge=judge, authored_at_utc="2026-07-26T00:00:00Z",
+        target_model="Qwen3-14B-AWQ", total=64, clusters=16,
+    )
 
-    with pytest.raises(RuntimeError, match="nothing was charged"):
-        await prepare_corpus(
-            settings, judge=judge, authored_at_utc="2026-07-24T00:00:00Z",
-            target_model="Qwen3-14B-AWQ", total=64, clusters=16,
-        )
+    assert author.requests == [], "the resumed run authored anyway"
+    assert second.registry_sha256 == first.registry_sha256
+    assert first.registry_path.read_bytes() == sealed_bytes, "the seal was rewritten"
+    assert [t.task_id for t in second.registry.tasks] == [
+        t.task_id for t in first.registry.tasks]
+    assert second.audit.ok
 
-    # The assertion that matters: not that it refused, but that it refused for free.
-    assert author.requests == [], "the refused re-run authored anyway"
+
+async def test_a_resume_rebuilds_task_views_that_are_missing(settings):
+    """The views are a pure function of the seal, so a resume must be able to restore one.
+
+    This is the case that actually bit: the evaluator task views were added to the code after
+    the corpus had been sealed, so a resumed host had a registry but no evaluator views, and
+    build-truth failed three gates later reading a file nobody had written.
+    """
+    result = await _prepare(settings)
+    evaluator_view = (
+        settings.path("evaluator_root") / "tasks" / f"{result.registry.tasks[0].task_id}.json")
+    assert evaluator_view.exists()
+    evaluator_view.chmod(0o600)
+    evaluator_view.unlink()
+
+    author = ScriptedAuthor(clusters=16, per_cluster=4)
+    judge = DeepSeekJudge(author, "deepseek-chat", "@SHAPEFLOW_PROVIDER@")
+    await prepare_corpus(
+        settings, judge=judge, authored_at_utc="2026-07-26T00:00:00Z",
+        target_model="Qwen3-14B-AWQ", total=64, clusters=16,
+    )
+
+    assert evaluator_view.exists(), "the resume did not restore the missing view"
+    assert author.requests == []
 
 
 async def test_the_sealed_registry_digest_is_recomputed_not_trusted(settings):

@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
 
 from ..acquire.registry_audit import AuditReport, audit_registry, audit_tasks
 from ..acquire.task_author import author_tasks, authoring_manifest, plan_profiles
@@ -32,7 +32,8 @@ from ..canonical import canonical_json
 from ..hashing import sha256_hex
 from .settings import Settings
 
-__all__ = ["PrepareResult", "prepare_corpus", "write_task_views", "load_sealed_registry"]
+__all__ = ["PrepareResult", "prepare_corpus", "resume_sealed_corpus", "write_task_views",
+           "load_sealed_registry"]
 
 _STRATUM_TO_VOLUME = {
     "evidence_volume_low": "low",
@@ -186,8 +187,8 @@ async def prepare_corpus(
     judge,
     authored_at_utc: str,
     target_model: str,
-    total: Optional[int] = None,
-    clusters: Optional[int] = None,
+    total: int | None = None,
+    clusters: int | None = None,
 ) -> PrepareResult:
     """Author, audit, split and seal. Anything less than a complete corpus raises.
 
@@ -198,19 +199,14 @@ async def prepare_corpus(
     """
     task_config = settings.configs["task_source"]
 
-    # The seal is write-once, and that check used to happen *after* authoring: a re-run against
-    # an existing registry paid DeepSeek to author a full corpus and only then refused to write
-    # it. Observed on the run host -- $2.07 and 64 authored tasks, discarded. Nothing about the
-    # refusal needs the corpus to exist, so it moves ahead of the spend.
+    # An existing seal means the corpus was already authored, and re-authoring it would be both
+    # a waste and outcome-dependent corpus selection. This check used to live at seal time --
+    # *after* authoring -- so a re-run paid DeepSeek to write 64 tasks and then discarded all of
+    # them ($2.07 on the run host) for a refusal knowable before the first request.
     settings.ensure_paths("tasks", "steward_root")
     registry_path = settings.path("tasks") / str(task_config["source"]["registry_path"])
     if registry_path.exists():
-        raise RuntimeError(
-            f"{registry_path} already exists. A sealed registry is write-once: rewriting it "
-            "after any result exists would be outcome-dependent corpus selection. Nothing was "
-            "authored and nothing was charged. To continue the existing corpus, run the later "
-            "steps against it; to start a new one, give it a new data root and a new approval."
-        )
+        return resume_sealed_corpus(settings)
 
     splits = task_config["splits"]
     total = total or sum(splits.values())
@@ -280,6 +276,81 @@ async def prepare_corpus(
         registry=registry, registry_sha256=registry_sha, audit=sealed_audit,
         manifest_path=manifest_path, registry_path=registry_path,
         steward_task_count=steward_count, runner_task_count=runner_count,
+    )
+
+
+def resume_sealed_corpus(settings: Settings) -> PrepareResult:
+    """Re-derive everything downstream of an already-sealed registry, authoring nothing.
+
+    The registry is write-once, but the per-task views written from it are a pure function of
+    it: re-materializing them cannot select or reshape a corpus, because the corpus is already
+    fixed. So a second ``prepare`` is idempotent rather than fatal.
+
+    That distinction is load-bearing on a resumed host. The previous round quarantined its empty
+    frozen worlds and deliberately kept the registry, and the evaluator task views were added to
+    the code after that round sealed -- so refusing outright left ``build-truth`` reading files
+    that had never been written, three gates later.
+
+    The digest is re-derived on load, so a registry edited since sealing stops this rather than
+    silently seeding a new round from altered tasks.
+    """
+    from ..acquire.task_registry import AuthoringFingerprint, TaskRegistry, TaskSpec
+
+    body, digest = load_sealed_registry(settings)
+    task_config = settings.configs["task_source"]
+
+    tasks = tuple(
+        TaskSpec(
+            task_id=str(t["task_id"]),
+            topic=str(t["topic"]),
+            question=str(t["question"]),
+            required_facets=tuple(t["required_facets"]),
+            fixed_queries=tuple(t["fixed_queries"]),
+            strata=tuple(t["strata"]),
+            topic_cluster=str(t["topic_cluster"]),
+            conflict_probe=t.get("conflict_probe"),
+            negative_probe=t.get("negative_probe"),
+            corpus_tier=str(t.get("corpus_tier") or body["corpus_tier"]),
+            claim_scope=str(t.get("claim_scope") or body["claim_scope"]),
+        )
+        for t in body["tasks"]
+    )
+    fingerprint_body = dict(body["fingerprint"])
+    registry = TaskRegistry(
+        tasks=tasks,
+        split_of={str(t["task_id"]): str(t["split"]) for t in body["tasks"]},
+        reserve_order=tuple(body["reserve_order"]),
+        fingerprint=AuthoringFingerprint(
+            provider=str(fingerprint_body["provider"]),
+            requested_model=str(fingerprint_body["requested_model"]),
+            returned_model=str(fingerprint_body["returned_model"]),
+            system_fingerprint=str(fingerprint_body["system_fingerprint"]),
+            prompt_sha256=str(fingerprint_body["prompt_sha256"]),
+            seed=int(fingerprint_body["seed"]),
+            authored_at_utc=str(fingerprint_body["authored_at_utc"]),
+            sampling=dict(fingerprint_body.get("sampling") or {}),
+        ),
+        corpus_tier=str(body["corpus_tier"]),
+        claim_scope=str(body["claim_scope"]),
+    )
+
+    # The seal is re-audited, not assumed: this is the point where a corpus that no longer
+    # satisfies its own split/cluster invariants must stop, whether it was just authored or
+    # authored two days ago.
+    sealed_audit = audit_registry(registry, config=task_config)
+    sealed_audit.raise_if_failed()
+
+    steward_written, runner_written = write_task_views(settings, registry)
+    registry_path = settings.path("tasks") / str(task_config["source"]["registry_path"])
+    manifest_path = registry_path.parent / "authoring_manifest.json"
+    return PrepareResult(
+        registry=registry,
+        registry_sha256=digest,
+        audit=sealed_audit,
+        manifest_path=manifest_path,
+        registry_path=registry_path,
+        steward_task_count=steward_written,
+        runner_task_count=runner_written,
     )
 
 
