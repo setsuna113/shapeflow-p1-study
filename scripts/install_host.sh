@@ -148,7 +148,11 @@ find "$DATA_ROOT/approvals" -type d -exec chmod 0700 {} +
 # `---`, which cancels every u:<role>:r-x entry readonly_acl grants below. The 0700 directory
 # is the real gate; see shapeflow_p1.fsmode.
 find "$DATA_ROOT/approvals" -type f -exec chmod 0640 {} +
-readonly_acl "$DATA_ROOT/approvals" sfrunner sfevaluator
+# sfprovider reads it too. It is the identity that enforces the budget ceilings, so an
+# authorized cap raise has to be checkable against the approval that granted it -- otherwise
+# the one command that can widen a ceiling is the one command that cannot verify it is allowed
+# to. Read-only, like the other two; only the steward writes here.
+readonly_acl "$DATA_ROOT/approvals" sfrunner sfevaluator sfprovider
 
 # The steward tree is private except for acquisition manifests that evaluation verifies.
 # sfevaluator gets traverse-only on the root and inherited read-only access on that one subtree.
