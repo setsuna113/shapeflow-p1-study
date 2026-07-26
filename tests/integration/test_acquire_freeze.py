@@ -298,3 +298,34 @@ async def test_no_campaign_manifest_is_written_for_a_partial_world(settings):
                                  fetched_at_utc="2026-07-24T02:00:00Z")
     assert not finished.incomplete
     assert finished.campaign_manifest_path is not None
+
+
+async def test_only_tasks_narrows_within_the_split_and_cannot_widen_it(settings):
+    """Pulling a few worlds must not mean acquiring every world in the split.
+
+    RESERVE worlds are deliberately not fetched up front -- acquiring 16 that may never be used
+    would spend the cap on nothing. But a substituted task, or a small held-out set for judge
+    calibration, needs exactly one or two of them. That is a task filter, not a split change.
+    """
+    await _prepared(settings)
+    registry, _ = load_sealed_registry(settings)
+    screen = [t["task_id"] for t in registry["tasks"] if t["split"] == "FORMATIVE_SCREEN"]
+    reserve = [t["task_id"] for t in registry["tasks"] if t["split"] == "RESERVE"]
+    assert reserve, "fixture must seal a RESERVE split for this to mean anything"
+
+    fake = FakeExa()
+    outcome = await acquire_all(
+        settings, client_factory=_factory(settings, fake),
+        fetched_at_utc="2026-07-24T01:00:00Z", only_tasks=screen[:1],
+    )
+    assert outcome.tasks_acquired == 1
+
+    # A partial acquisition must not publish a campaign manifest describing a complete world.
+    assert outcome.campaign_manifest_path is None
+
+    # The filter narrows; it cannot reach a split the config excludes.
+    with pytest.raises(ValueError, match="outside the acquired splits"):
+        await acquire_all(
+            settings, client_factory=_factory(settings, fake),
+            fetched_at_utc="2026-07-24T01:00:00Z", only_tasks=reserve[:1],
+        )

@@ -68,13 +68,18 @@ class SamplingEnvelope:
     top_p: float = 1.0
     seed: Optional[int] = None
     max_tokens: Optional[int] = None
-    #: Only sent when the endpoint actually has this knob. On vLLM the thinking switch is a
-    #: request parameter (``chat_template_kwargs``); on DeepSeek it is a property of the
-    #: model id, so sending it would be inventing a control we do not have. What we can
-    #: measure either way is how many reasoning tokens came back, and that is recorded per
-    #: attempt.
+    #: On vLLM the thinking switch is a request parameter (``chat_template_kwargs``). An earlier
+    #: comment here claimed DeepSeek had no such knob and that thinking was a property of the
+    #: model id; that is wrong, and ``reasoning_effort`` below is the correction. Note that with
+    #: ``send_thinking_switch`` false this pair was never put on the wire at all, so declaring
+    #: ``enable_thinking: false`` described nothing -- the model reasoned by default.
     enable_thinking: bool = False
     send_thinking_switch: bool = False
+    #: DeepSeek's own control: one of low|medium|high|max|xhigh, validated server-side (an
+    #: unknown variant is a 400). ``None`` sends nothing and takes the endpoint default.
+    #: Reasoning tokens are billed *inside* ``completion_tokens``, so raising this eats into the
+    #: same ``max_tokens`` the JSON answer needs -- the two must move together.
+    reasoning_effort: Optional[str] = None
 
     def for_attempt(self, index: int) -> "SamplingEnvelope":
         """The envelope for retry ``index``.
@@ -89,6 +94,7 @@ class SamplingEnvelope:
             temperature=self.temperature, top_p=self.top_p, seed=self.seed + index,
             max_tokens=self.max_tokens, enable_thinking=self.enable_thinking,
             send_thinking_switch=self.send_thinking_switch,
+            reasoning_effort=self.reasoning_effort,
         )
 
     def request_fields(self) -> dict:
@@ -97,6 +103,8 @@ class SamplingEnvelope:
             fields["seed"] = self.seed
         if self.max_tokens is not None:
             fields["max_tokens"] = self.max_tokens
+        if self.reasoning_effort is not None:
+            fields["reasoning_effort"] = self.reasoning_effort
         return fields
 
     def content(self) -> dict:
@@ -104,6 +112,7 @@ class SamplingEnvelope:
             "temperature": self.temperature, "top_p": self.top_p, "seed": self.seed,
             "max_tokens": self.max_tokens, "enable_thinking": self.enable_thinking,
             "thinking_switch_sent": self.send_thinking_switch,
+            "reasoning_effort": self.reasoning_effort,
         }
 
 

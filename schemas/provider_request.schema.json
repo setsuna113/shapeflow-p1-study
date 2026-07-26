@@ -169,8 +169,19 @@
         "_call_key": {
           "type": "string"
         },
+        "reasoning_effort": {
+          "description": "DeepSeek's reasoning control, validated server-side (an unknown variant is a 400). Reasoning tokens are billed inside completion_tokens, so this shares the max_tokens ceiling with the JSON answer. Omitted entirely to take the endpoint default.",
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "max",
+            "xhigh"
+          ]
+        },
         "chat_template_kwargs": {
-          "description": "vLLM-style template switches. Forwarded only for endpoints that have them; DeepSeek's reasoning is a property of the model id, not a request parameter, so nothing invents one there.",
+          "description": "vLLM-style template switches, forwarded only for endpoints that have them. This previously claimed DeepSeek's reasoning was a property of the model id rather than a request parameter; that is wrong, and reasoning_effort above is the control it actually exposes.",
           "type": "object",
           "additionalProperties": {
             "type": [

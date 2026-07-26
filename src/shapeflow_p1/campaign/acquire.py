@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
@@ -229,8 +230,15 @@ async def acquire_all(
     *,
     client_factory,
     fetched_at_utc: str,
+    only_tasks: Collection[str] | None = None,
 ) -> AcquisitionOutcome:
     """Acquire and freeze every task in the configured splits. Idempotent per task.
+
+    ``only_tasks`` narrows to specific task ids *within* those splits. It cannot widen the
+    split filter, so it can never reach a world the config says not to fetch. Two uses: pulling
+    a single RESERVE world when a task is actually substituted in (which is the whole reason
+    RESERVE worlds are not fetched up front), and pulling a small held-out set for judge
+    calibration without spending the cap on 16 worlds that may never be used.
 
     ``client_factory(task_id) -> ExaCaptureClient`` is injected so the transport (which goes
     through the provider) is supplied by the caller and tests need no network.
@@ -252,10 +260,22 @@ async def acquire_all(
     outcome = AcquisitionOutcome()
     digests: dict[str, str] = {}
 
+    selected = None if only_tasks is None else set(only_tasks)
+    if selected is not None:
+        known = {t["task_id"] for t in registry["tasks"] if t["split"] in wanted}
+        missing = sorted(selected - known)
+        if missing:
+            raise ValueError(
+                f"only_tasks names ids outside the acquired splits: {missing}; widening the "
+                "split filter is a config change, not a call-site argument"
+            )
+
     for task in registry["tasks"]:
         if task["split"] not in wanted:
             continue
         task_id = task["task_id"]
+        if selected is not None and task_id not in selected:
+            continue
         manifest_path = acquisition_dir / f"{task_id}.json"
         complete, digest, reason = task_world_is_complete(settings, task_id, objects)
         if complete:
