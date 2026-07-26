@@ -1,12 +1,23 @@
 """Re-enter ``compress_research`` from a stored C boundary, and prove it is that boundary.
 
-The full-graph screen re-runs the whole graph per arm. For H that is correct -- divergence
-after the first intervention is a mediated treatment effect. For C it is not: the close
-reducer fires *after* all research, so it cannot have changed anything upstream, and every
-upstream difference between two full-graph C arms is pure noise that the estimate has to
-average away. With ~32 formative tasks there is nowhere near enough sample to do that, so the
-primary C effect is estimated from a same-checkpoint fork instead, and the full-graph C arms
-are retained as a secondary sensitivity that bounds the path this fork deliberately blocks.
+This is the **secondary** "direct node effect" of protocol section 15.1 #1 -- immediate
+representation, work and quality at one close boundary. It is not the primary C estimand and is
+not wired into any decision. The decision-facing estimand for P0/H/C/H+C alike is the full-graph
+``COUPLED_SEED_E2E_ITT``.
+
+An earlier revision of this module claimed the opposite, on the premise that "the close reducer
+fires after all research, so it cannot have changed anything upstream". **That premise is false.**
+In the pinned vendor graph, ``supervisor_tools`` puts the compressed note into
+``supervisor_messages`` and returns ``Command(goto="supervisor")``; the supervisor can then emit a
+fresh ``ConductResearch``, spawn a researcher and run new searches. C's own output conditions how
+much further research happens, so divergence after C is a real causal mediation path -- for the
+same reason it is for H -- and not noise to be averaged away.
+
+What this backend therefore measures is a *controlled direct effect*: one child's note is replaced
+while its siblings stay P0 and the supervisor's realized plan is held fixed. That is a different
+treatment from deploying C01 at every close node of a live run, and it cannot be summed into a
+whole-task work saving, because boundaries share upstream work and each would re-run the final
+writer. Useful as a mechanism probe; never a substitute for the end-to-end effect.
 
 **What "same checkpoint" is worth here rests on a proof, not an assertion.** The backend does
 not record which checkpoint it *intended* to load. It reconstructs a researcher state from the
@@ -35,6 +46,7 @@ from typing import Any
 from ..odr.adapter import thaw_message
 from ..odr.checkpoints import CCheckpoint
 from ..odr.continuation import ContinuationEnvelope, NoteSlot
+from ..runtime.request_tags import OpClass
 from .fork import ForkCapabilityError, ForkExecution, ForkSpec, TrialKind
 
 __all__ = [
@@ -48,7 +60,18 @@ __all__ = [
 
 #: The only op classes a fork may issue. Anything else means upstream work leaked into a
 #: comparison that claims none, so it is refused before dispatch rather than detected after.
-CLOSE_OP_ALLOWLIST = ("COMPRESSOR_P0", "COMPRESSOR_P1_SELECTOR", "FINAL_WRITER")
+#:
+#: ``COMPRESSOR_SHORT_PROSE`` belongs here because ``C00-PROSE`` is a fork arm and that is the op
+#: class it dispatches. Leaving it out did not disable the arm loudly -- it made the arm refuse
+#: itself at its own boundary, quietly removing ``C_ID_VS_PROSE`` from the Holm family. Derived
+#: from :class:`~shapeflow_p1.runtime.request_tags.OpClass` so this list cannot drift from the
+#: enum again; a close-boundary op that exists but is unlisted is what hid the bug.
+CLOSE_OP_ALLOWLIST = (
+    OpClass.COMPRESSOR_P0.value,
+    OpClass.COMPRESSOR_P1_SELECTOR.value,
+    OpClass.COMPRESSOR_SHORT_PROSE.value,
+    OpClass.FINAL_WRITER.value,
+)
 
 
 class UpstreamCallDuringFork(RuntimeError):

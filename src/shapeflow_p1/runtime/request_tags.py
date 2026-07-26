@@ -17,11 +17,18 @@ class OpClass(enum.Enum):
     PAGE_P0_SUMMARY = "PAGE_P0_SUMMARY"
     PAGE_P1_SELECTOR_LOCAL = "PAGE_P1_SELECTOR_LOCAL"
     PAGE_P1_SELECTOR_GLOBAL = "PAGE_P1_SELECTOR_GLOBAL"
+    # The SHORT_PROSE controls are model-backed work at the same two boundaries, and they get
+    # their own op classes rather than borrowing the selector's. Separating "structured ID" from
+    # "short prose" at op-class granularity is the entire purpose of H_ID_VS_PROSE and
+    # C_ID_VS_PROSE; a shared label makes the mechanism contrast unmeasurable in the ledger.
+    # strategies/factory.py already dispatches these exact strings.
+    PAGE_P1_SHORT_PROSE = "PAGE_P1_SHORT_PROSE"
     # researcher loop
     RESEARCHER_REACT = "RESEARCHER_REACT"
     # RESEARCHER_CLOSE boundary
     COMPRESSOR_P0 = "COMPRESSOR_P0"
     COMPRESSOR_P1_SELECTOR = "COMPRESSOR_P1_SELECTOR"
+    COMPRESSOR_SHORT_PROSE = "COMPRESSOR_SHORT_PROSE"
     # supervisor / writer
     SUPERVISOR_CONTINUE = "SUPERVISOR_CONTINUE"
     FINAL_WRITER = "FINAL_WRITER"
@@ -41,9 +48,11 @@ TREATMENT_OPS = frozenset({
     OpClass.PAGE_P0_SUMMARY,
     OpClass.PAGE_P1_SELECTOR_LOCAL,
     OpClass.PAGE_P1_SELECTOR_GLOBAL,
+    OpClass.PAGE_P1_SHORT_PROSE,
     OpClass.RESEARCHER_REACT,
     OpClass.COMPRESSOR_P0,
     OpClass.COMPRESSOR_P1_SELECTOR,
+    OpClass.COMPRESSOR_SHORT_PROSE,
     OpClass.SUPERVISOR_CONTINUE,
     OpClass.FINAL_WRITER,
 })

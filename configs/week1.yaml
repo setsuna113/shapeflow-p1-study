@@ -65,14 +65,19 @@ provider:
   # to cover it. Declared here so the frozen config states the number that was reserved.
   exa_usd_worst_case: 0.007
   tavily_credits_worst_case: 2.0
-  deepseek_input_tokens_worst_case: 32000.0
+  # Derived, not guessed. truth.py batches excerpts to max_prompt_chars=80_000; ID-dense JSON
+  # tokenizes at roughly 2.5 chars/token, so 80k chars is already ~32k tokens -- which is why
+  # the previous 32000 was not an upper bound at all and settlement logged 59
+  # `budget_under_reserved` incidents at 33-36k. This assumes a pathological 2 chars/token
+  # (40k) plus 8k for the system prompt, instructions and schema.
+  deepseek_input_tokens_worst_case: 48000.0
+  # Must track configs/judge.yaml model.max_tokens; reasoning tokens are billed inside
+  # completion_tokens, so thinking and the JSON answer share this ceiling.
   deepseek_output_tokens_worst_case: 8000.0
   # Derived from the two token ceilings above at the admission prices in configs/judge.yaml
-  # (32000/1e6*2.00 + 8000/1e6*8.00), not chosen. Settings.deepseek_usd_worst_case recomputes
-  # it at load and refuses a value that does not cover its own token bound: the previous 0.05
-  # was under half of what those ceilings imply, so every authoring call was admitted against
-  # a number it could exceed and settlement then clamped the overspend out of sight.
-  deepseek_usd_worst_case: 0.128
+  # (48000/1e6*0.435 + 8000/1e6*0.87 = 0.02784), not chosen. Settings.deepseek_usd_worst_case
+  # recomputes it at load and refuses a value that does not cover its own token bound.
+  deepseek_usd_worst_case: 0.028
   gpu_seconds_worst_case: 900.0
 
 # One alias per call site, all rewritten to the single served model before dispatch. This is the
@@ -88,8 +93,13 @@ model_aliases:
   qwen-selector-page: PAGE_P1_SELECTOR_LOCAL
   qwen-selector-page-global: PAGE_P1_SELECTOR_GLOBAL
   qwen-selector-close: COMPRESSOR_P1_SELECTOR
-  qwen-prose-page: PAGE_P1_SELECTOR_LOCAL
-  qwen-prose-close: COMPRESSOR_P1_SELECTOR
+  # The SHORT_PROSE controls carry their own op classes. These previously pointed at the
+  # structured-selector classes, so every prose-control request was recorded in the work ledger
+  # as structured-selector work -- collapsing the one distinction H_ID_VS_PROSE and
+  # C_ID_VS_PROSE are there to measure. The engine still receives the same served model; only
+  # the ledger label changes.
+  qwen-prose-page: PAGE_P1_SHORT_PROSE
+  qwen-prose-close: COMPRESSOR_SHORT_PROSE
 
 # Vendor knobs both arms share. P0 and P1 must start from the same bytes under the same
 # truncation, so max_content_length is protocol, not a tuning parameter.
@@ -255,23 +265,39 @@ screen:
   # block is not a paired observation and is never spliced with another one.
   require_complete_blocks: true
 
-# The PRIMARY C estimand. C treatment fires after all research, so it cannot have changed
-# anything upstream -- every upstream difference between two full-graph C arms is pure noise
-# the estimate must average away, and ~32 formative tasks cannot do that. So the headline C
-# effect is a same-checkpoint fork, and the full-graph C_* arms in screen_arms above are
-# demoted to a secondary sensitivity that bounds the mediation path this phase blocks.
+# The SECONDARY "direct node effect" of protocol section 15.1 #1: a same-checkpoint fork that
+# answers immediate representation/work/quality at one close boundary. It is NOT the primary C
+# estimand and is NOT wired into any decision this round -- screen.primary_estimand above
+# (COUPLED_SEED_E2E_ITT) is the single decision-facing estimand for P0/H/C/H+C alike.
 #
-# Naming it C_FROZEN_CONTINUATION rather than C_ONLY_E2E is deliberate. Re-entering the
-# supervisor would re-run SUPERVISOR_CONTINUE, which can spawn a fresh researcher with real
-# search -- upstream work after the fork, differing between arms. So the supervisor's realized
-# plan is held fixed: only this child's note changes, and only final_report_generation runs.
-# Both arms still reach a terminal report; the blocked path is named, not hidden.
+# A previous revision declared this block "the PRIMARY C estimand", on the premise that "C fires
+# after all research, so it cannot have changed anything upstream". That premise is false. In the
+# pinned vendor graph, supervisor_tools puts the compressed note into supervisor_messages and
+# returns Command(goto="supervisor"); the supervisor can then emit another ConductResearch, spawn
+# a researcher and run new searches. C's own output conditions how much further research happens,
+# so post-C divergence is a real causal mediation path, not noise to be averaged away.
+#
+# Holding the supervisor's realized plan fixed therefore measures a controlled direct effect of
+# replacing one child's note while its siblings stay P0 -- a different treatment from deploying
+# C01 across every close node of a live run. It also cannot be summed into a whole-task work
+# saving: boundaries share upstream work and each would re-run the final writer. Promoting it
+# would additionally break the core 2x2, since H and H+C are full-graph E2E and main effects and
+# the HxC interaction must come from one estimand.
 #
 # This block is hash-locked like every other: changing an arm, the allowlist or terminal_mode
 # changes week1_sha and invalidates the launch approval.
 c_fork:
   split: FORMATIVE_SCREEN
+  # Names the TrialKind the backend implements, so config and code cannot drift.
   estimand: C_FROZEN_CONTINUATION
+  # Its place in protocol section 15.1's taxonomy: estimand #1, the direct node effect. The
+  # decision-facing estimand is #2, screen.primary_estimand (COUPLED_SEED_E2E_ITT), for C
+  # exactly as for H.
+  estimand_class: DIRECT_NODE_EFFECT
+  # Not read by any decision path, and no production caller exists this round. Both flags are
+  # config-visible so "secondary" is a frozen property rather than a claim in a commit message.
+  decision_facing: false
+  wired: false
   # One full-graph P0 cell per task supplies the trajectory, every close checkpoint, the
   # continuation envelope, and the upstream work constant every arm of that anchor carries.
   anchor_variant: P0
@@ -284,9 +310,15 @@ c_fork:
   # The only op classes a fork arm may issue. The provider refuses anything else before
   # dispatch, so a leaked researcher call costs nothing rather than being found afterwards.
   # Widening this is a binding change, deliberately not a runtime flag.
-  allowed_op_classes: [COMPRESSOR_P0, COMPRESSOR_P1_SELECTOR, FINAL_WRITER]
-  # Bounds the phase against the same GPU budget as the screen. Each arm is two model calls,
-  # so this is far cheaper per boundary than a full-graph cell -- the anchor is the cost.
+  #
+  # COMPRESSOR_SHORT_PROSE is required, not optional: C00-PROSE is a listed arm above and it
+  # dispatches that op class. Omitting it made the arm refuse itself at its own boundary, which
+  # would have silently removed C_ID_VS_PROSE -- one of the six Holm-family mechanism contrasts.
+  allowed_op_classes: [COMPRESSOR_P0, COMPRESSOR_P1_SELECTOR, COMPRESSOR_SHORT_PROSE, FINAL_WRITER]
+  # Bounds the phase against the same GPU budget as the screen. Cheaper per boundary than a
+  # full-graph cell -- the anchor is the cost. The per-arm call count is NOT fixed: a CPU close
+  # issues no selector call at all, a strict-P1 fallback issues selector + P0 compressor + writer,
+  # and retries add more. Work is counted from real ledger events, never from an assumed constant.
   max_boundaries_per_task: 2
   # Arms run back to back with their anchor. get_today_str() is datetime.now() and is
   # formatted into both the compressor and the final-report prompt, and the shared upstream

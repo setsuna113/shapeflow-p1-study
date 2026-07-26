@@ -1,9 +1,13 @@
-"""The C-fork phase is wired and bound, not dormant code behind a default-off flag.
+"""The C-fork block is internally coherent, and honestly declared as secondary and unwired.
 
-The point of landing the fork before the freeze was that it become a real experimental path
-inside the approval hash. A block that exists but changes no digest, names arms that are not
-runnable, or declares an estimand nothing implements would be the same dormancy with extra
-YAML -- so each of those is asserted here rather than assumed.
+This phase implements protocol section 15.1's *direct node effect* -- a controlled direct effect
+at one close boundary. It is deliberately not decision-facing this round, and these tests pin
+that: the block must declare itself secondary and unwired, C must carry no per-node estimand
+override, and the single decision-facing estimand stays the full-graph COUPLED_SEED_E2E_ITT.
+
+The rest still applies: a block that names arms which are not runnable, declares an estimand
+nothing implements, or lists an allowlist that would refuse its own arms is broken whether or
+not anything reads it.
 """
 
 from __future__ import annotations
@@ -67,19 +71,40 @@ def test_the_terminal_mode_is_config_visible_and_validated(week1):
     assert week1["c_fork"]["terminal_mode"] in ("REPORT", "CLOSE_ONLY")
 
 
-def test_the_full_graph_c_arms_are_demoted_to_sensitivity(decision):
-    """The headline C effect must come from the fork, with the blocked path stated."""
-    node = decision["structured_increment"]["by_node"]["C_VISIBLE"]
-    assert node["primary_effect_source"] == "C_FROZEN_CONTINUATION_FORK"
-    assert node["secondary_effect_source"] == "FULL_GRAPH_COUPLED_SEED_E2E"
-    assert node["secondary_effect_use"].startswith("SENSITIVITY_ONLY")
-    assert node["mediation_gap_reporting_required"] is True
+def test_c_carries_no_per_node_estimand_override(decision):
+    """C's decision-facing effect is the full-graph E2E ITT, exactly as H's is.
+
+    An earlier revision made the fork C's primary effect source, on the premise that C fires
+    after all research so upstream differences are noise. The vendor graph refutes that:
+    supervisor_tools feeds the compressed note back into supervisor_messages and returns
+    Command(goto="supervisor"), so C's output conditions whether more research happens.
+    Splitting the estimand also makes the core 2x2 incoherent -- the H main effect, the C main
+    effect and the HxC interaction have to come from one estimand.
+    """
+    by_node = decision["structured_increment"]["by_node"]
+    c_node = by_node["C_VISIBLE"]
+    for banned in (
+        "primary_effect_source",
+        "secondary_effect_source",
+        "secondary_effect_use",
+        "mediation_gap_reporting_required",
+        "work_fraction_basis",
+    ):
+        assert banned not in c_node, (
+            f"C_VISIBLE re-acquired {banned!r}: C must not carry a per-node estimand override"
+        )
+    # Structurally the same shape as the other two nodes -- that symmetry is the guarantee.
+    assert set(c_node) == set(by_node["WEBPAGE_P1"])
 
 
-def test_the_work_fraction_basis_forbids_the_fabricated_saving(decision):
-    """Post-boundary alone reports a report produced by two model calls."""
-    node = decision["structured_increment"]["by_node"]["C_VISIBLE"]
-    assert node["work_fraction_basis"] == "TOTAL_WITH_SHARED_UPSTREAM"
+def test_the_fork_is_declared_secondary_and_unwired(week1):
+    """Secondary must be a frozen config property, not a claim in a commit message."""
+    block = week1["c_fork"]
+    assert block["decision_facing"] is False
+    assert block["wired"] is False
+    assert block["estimand_class"] == "DIRECT_NODE_EFFECT"
+    # The single decision-facing estimand, for every node alike.
+    assert week1["screen"]["primary_estimand"] == "COUPLED_SEED_E2E_ITT"
 
 
 def test_the_block_enters_the_execution_binding(tmp_path, monkeypatch):

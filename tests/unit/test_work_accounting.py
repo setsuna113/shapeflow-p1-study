@@ -91,3 +91,52 @@ def test_non_overlap_ignores_judge_intervals():
         _ev(OpClass.JUDGE_ATOMIZE, 0.5, 1.5),  # overlaps in time but is not treatment
     ]
     assert_non_overlapping(events)  # no raise
+
+
+# --- the op-class registries must not drift apart -----------------------------------------
+
+
+def test_every_dispatchable_alias_names_an_op_class_the_ledger_knows():
+    """Three registries describe op classes; a gap between them loses work silently.
+
+    ``selector_client.ALIAS_BY_OP`` (what the client dispatches), ``OpClass`` (what the ledger
+    accepts) and ``configs/week1.yaml:model_aliases`` (what the provider maps an alias back to)
+    must agree. They did not: the SHORT_PROSE op classes were dispatched by
+    ``strategies/factory.py`` and listed in ALIAS_BY_OP, but were absent from OpClass -- so the
+    config pointed their aliases at the *structured selector* classes instead. Nothing raised.
+    Prose-control work was simply recorded under the selector's label, collapsing the exact
+    distinction H_ID_VS_PROSE and C_ID_VS_PROSE exist to measure.
+
+    ``work_accounting`` turns an unknown op_class into an ``unavailable`` row rather than an
+    error, so a future gap would drop that work out of the totals with nothing to notice.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    from shapeflow_p1.campaign.selector_client import ALIAS_BY_OP
+
+    known = {o.value for o in OpClass}
+    assert set(ALIAS_BY_OP) <= known, set(ALIAS_BY_OP) - known
+
+    repo = Path(__file__).resolve().parents[2]
+    config = yaml.safe_load((repo / "configs" / "week1.yaml").read_text(encoding="utf-8"))
+    aliases = config["model_aliases"]
+
+    unknown = {op for op in aliases.values() if op not in known}
+    assert not unknown, f"model_aliases names op classes absent from OpClass: {sorted(unknown)}"
+
+    # The alias the client sends must map back to the op class it meant, or the ledger records
+    # one kind of work as another.
+    for op_class, alias in ALIAS_BY_OP.items():
+        assert alias in aliases, f"{alias!r} is dispatchable but undeclared in model_aliases"
+        assert aliases[alias] == op_class, (
+            f"alias {alias!r} is dispatched as {op_class} but the provider records it as "
+            f"{aliases[alias]}"
+        )
+
+
+def test_short_prose_controls_count_as_treatment_work():
+    """Omitted from TREATMENT_OPS, the prose controls' GPU work vanishes from every total."""
+    assert is_treatment_work(OpClass.PAGE_P1_SHORT_PROSE)
+    assert is_treatment_work(OpClass.COMPRESSOR_SHORT_PROSE)

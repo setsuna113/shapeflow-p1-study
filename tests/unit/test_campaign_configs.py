@@ -253,14 +253,15 @@ def test_the_holdout_is_not_opened_this_round(settings):
 def test_budget_caps_are_the_hash_locked_values(settings):
     """Pins the caps so a change has to be deliberate, not a default that drifted.
 
-    deepseek_usd was raised from 10 to 200 on 2026-07-26 on explicit instruction: measured on
-    this corpus, building the answer key costs ~$3.50 per task, so the original ceiling covered
-    2 of 48 TruthPackets and could not produce a usable denominator at all.
+    Re-derived 2026-07-26 at verified prices. The earlier set was denominated in an invented
+    2.00/8.00 price snapshot that over-stated spend ~19x, so its $200 was about $10 of real
+    authority -- and its 20,000-request cap would have halted the campaign well before the
+    dollar cap was ever approached.
     """
     caps = settings.budget_caps()
     assert caps["tavily_requests"] == 500.0
-    assert caps["deepseek_usd"] == 200.0
-    assert caps["deepseek_requests"] == 20000.0
+    assert caps["deepseek_usd"] == 400.0
+    assert caps["deepseek_requests"] == 150000.0
     assert caps["gpu_seconds"] == 150 * 3600.0
 
 
@@ -339,18 +340,26 @@ def test_a_missing_judgment_is_never_imputed(settings):
 
 
 def test_the_pricing_snapshot_records_its_source_and_whether_it_is_verified(settings):
-    """An unverified price must say so, and must over-count rather than under-count."""
+    """A verified price must name its source and date; an unverified one must over-count.
+
+    Settlement is now computed at the published rates rather than an invented ceiling. The
+    invented one made the ledger read $31.40 against a real bill near $1.60, which also made
+    every USD cap meaningless. Reservations remain worst-case via the token ceilings.
+    """
     pricing = settings.get("judge", "pricing")
     assert pricing["source"].startswith("https://")
-    assert pricing["retrieved_utc"] == "2026-07-24"
-    assert pricing["verified"] is False
+    assert pricing["retrieved_utc"] == "2026-07-26"
+    assert pricing["verified"] is True
+    # Quoted for the dearer candidate model, so it still bounds whichever judge is selected.
     assert "upper_bound" in pricing["basis"]
+    assert pricing["usd_per_1m_input_tokens_cached"] < pricing["usd_per_1m_input_tokens"]
 
 
 def test_the_provider_config_is_built_from_the_campaign_config(settings):
     config = settings.provider_config()
     assert config.bind_host == "127.0.0.1"
-    assert config.deepseek_usd_per_1m_input == 2.00
+    assert config.deepseek_usd_per_1m_input == 0.435
+    assert config.deepseek_usd_per_1m_input_cached == 0.003625
     assert config.model_aliases["qwen-selector-page"].value == "PAGE_P1_SELECTOR_LOCAL"
     assert config.max_consecutive_failures == 5
 
@@ -370,8 +379,12 @@ def test_the_money_reservation_covers_its_own_token_ceilings(settings):
 def test_a_reservation_below_its_token_bound_is_refused_at_load(settings, tmp_path):
     from shapeflow_p1.config import ConfigError
 
+    # Derived from the live config rather than hard-coded: a literal 0.05 silently stopped
+    # discriminating the moment verified prices dropped the real bound below it, and a test
+    # that cannot fail is worse than no test.
+    derived = settings.deepseek_usd_worst_case()
     shrunk = dict(settings.configs["week1"])
-    shrunk["provider"] = dict(shrunk["provider"], deepseek_usd_worst_case=0.05)
+    shrunk["provider"] = dict(shrunk["provider"], deepseek_usd_worst_case=derived / 2)
     settings.configs["week1"] = shrunk
     with pytest.raises(ConfigError, match="upper bound"):
         settings.deepseek_usd_worst_case()

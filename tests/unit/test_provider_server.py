@@ -474,6 +474,48 @@ def test_deepseek_usd_is_derived_from_reported_usage(tmp_path):
         "SELECT kind FROM incidents WHERE kind='budget_under_reserved'").fetchone() is not None
 
 
+def test_cache_hit_prompt_tokens_are_charged_at_the_cache_rate(tmp_path):
+    """DeepSeek bills cache hits ~120x below misses and reports the split.
+
+    A judging workload re-sends near-identical prompts constantly, so charging every prompt
+    token at the miss rate materially over-counts -- which is how a ledger reading $31.40 was
+    produced against a real bill near $1.60.
+    """
+    upstream = FakeUpstream([(200, {
+        "id": "d1", "model": "deepseek-v4-pro",
+        "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": 1_000_000, "completion_tokens": 0,
+            "prompt_cache_hit_tokens": 750_000, "prompt_cache_miss_tokens": 250_000,
+        },
+    })])
+    service, _ledger, budget, _r = _service(tmp_path, upstream=upstream)
+    before = budget.available("deepseek_usd")
+    service.deepseek_chat(_deepseek_body(), role="evaluator")
+    charged = before - budget.available("deepseek_usd")
+
+    cfg = ProviderConfig()
+    expected = 0.25 * cfg.deepseek_usd_per_1m_input + 0.75 * cfg.deepseek_usd_per_1m_input_cached
+    assert charged == pytest.approx(expected)
+    # And it must be strictly cheaper than pricing the whole prompt as a miss, or the split
+    # is being read but not applied.
+    assert charged < cfg.deepseek_usd_per_1m_input
+
+
+def test_an_unreported_cache_split_is_charged_as_all_miss(tmp_path):
+    """Absent the split, over-count rather than under-count: a bound must stay a bound."""
+    upstream = FakeUpstream([(200, {
+        "id": "d1", "model": "deepseek-v4-pro",
+        "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1_000_000, "completion_tokens": 0},
+    })])
+    service, _ledger, budget, _r = _service(tmp_path, upstream=upstream)
+    before = budget.available("deepseek_usd")
+    service.deepseek_chat(_deepseek_body(), role="evaluator")
+    charged = before - budget.available("deepseek_usd")
+    assert charged == pytest.approx(ProviderConfig().deepseek_usd_per_1m_input)
+
+
 # --- schemas and op classes -----------------------------------------------------------------
 
 

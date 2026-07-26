@@ -239,11 +239,19 @@ class ProviderConfig:
 
     # Pricing snapshot (source + retrieval date live in configs/judge.yaml and are hashed
     # into the protocol SHA). USD is derived here so the ledger holds money, not just tokens.
-    # These defaults mirror that snapshot rather than an older, cheaper one: when they
-    # diverged, every test priced a call at a quarter of what production charged for it, and
-    # the test named "usd is derived from reported usage" passed against the wrong rate.
-    deepseek_usd_per_1m_input: float = 2.00
-    deepseek_usd_per_1m_output: float = 8.00
+    #
+    # VERIFIED against the published price list, replacing an invented "conservative upper
+    # bound" of 2.00/8.00 that over-reported spend by ~19x. An upper bound is the right instinct
+    # for *reservations*, but it is the wrong thing to write into the settled ledger: the
+    # recorded spend then bears no relation to the bill, and a cap expressed in those units
+    # stops meaning anything. Reservations stay worst-case; settlement is now actual.
+    #
+    # DeepSeek prices cache-hit prompt tokens ~50x cheaper than cache-miss, and reports the
+    # split in usage. Charging every prompt token at the miss rate is a large over-count on a
+    # judging workload, which re-sends near-identical prompts constantly.
+    deepseek_usd_per_1m_input: float = 0.435          # v4-pro cache miss (the dearer model)
+    deepseek_usd_per_1m_input_cached: float = 0.003625
+    deepseek_usd_per_1m_output: float = 0.87
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "ProviderConfig":
@@ -1283,7 +1291,14 @@ class ProviderService:
     def _deepseek_actuals(self, usage: Mapping[str, Any]) -> dict[str, float]:
         prompt = float(usage.get("prompt_tokens", 0) or 0)
         completion = float(usage.get("completion_tokens", 0) or 0)
-        usd = (prompt / 1_000_000.0) * self._cfg.deepseek_usd_per_1m_input + \
+        # DeepSeek reports the cache split; use it when present. Anything not positively
+        # reported as a cache hit is charged at the miss rate, so a provider that stops
+        # reporting the split over-counts rather than under-counts.
+        hit = float(usage.get("prompt_cache_hit_tokens", 0) or 0)
+        hit = min(max(hit, 0.0), prompt)
+        miss = prompt - hit
+        usd = (miss / 1_000_000.0) * self._cfg.deepseek_usd_per_1m_input + \
+              (hit / 1_000_000.0) * self._cfg.deepseek_usd_per_1m_input_cached + \
               (completion / 1_000_000.0) * self._cfg.deepseek_usd_per_1m_output
         return {
             "deepseek_requests": 1.0,

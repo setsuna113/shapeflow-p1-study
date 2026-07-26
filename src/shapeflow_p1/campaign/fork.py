@@ -81,8 +81,14 @@ class TrialKind(str, Enum):
     #: response is deliberately *blocked*: re-entering the supervisor would re-run
     #: SUPERVISOR_CONTINUE, which can spawn a fresh researcher with real search -- upstream
     #: work after the fork, differing between arms. Naming it separately stops any artifact
-    #: from claiming an end-to-end run it did not perform; the full-graph C arms remain as
-    #: the secondary sensitivity that bounds the blocked path.
+    #: from claiming an end-to-end run it did not perform.
+    #:
+    #: This is protocol section 15.1's *direct node effect*: a controlled direct effect at one
+    #: boundary, secondary by construction. It is not the primary C estimand and the full-graph
+    #: C arms are not "demoted" beneath it -- ``COUPLED_SEED_E2E_ITT`` is decision-facing for
+    #: C exactly as it is for H. Nor does the gap between this and a full-graph run constitute a
+    #: statistical bound on the blocked mediation path: that difference can be described, but
+    #: bounding it would need identification assumptions this design does not supply.
     C_FROZEN_CONTINUATION = "C_FROZEN_CONTINUATION"
 
 

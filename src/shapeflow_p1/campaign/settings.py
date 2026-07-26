@@ -103,6 +103,7 @@ class Settings:
         block["model_aliases"] = dict(self.get("week1", "model_aliases"))
         pricing = self.admission_pricing()
         block["deepseek_usd_per_1m_input"] = pricing["usd_per_1m_input_tokens"]
+        block["deepseek_usd_per_1m_input_cached"] = pricing["usd_per_1m_input_tokens_cached"]
         block["deepseek_usd_per_1m_output"] = pricing["usd_per_1m_output_tokens"]
         block["deepseek_usd_worst_case"] = self.deepseek_usd_worst_case()
         block["exa_usd_worst_case"] = self.exa_usd_worst_case()
@@ -127,6 +128,10 @@ class Settings:
         official = self.get("judge", "pricing")
         rates = {
             "usd_per_1m_input_tokens": float(official["usd_per_1m_input_tokens"]),
+            # Cache-hit prompt tokens bill ~120x below cache-miss. Reservations ignore the
+            # discount (they must bound the worst case, where nothing is cached); settlement
+            # applies it, which is why it travels with the other rates rather than as a default.
+            "usd_per_1m_input_tokens_cached": float(official["usd_per_1m_input_tokens_cached"]),
             "usd_per_1m_output_tokens": float(official["usd_per_1m_output_tokens"]),
         }
         override = self.configs["judge"].get("admission_pricing") or {}

@@ -34,12 +34,13 @@ def test_decision_thresholds_are_the_v01_values():
 def test_budget_caps_are_the_v01_hard_bounds():
     data, _ = load_config(CONFIGS / "budget_v1.yaml")
     assert require(data, "api_budget", "tavily_max_requests") == 500
-    # Raised from 10.00 on 2026-07-26 on explicit instruction; see configs/budget_v1.yaml for
-    # the measurement it was sized from. The token and request caps move with it, because
-    # leaving any one of them behind stops the build just as dead having spent the others.
-    assert require(data, "api_budget", "deepseek_max_usd") == 200.00
-    assert require(data, "api_budget", "deepseek_max_requests") == 20000
-    assert require(data, "api_budget", "deepseek_max_output_tokens") == 18000000
+    # Re-derived 2026-07-26 at verified prices; see configs/budget_v1.yaml. The earlier set was
+    # denominated in an invented price snapshot that over-stated spend ~19x. All four move
+    # together and are sized to bind at roughly the same point, because leaving any one behind
+    # stops the run just as dead having spent the others.
+    assert require(data, "api_budget", "deepseek_max_usd") == 400.00
+    assert require(data, "api_budget", "deepseek_max_requests") == 150000
+    assert require(data, "api_budget", "deepseek_max_output_tokens") == 140000000
     assert require(data, "campaign_budget", "max_gpu_hours") == 150
 
 

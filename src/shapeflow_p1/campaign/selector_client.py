@@ -24,6 +24,7 @@ from typing import Any, Optional
 
 from ..p1.contracts import P1_CONTRACTS
 from ..providers.provider_client import ProviderCallError, ProviderClient
+from ..runtime.request_tags import OpClass
 
 __all__ = [
     "SelectorModelCall",
@@ -37,22 +38,28 @@ __all__ = [
 
 #: op class -> the model alias that carries it. The provider rewrites every alias to the one
 #: served model, so P0 and P1 issue byte-identical upstream requests.
+#:
+#: Keyed off :class:`OpClass` rather than bare strings. These two registries previously drifted:
+#: the SHORT_PROSE op classes lived here but were absent from the enum, so the aliases for them
+#: were pointed at the *selector* op classes instead. Nothing failed loudly -- the ledger simply
+#: recorded prose-control work under the structured-selector label, which is exactly the
+#: distinction H_ID_VS_PROSE and C_ID_VS_PROSE exist to measure.
 ALIAS_BY_OP = {
-    "PAGE_P1_SELECTOR_LOCAL": "qwen-selector-page",
-    "PAGE_P1_SELECTOR_GLOBAL": "qwen-selector-page-global",
-    "COMPRESSOR_P1_SELECTOR": "qwen-selector-close",
-    "PAGE_P1_SHORT_PROSE": "qwen-prose-page",
-    "COMPRESSOR_SHORT_PROSE": "qwen-prose-close",
+    OpClass.PAGE_P1_SELECTOR_LOCAL.value: "qwen-selector-page",
+    OpClass.PAGE_P1_SELECTOR_GLOBAL.value: "qwen-selector-page-global",
+    OpClass.COMPRESSOR_P1_SELECTOR.value: "qwen-selector-close",
+    OpClass.PAGE_P1_SHORT_PROSE.value: "qwen-prose-page",
+    OpClass.COMPRESSOR_SHORT_PROSE.value: "qwen-prose-close",
 }
 
 STRUCTURED_SELECTOR_OPS = frozenset({
-    "PAGE_P1_SELECTOR_LOCAL",
-    "PAGE_P1_SELECTOR_GLOBAL",
-    "COMPRESSOR_P1_SELECTOR",
+    OpClass.PAGE_P1_SELECTOR_LOCAL.value,
+    OpClass.PAGE_P1_SELECTOR_GLOBAL.value,
+    OpClass.COMPRESSOR_P1_SELECTOR.value,
 })
 SHORT_PROSE_OPS = frozenset({
-    "PAGE_P1_SHORT_PROSE",
-    "COMPRESSOR_SHORT_PROSE",
+    OpClass.PAGE_P1_SHORT_PROSE.value,
+    OpClass.COMPRESSOR_SHORT_PROSE.value,
 })
 
 if (
@@ -60,6 +67,11 @@ if (
     or STRUCTURED_SELECTOR_OPS | SHORT_PROSE_OPS != frozenset(ALIAS_BY_OP)
 ):
     raise RuntimeError("selector op policy does not partition every treatment model alias")
+
+#: Every alias this module can emit must name an op class the ledger knows, or the work lands in
+#: ``unavailable`` (work_accounting rejects an unknown op_class) and silently leaves the totals.
+if not frozenset(ALIAS_BY_OP) <= {o.value for o in OpClass}:
+    raise RuntimeError("selector aliases reference op classes absent from OpClass")
 
 
 _SCHEMA_PREFIX = "selector_output_"

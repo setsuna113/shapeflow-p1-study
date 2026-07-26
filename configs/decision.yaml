@@ -117,26 +117,21 @@ structured_increment:
       primary_arm_id: H_MARKDOWN_ID
       required_contrast_ids: [H_LLM_VS_CPU, H_ID_VS_PROSE]
       decision_use: REQUIRED_FOR_POSITIVE_P1_MECHANISM_ATTRIBUTION
+    # Deliberately identical in kind to WEBPAGE_P1 above: no per-node estimand override. A
+    # previous revision made C's headline effect a same-checkpoint fork, on the premise that "C
+    # fires after all research, so upstream differences are pure noise". That premise is false in
+    # the pinned vendor graph: supervisor_tools feeds the compressed note back into
+    # supervisor_messages and returns Command(goto="supervisor"), so C's own output conditions
+    # whether more research happens. Post-C divergence is a real mediation path, and holding the
+    # supervisor's plan fixed measures a controlled direct effect, not the effect of deploying C.
+    # Splitting the estimand also makes the core 2x2 incoherent -- H main effect, C main effect
+    # and the HxC interaction must come from one estimand. See protocol section 15.1: the
+    # frozen-source end-to-end ITT is Week-1's primary product effect; the same-checkpoint fork
+    # is the separate "direct node effect", answering immediate representation/work/quality only.
     C_VISIBLE:
       primary_arm_id: C_ID
       required_contrast_ids: [C_LLM_VS_CPU, C_ID_VS_PROSE]
       decision_use: REQUIRED_FOR_POSITIVE_P1_MECHANISM_ATTRIBUTION
-      # C treatment fires after all research, so it cannot have changed anything upstream.
-      # Every upstream difference between two full-graph C arms is therefore pure noise the
-      # estimate must average away, and ~32 formative tasks cannot. The headline C effect is
-      # the same-checkpoint fork; the full-graph arms above remain, demoted, to bound the
-      # supervisor-mediated path the fork deliberately blocks.
-      primary_effect_source: C_FROZEN_CONTINUATION_FORK
-      secondary_effect_source: FULL_GRAPH_COUPLED_SEED_E2E
-      secondary_effect_use: SENSITIVITY_ONLY_BOUNDS_BLOCKED_MEDIATION_PATH
-      # The fork holds the supervisor's realized plan fixed, so it cannot see a C output that
-      # would have changed how much further research happened. That gap is a limitation of the
-      # primary estimand and must be stated, not inferred from its absence.
-      mediation_gap_reporting_required: true
-      # Any decision-facing work fraction for this node is computed on total work including the
-      # shared frozen upstream. Computing it on post-boundary work alone would report a fork
-      # arm as having produced a report for two model calls, which is a fabricated saving.
-      work_fraction_basis: TOTAL_WITH_SHARED_UPSTREAM
     H_PLUS_C_VISIBLE:
       primary_arm_id: H_PLUS_C
       required_contrast_ids: [HC_LLM_VS_CPU, HC_ID_VS_PROSE]

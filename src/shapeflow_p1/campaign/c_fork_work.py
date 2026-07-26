@@ -1,10 +1,16 @@
 """Attribute work to a C fork without inventing a saving that does not exist.
 
-A fork arm physically performs only two model calls -- its compressor and one final writer --
-because the whole upstream trajectory ran once, in the anchor. The tempting bookkeeping is to
-record each arm's work as those two calls. That would be a fabrication: it says the arm
-produced a report having done almost no work, and a P1 arm compared against a P0 arm on that
-basis shows an enormous saving that is really just the upstream nobody counted.
+A fork arm performs only its own post-boundary model calls, because the whole upstream
+trajectory ran once, in the anchor. The tempting bookkeeping is to record each arm's work as
+just those calls. That would be a fabrication: it says the arm produced a report having done
+almost no work, and a P1 arm compared against a P0 arm on that basis shows an enormous saving
+that is really just the upstream nobody counted.
+
+How many calls that is, is **counted, never assumed**. It is not "a compressor and a writer":
+a CPU_LEXICAL close issues no selector call at all; a strict-P1 fallback issues the selector,
+then the P0 compressor, then the writer; and every retry adds one more. Each arm's post-boundary
+work therefore comes from its own ledger events, which is also why a mis-set op class silently
+moves work between categories rather than failing loudly.
 
 So there are two different numbers, and they answer different questions:
 
@@ -35,6 +41,7 @@ from dataclasses import dataclass
 
 from ..canonical import canonical_json
 from ..hashing import sha256_hex
+from ..runtime.request_tags import OpClass
 
 __all__ = [
     "COMPRESSOR_OPS",
@@ -45,11 +52,17 @@ __all__ = [
     "total_work_endpoint",
 ]
 
-#: Op classes that mark a close boundary in the anchor's request stream.
-COMPRESSOR_OPS = ("COMPRESSOR_P0", "COMPRESSOR_P1_SELECTOR")
+#: Op classes that mark a close boundary in the anchor's request stream. SHORT_PROSE belongs
+#: here: a prose close *is* a close, and omitting it would shift every subsequent boundary's
+#: ordinal, silently mis-partitioning the shared upstream constant.
+COMPRESSOR_OPS = (
+    OpClass.COMPRESSOR_P0.value,
+    OpClass.COMPRESSOR_P1_SELECTOR.value,
+    OpClass.COMPRESSOR_SHORT_PROSE.value,
+)
 
 #: Op classes a fork arm may issue at all. Anything else means upstream work leaked in.
-POST_BOUNDARY_OPS = ("COMPRESSOR_P0", "COMPRESSOR_P1_SELECTOR", "FINAL_WRITER")
+POST_BOUNDARY_OPS = (*COMPRESSOR_OPS, OpClass.FINAL_WRITER.value)
 
 
 class ForkAccountingError(RuntimeError):

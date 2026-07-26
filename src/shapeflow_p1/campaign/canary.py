@@ -25,10 +25,11 @@ from ..experiment.state_machine import Phase
 from ..hashing import sha256_hex
 from ..protocol import verified_execution_binding
 from ..providers.provider_client import ProviderCallError
+from ..runtime.request_tags import OpClass
 from .runner import CampaignRunner, RunnerConfig, available_tasks, questions_for
 from .schedule import cell_key
 from .screen import open_run_ledger, provider_client_for
-from .selector_client import SelectorModelCall
+from .selector_client import SHORT_PROSE_OPS, STRUCTURED_SELECTOR_OPS, SelectorModelCall
 from .settings import Settings
 
 __all__ = ["run_canary", "CANARY_CHECKS"]
@@ -38,11 +39,14 @@ PASS, FAIL = "PASS", "FAIL"
 GPU_SETTLEMENT_ABS_TOLERANCE_SECONDS = 1e-6
 GPU_SETTLEMENT_REL_TOLERANCE = 1e-9
 
-SELECTOR_OPS = frozenset({
-    "PAGE_P1_SELECTOR_LOCAL",
-    "PAGE_P1_SELECTOR_GLOBAL",
-    "COMPRESSOR_P1_SELECTOR",
-})
+#: Every model-backed decode at an H or C boundary, structured *and* short-prose. Derived from
+#: the selector client rather than restated, because this list had drifted: it named only the
+#: structured ops, so a SHORT_PROSE control's decode was invisible to `selector_decode`, to the
+#: CPU-control zero-decode check and to the decode-cap audit.
+SELECTOR_OPS = STRUCTURED_SELECTOR_OPS | SHORT_PROSE_OPS
+
+#: One bound "?" per member, so the ledger query cannot go stale when the set grows.
+_PLACEHOLDERS = ",".join("?" * len(SELECTOR_OPS))
 
 CANARY_CHECKS = (
     "patched_graph_invoked",
@@ -1110,13 +1114,23 @@ def _expected_selector_ops_by_arm(settings: Settings, manifest) -> dict[str, tup
             raise ValueError(
                 f"{arm.arm_id} references unknown variants "
                 f"{arm.page_variant!r}+{arm.close_variant!r}")
+        # A SHORT_PROSE control is LLM-backed but does not run the structured selector, and it
+        # carries its own op class. Keying only on selector_backend would demand the selector op
+        # from an arm that never emits one -- and used to pass only because the prose aliases
+        # were mis-mapped onto the selector classes.
         if page.node == "WEBPAGE_P1" and page.selector_backend == "LLM":
-            ops.append("PAGE_P1_SELECTOR_LOCAL")
-            if page.scope == "hierarchical":
-                ops.append("PAGE_P1_SELECTOR_GLOBAL")
+            if page.contract == "SHORT_PROSE":
+                ops.append(OpClass.PAGE_P1_SHORT_PROSE.value)
+            else:
+                ops.append(OpClass.PAGE_P1_SELECTOR_LOCAL.value)
+                if page.scope == "hierarchical":
+                    ops.append(OpClass.PAGE_P1_SELECTOR_GLOBAL.value)
         if close.node in {"C_VISIBLE", "C_REGISTRY", "C_FUSED_EXT"} \
                 and close.selector_backend == "LLM":
-            ops.append("COMPRESSOR_P1_SELECTOR")
+            ops.append(
+                OpClass.COMPRESSOR_SHORT_PROSE.value if close.contract == "SHORT_PROSE"
+                else OpClass.COMPRESSOR_P1_SELECTOR.value
+            )
         expected[str(arm.arm_id)] = tuple(ops)
     return expected
 
@@ -1319,9 +1333,15 @@ def _fallbacks_are_on_the_ledger(
             # ledger for this exact work key.
             if arm_id in {"CPU_LEXICAL", "H_CPU_CONTROL", "C_CPU_CONTROL"}:
                 continue
+            # SHORT_PROSE controls are model-backed too; they just emit their own op class.
+            # Listing only the structured ops would fail an arm that did exactly what it should.
             allowed = (
-                {"PAGE_P1_SELECTOR_LOCAL", "PAGE_P1_SELECTOR_GLOBAL"}
-                if node == "H" else {"COMPRESSOR_P1_SELECTOR"}
+                {OpClass.PAGE_P1_SELECTOR_LOCAL.value,
+                 OpClass.PAGE_P1_SELECTOR_GLOBAL.value,
+                 OpClass.PAGE_P1_SHORT_PROSE.value}
+                if node == "H"
+                else {OpClass.COMPRESSOR_P1_SELECTOR.value,
+                      OpClass.COMPRESSOR_SHORT_PROSE.value}
             )
             if not work_key:
                 problems.append(f"{cell_key_}:{node}:{checkpoint}: missing work_key")
@@ -1364,13 +1384,17 @@ def _requests_carry_a_completion_cap(
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT c.work_key, a.request_object_ref FROM external_call_attempts a"
+        # Placeholders are generated from the set size, not written out: a literal (?,?,?)
+        # meant that adding the SHORT_PROSE op classes became a runtime binding error. Only
+        # "?" characters are interpolated -- every value is still bound -- so S608's injection
+        # concern does not apply here.
+        query = (
+            "SELECT c.work_key, a.request_object_ref FROM external_call_attempts a"  # noqa: S608
             " JOIN external_calls c ON c.call_id = a.call_id"
             " WHERE c.provider='vllm' AND a.request_object_ref IS NOT NULL"
-            " AND c.op_class IN (?,?,?)",
-            sorted(SELECTOR_OPS),
-        ).fetchall()
+            f" AND c.op_class IN ({_PLACEHOLDERS})"
+        )
+        rows = conn.execute(query, sorted(SELECTOR_OPS)).fetchall()
         conn.close()
         rows = [row for row in rows if str(row["work_key"] or "") in set(keys)]
     except sqlite3.Error as e:

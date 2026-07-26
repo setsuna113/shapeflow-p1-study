@@ -93,10 +93,13 @@ def _outputs(manifest, *, p1_report="P1 report", p0_report="P0 report", counts=N
     for cell in manifest.cells:
         arm = cell.arm.arm_id
         checkpoint = f"H-{arm}"
-        selector_op = (
-            "PAGE_P1_SELECTOR_LOCAL"
-            if arm in {"H_ID", "SHORT_PROSE"} else None
-        )
+        # The SHORT_PROSE control is LLM-backed but emits its own op class, not the structured
+        # selector's. They shared a label until the prose aliases were pointed at their real
+        # op classes, which is what made prose-control work indistinguishable in the ledger.
+        selector_op = {
+            "H_ID": "PAGE_P1_SELECTOR_LOCAL",
+            "SHORT_PROSE": "PAGE_P1_SHORT_PROSE",
+        }.get(arm)
         default_counts = {
             "page_batches_deferred": 1,
             "page_batches_reduced": 1,
@@ -205,7 +208,7 @@ def _good_inference():
          "completion_tokens": 120, "prompt_tokens": 900},
         {"op_class": "PAGE_P0_SUMMARY", "work_key": "WK-P0",
          "completion_tokens": 400, "prompt_tokens": 3000},
-        {"op_class": "PAGE_P1_SELECTOR_LOCAL", "work_key": "WK-SHORT_PROSE",
+        {"op_class": "PAGE_P1_SHORT_PROSE", "work_key": "WK-SHORT_PROSE",
          "completion_tokens": 200, "prompt_tokens": 900},
     ]
 

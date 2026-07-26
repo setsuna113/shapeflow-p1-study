@@ -13,6 +13,7 @@ echoed back by a fake. Only the graph wrapper is a double; the proof is the prod
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -326,7 +327,36 @@ def test_the_search_poison_is_removed_afterwards():
 
 
 def test_the_close_allowlist_names_only_post_boundary_ops():
-    assert set(CLOSE_OP_ALLOWLIST) == {"COMPRESSOR_P0", "COMPRESSOR_P1_SELECTOR", "FINAL_WRITER"}
+    assert set(CLOSE_OP_ALLOWLIST) == {
+        "COMPRESSOR_P0", "COMPRESSOR_P1_SELECTOR", "COMPRESSOR_SHORT_PROSE", "FINAL_WRITER",
+    }
+
+
+def test_every_configured_fork_arm_is_admitted_by_the_close_allowlist():
+    """The allowlist must cover every arm the config actually lists.
+
+    The literal above pins today's set; this pins the *invariant*. C00-PROSE was a listed fork
+    arm whose op class was missing from the allowlist, so the arm would have been refused at its
+    own boundary -- silently removing C_ID_VS_PROSE from the Holm family. A test comparing the
+    allowlist only against a hand-written literal cannot see that; this one can.
+    """
+    import yaml
+
+    from shapeflow_p1.strategies.factory import load_registry
+
+    arms = yaml.safe_load(Path("configs/week1.yaml").read_text())["c_fork"]["arms"]
+    registry = load_registry(Path("configs"))
+
+    for arm in arms:
+        variant = registry.get(str(arm))
+        assert variant is not None, f"fork arm {arm!r} is not in the variant registry"
+        if variant.node == "P0" or variant.selector_backend != "LLM":
+            continue  # vendor prose / CPU_LEXICAL issue no selector-family call
+        op = ("COMPRESSOR_SHORT_PROSE" if variant.contract == "SHORT_PROSE"
+              else "COMPRESSOR_P1_SELECTOR")
+        assert op in CLOSE_OP_ALLOWLIST, (
+            f"fork arm {arm!r} dispatches {op}, which its own allowlist would refuse"
+        )
 
 
 # --- the frozen continuation -----------------------------------------------------------------
