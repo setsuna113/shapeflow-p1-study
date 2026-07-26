@@ -250,8 +250,22 @@ as sfsteward "$SF" acquire --config "$CONFIG" || blocked "ACQUIRE" "acquisition 
 # evaluator tree.  It runs before treatment so neither an arm's report nor an observed effect
 # can influence which atoms enter the candidate answer key.  Human audit remains a later,
 # explicit verdict gate; this command never labels machine candidates AUDITED.
-as sfsteward "$SF" build-truth --config "$CONFIG" \
-  || blocked "BUILD_TRUTH" "machine truth-candidate construction failed"
+#
+# SHAPEFLOW_TRUTH_CONCURRENT=1 runs it as its own supervised job instead of inline. Truth is
+# DeepSeek-API-bound and the screen is GPU-bound, and nothing between here and the screen reads
+# a truth packet -- freeze-analysis-design, preflight, smoke and run-screen all touch only the
+# task/source world. Serialising them therefore adds ~27h of wall clock and buys nothing. The
+# ordering property that matters is unchanged and is enforced elsewhere: truth is built from
+# the frozen world alone, so no arm's output can reach it whenever it runs, and `evaluate`
+# cannot score a task whose packet is not yet frozen.
+if [ "${SHAPEFLOW_TRUTH_CONCURRENT:-0}" = "1" ]; then
+  echo "  build-truth: started as a concurrent supervised job (see logs/build-truth.log)"
+  setsid /usr/local/bin/sfsupervise build-truth sfsteward "$REPO" "$DATA_ROOT" -- \
+    "$SF" build-truth --config "$CONFIG" >> "$REPO/logs/build-truth.log" 2>&1 &
+else
+  as sfsteward "$SF" build-truth --config "$CONFIG" \
+    || blocked "BUILD_TRUTH" "machine truth-candidate construction failed"
+fi
 as sfsteward "$SF" freeze-analysis-design --config "$CONFIG" \
   || blocked "ANALYSIS_DESIGN" \
     "pre-treatment feature registry or eligibility specification could not be frozen"
