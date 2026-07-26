@@ -55,12 +55,23 @@ class BudgetExceeded(RuntimeError):
 
 class BudgetCapRaised(RuntimeError):
     """Someone tried to widen an authorized ceiling. Protocol §3.5: the effective budget
-    may only be tightened, and any increase mints a new protocol SHA and a new approval."""
+    may only be tightened, and any increase mints a new protocol SHA and a new approval.
+
+    Raised from ``ensure_account``, which every provider start calls once per resource -- so a
+    config carrying raised caps against a ledger that has not had them applied does not merely
+    refuse a spend, it stops the provider from starting at all, three times, until the
+    supervisor gives up. That happened here. The message therefore names the remedy, because
+    the failure surfaces as a dead service rather than as a rejected request.
+    """
 
     def __init__(self, resource: str, current: float, requested: float) -> None:
         super().__init__(
             f"cap for {resource!r} may not be raised from {current} to {requested}: a wider "
-            "budget needs a new protocol version and a new approval, not an overwrite"
+            "budget needs a new protocol version and a new approval, not an overwrite. "
+            "Apply it deliberately first -- freeze an approval over the new config, then run "
+            "`shapeflow-p1 authorize-budget-raise --reason ...` as the provider identity, "
+            "which records the old and new ceilings against that approval. The ledger and the "
+            "config must agree before the provider can start."
         )
         self.resource = resource
         self.current = current
