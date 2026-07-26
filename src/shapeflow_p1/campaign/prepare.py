@@ -197,6 +197,21 @@ async def prepare_corpus(
     enumerate the reserve -- defects that only exist once the tasks have been assigned.
     """
     task_config = settings.configs["task_source"]
+
+    # The seal is write-once, and that check used to happen *after* authoring: a re-run against
+    # an existing registry paid DeepSeek to author a full corpus and only then refused to write
+    # it. Observed on the run host -- $2.07 and 64 authored tasks, discarded. Nothing about the
+    # refusal needs the corpus to exist, so it moves ahead of the spend.
+    settings.ensure_paths("tasks", "steward_root")
+    registry_path = settings.path("tasks") / str(task_config["source"]["registry_path"])
+    if registry_path.exists():
+        raise RuntimeError(
+            f"{registry_path} already exists. A sealed registry is write-once: rewriting it "
+            "after any result exists would be outcome-dependent corpus selection. Nothing was "
+            "authored and nothing was charged. To continue the existing corpus, run the later "
+            "steps against it; to start a new one, give it a new data root and a new approval."
+        )
+
     splits = task_config["splits"]
     total = total or sum(splits.values())
     minimum = clusters or int(task_config["audit"]["require_distinct_topic_clusters"])
@@ -238,8 +253,8 @@ async def prepare_corpus(
     sealed_audit = audit_registry(registry, config=task_config)
     sealed_audit.raise_if_failed()
 
-    settings.ensure_paths("tasks", "steward_root")
-    registry_path = settings.path("tasks") / str(task_config["source"]["registry_path"])
+    # Re-checked by seal() itself: the pre-flight check above saves the spend, but only the
+    # write-once check at the moment of writing is a guarantee against a concurrent author.
     registry_sha = registry.seal(registry_path)
 
     manifest = authoring_manifest(

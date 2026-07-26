@@ -55,6 +55,29 @@ async def test_the_registry_is_write_once(settings):
         await _prepare(settings)
 
 
+async def test_a_second_prepare_refuses_before_authoring_anything(settings):
+    """The write-once refusal must cost nothing.
+
+    It used to happen at seal time, after a full corpus had been authored: on the run host a
+    re-run paid DeepSeek to write 64 tasks and then discarded all of them, $2.07 for an error
+    that was knowable before the first request. The author is counted here because "refused"
+    and "refused without spending" are different guarantees.
+    """
+    await _prepare(settings)
+
+    author = ScriptedAuthor(clusters=16, per_cluster=4)
+    judge = DeepSeekJudge(author, "deepseek-chat", "@SHAPEFLOW_PROVIDER@")
+
+    with pytest.raises(RuntimeError, match="nothing was charged"):
+        await prepare_corpus(
+            settings, judge=judge, authored_at_utc="2026-07-24T00:00:00Z",
+            target_model="Qwen3-14B-AWQ", total=64, clusters=16,
+        )
+
+    # The assertion that matters: not that it refused, but that it refused for free.
+    assert author.requests == [], "the refused re-run authored anyway"
+
+
 async def test_the_sealed_registry_digest_is_recomputed_not_trusted(settings):
     result = await _prepare(settings)
     body, digest = load_sealed_registry(settings)

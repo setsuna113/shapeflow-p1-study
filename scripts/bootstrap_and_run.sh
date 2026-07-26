@@ -241,7 +241,17 @@ fi
 rm -f /tmp/sf-credential-probe.json
 
 step "prepare + acquire + freeze machine truth candidates (steward)"
-as sfsteward "$SF" prepare --config "$CONFIG" || blocked "PREPARE" "prepare failed"
+# A sealed corpus is write-once and outlives a blocked launch, so re-running this gate must not
+# mean re-authoring it. `prepare` now refuses before spending anything when the registry exists,
+# and that refusal is the expected outcome of every run after the first -- it is not a failure
+# of this gate. Anything else is.
+PREPARE_OUT="$(as sfsteward "$SF" prepare --config "$CONFIG" 2>&1)" || {
+  case "$PREPARE_OUT" in
+    *"already exists. A sealed registry is write-once"*)
+      echo "  corpus already sealed; continuing against it (nothing authored, nothing charged)" ;;
+    *) echo "$PREPARE_OUT" | tail -20; blocked "PREPARE" "prepare failed" ;;
+  esac
+}
 as sfsteward "$SF" acquire --config "$CONFIG" || blocked "ACQUIRE" "acquisition failed"
 # Truth construction reads only the already-frozen task/source world and writes into the
 # evaluator tree.  It runs before treatment so neither an arm's report nor an observed effect
