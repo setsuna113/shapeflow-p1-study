@@ -217,10 +217,14 @@ SPEND_POSSIBLE=1
 # into 262 charged 401s and an empty frozen world. The probe sends a deliberately invalid body,
 # so a working credential answers 400 and nothing is searched or charged.
 step "upstream credentials are accepted (free probe, before anything is bought)"
+# Over TCP, not the Unix socket: /run/shapeflow is sfprovider-only (0750) and the socket is
+# srw-rw---- sfprovider:sfprovider, so every other role gets EACCES on connect. The loopback
+# listener is how the runner and steward reach the provider in normal operation.
+PROBE_URL="http://${SHAPEFLOW_PROVIDER_HOST:-127.0.0.1}:${SHAPEFLOW_PROVIDER_PORT:-8787}"
 PROBE_STATUS="$(as sfsteward curl -sS -o /tmp/sf-credential-probe.json -w '%{http_code}' \
-  --unix-socket "${SHAPEFLOW_RUN_DIR:-/run/shapeflow}/provider.sock" \
+  --max-time 120 \
   -H "Authorization: Bearer $(cat /etc/shapeflow-tokens/steward.token)" \
-  -X POST http://localhost/v1/credentials/probe 2>/dev/null || echo 000)"
+  -X POST "$PROBE_URL/v1/credentials/probe" 2>/dev/null || echo 000)"
 if [ "$PROBE_STATUS" != "200" ]; then
   blocked "CREDENTIAL_REJECTED" \
     "the provider's upstream credential probe returned HTTP $PROBE_STATUS: $(
