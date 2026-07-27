@@ -337,9 +337,6 @@ _OBSERVED_KEY = {
     "artifact_merkle_root": "model_artifact_merkle_root",
     "vllm_package_tree_sha256": "vllm_package_tree_sha256",
     "attention_backend": "attention_backend",
-    "atomize_prompt_sha256": "atomize_prompt_sha256",
-    "truth_prompt_sha256": "truth_prompt_sha256",
-    "report_prompt_sha256": "report_prompt_sha256",
 }
 
 

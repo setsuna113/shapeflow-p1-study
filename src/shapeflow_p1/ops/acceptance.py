@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..campaign.settings import Settings
+from ..world.pools import acquired_task_ids
 
 __all__ = ["Gate", "run_acceptance", "run_preflight"]
 
@@ -197,7 +198,6 @@ async def _unusable_model_call(**_kw):  # pragma: no cover - never invoked
 def run_preflight(settings: Settings, *, repo: Path,
                   approved_protocol_sha: str | None = None) -> dict:
     """The last check before treatment: approval, corpus, world, and the runner's own view."""
-    from ..analysis.design import load_runner_analysis_design_receipt
     from ..protocol import ApprovalError, protocol_sha, verify_approval_file
 
     checks: list[Gate] = []
@@ -272,52 +272,23 @@ def run_preflight(settings: Settings, *, repo: Path,
         checks.append(Gate(
             "publication_handle_domain", FAIL, f"{type(e).__name__}: {str(e)[:300]}"))
 
-    # Runner preflight must not open the steward/evaluator trees it is meant to be unable to
-    # read.  The steward publishes this content-addressed, non-secret receipt before treatment;
-    # schedule freeze binds it below.  It contains task/split/pool hashes, never facets, truth,
-    # audit-only ranks or eligibility feature values.
-    try:
-        analysis_receipt = load_runner_analysis_design_receipt(settings)
-        receipt_tasks = list(analysis_receipt["task_pools"])
-        checks.append(Gate(
-            "sealed_registry_receipt", PASS,
-            f"{len(receipt_tasks)} acquired tasks, "
-            f"registry {str(analysis_receipt['sealed_registry_sha256'])[:12]}",
-        ))
-        checks.append(Gate(
-            "campaign_manifest_receipt", PASS,
-            str(analysis_receipt["campaign_acquisition_sha256"])[:12],
-        ))
-        checks.append(Gate(
-            "analysis_design", PASS,
-            str(analysis_receipt["content_sha256"])[:12],
-        ))
-    except Exception as e:  # noqa: BLE001
-        checks.append(Gate(
-            "sealed_registry_receipt", FAIL, f"{type(e).__name__}: {e}"))
-        checks.append(Gate(
-            "campaign_manifest_receipt", FAIL, "analysis-design receipt unavailable"))
-        checks.append(Gate(
-            "analysis_design", FAIL, "pre-treatment analysis design unavailable"))
-        analysis_receipt = {}
-        receipt_tasks = []
-
-    # Every runner-visible world is re-verified from its published pool and object bytes.  The
-    # acquisition audit manifest remains in the steward tree; its hash is in the receipt above.
-    split = str(settings.get("week1", "screen", "split"))
-    wanted = [
-        str(task["task_id"]) for task in receipt_tasks
-        if task.get("split") == split
+    # The pre-treatment design receipt, the acquisition manifest and the source-cluster split
+    # gate all read artifacts produced by the Week-1 corpus phases, which are gone. Their
+    # Freeze-1 replacements are the frozen prereg document and the benchmark split manifest,
+    # and they will register gates here the same way. Deliberately absent rather than stubbed
+    # PASS: a preflight that reports PASS for a check it did not run is the exact failure this
+    # module exists to prevent.
+    receipt_tasks = [
+        {"task_id": task_id, "split": str(settings.get("week1", "screen", "split"))}
+        for task_id in acquired_task_ids(settings)
     ]
-    broken = _runner_world_failures(settings, receipt_tasks)
-    checks.append(Gate("frozen_world", PASS if wanted and not broken else FAIL,
-                       f"{len(wanted)} worlds frozen and verified" if wanted and not broken
-                       else "; ".join(broken[:5]) or "no tasks in this split"))
 
-    # Real source overlap, not the topic label the author invented. Two tasks sharing pages
-    # are one observation; across two splits they are a leak.
-    registry = {"tasks": receipt_tasks}
-    checks.append(_source_cluster_gate(settings, registry))
+    # Every runner-visible world is still re-verified from its published pool and object bytes.
+    broken = _runner_world_failures(settings, receipt_tasks)
+    checks.append(Gate("frozen_world", PASS if receipt_tasks and not broken else FAIL,
+                       f"{len(receipt_tasks)} worlds frozen and verified"
+                       if receipt_tasks and not broken
+                       else "; ".join(broken[:5]) or "no frozen worlds"))
 
     # The runner's own view must carry the question and nothing else.
     runner_tasks = settings.path("frozen_corpus_for_runner") / "tasks"
@@ -331,24 +302,12 @@ def run_preflight(settings: Settings, *, repo: Path,
                        "question only" if not leaked
                        else f"{len(leaked)} task view(s) carry more than the question"))
 
-    # Creating the analysis receipt required the steward to read every evaluator task view and
-    # freeze the feature registry.  The runner must not prove that by listing the evaluator tree
-    # itself; doing so would defeat the UID boundary.
-    checks.append(Gate(
-        "evaluator_view_receipt",
-        PASS if receipt_tasks else FAIL,
-        f"{len(receipt_tasks)} evaluator views bound before treatment"
-        if receipt_tasks else "no evaluator-view receipt",
-    ))
-
     # Neither the answer key nor the steward's audit graph may be reachable from here.
     ok, detail = tree_isolation(repo, settings, ("evaluator_root", "steward_root"))
     checks.append(Gate("tree_isolation", PASS if ok else FAIL, detail))
 
     return {"ok": _ok(checks), "checks": [c.as_dict() for c in checks],
-            "protocol_sha": live_sha,
-            "analysis_design_receipt_sha256":
-                str(analysis_receipt.get("content_sha256") or "")}
+            "protocol_sha": live_sha}
 
 
 def _runner_world_failures(settings: Settings, task_rows: list[dict]) -> list[str]:
@@ -396,36 +355,6 @@ def _runner_world_failures(settings: Settings, task_rows: list[dict]) -> list[st
         except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
             failures.append(f"{task_id}: {type(exc).__name__}: {exc}")
     return failures
-
-
-def _source_cluster_gate(settings: Settings, registry: dict) -> Gate:
-    """No cluster of source-sharing tasks may straddle two splits."""
-    from ..acquire.source_clusters import (
-        build_source_clusters,
-        cross_split_overlap,
-        worlds_from_pools,
-    )
-    from ..campaign.acquire import runner_pool_path
-
-    splits = {t["task_id"]: t.get("split", "") for t in registry.get("tasks", [])}
-    pools: dict[str, dict] = {}
-    for task_id in splits:
-        path = runner_pool_path(settings, task_id)
-        if path.exists():
-            try:
-                pools[task_id] = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                return Gate("source_clusters", FAIL, f"{path.name} is unreadable")
-    if not pools:
-        return Gate("source_clusters", FAIL, "no frozen pools to cluster")
-    leaks = cross_split_overlap(build_source_clusters(worlds_from_pools(pools, splits)))
-    if leaks:
-        detail = "; ".join(
-            f"{c.cluster_id} spans {sorted(c.splits)} ({len(c.task_ids)} tasks)"
-            for c in leaks[:4])
-        return Gate("source_clusters", FAIL, detail)
-    return Gate("source_clusters", PASS,
-                f"{len(pools)} worlds, no cluster spans two splits")
 
 
 def tree_isolation(repo: Path, settings: Settings, names: tuple[str, ...]) -> tuple[bool, str]:

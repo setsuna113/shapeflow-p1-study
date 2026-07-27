@@ -310,15 +310,13 @@ def check_stack_manifest(
         backend = attention_backend_from_log(engine_log)
     if backend:
         observation.values["attention_backend"] = backend
-    # These are live code-derived measurement identities.  Recompute them on every doctor run
-    # so a prompt/parser change cannot pass merely because the model/runtime stack still does.
-    from .campaign.evaluate import relation_prompt_sha256
-    from .campaign.truth import truth_prompt_sha256
-    from .evaluation.atomizer import atomize_protocol_sha256
-
-    observation.values["atomize_prompt_sha256"] = atomize_protocol_sha256()
-    observation.values["truth_prompt_sha256"] = truth_prompt_sha256()
-    observation.values["report_prompt_sha256"] = relation_prompt_sha256()
+    # Code-derived measurement identities are recomputed on every doctor run, so a prompt or
+    # parser change cannot pass merely because the model/runtime stack still does. The Week-1
+    # evaluator primitives that were recorded here are gone; their Freeze-1 replacements (the
+    # benchmark grader prompt and the selector prompt bundle) register themselves the same way
+    # once they exist. Recording nothing is correct in the meantime -- recording a stale digest
+    # would be worse than recording none, because it would keep passing.
+    #
     # The layer this round actually runs, not a hard-coded name. Naming `causal` here while the
     # campaign ran `causal_native` would have compared the live engine against flags nothing was
     # using, which is a check that passes by being wrong about what it is checking.

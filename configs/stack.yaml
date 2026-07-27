@@ -81,13 +81,10 @@ determinism:
   pythonhashseed: 0
   timezone: UTC
 
-evaluation:
-  # Code-derived measurement identities, frozen by the steward and re-derived read-only by
-  # doctor.  They belong in the live stack manifest: changing any of them changes the answer
-  # key or scoring policy even when model weights and runtime bytes are unchanged.
-  atomize_prompt_sha256: "@STEWARD_FREEZES@"
-  truth_prompt_sha256: "@STEWARD_FREEZES@"
-  report_prompt_sha256: "@STEWARD_FREEZES@"
+# Code-derived measurement identities belong in this manifest -- changing one changes the
+# answer key or scoring policy even when model weights and runtime bytes are unchanged. The
+# Week-1 evaluator primitives that lived here (atomize/truth/report prompt digests) are gone
+# with the code that derived them; the Freeze-1 replacements register the same way.
 
 isolation:
   # Three measurement layers, three SEPARATE vLLM units. These values are the source of truth for

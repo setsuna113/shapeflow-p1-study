@@ -13,16 +13,11 @@ from pathlib import Path
 import pytest
 from fixtures.campaign_harness import Harness
 from fixtures.fake_engine import FakeEngine
-from fixtures.fake_exa import FakeExa
-from fixtures.scripted_author import ScriptedAuthor
+from fixtures.frozen_world import write_frozen_world
 
-from shapeflow_p1.acquire.exa_client import ExaCaptureClient
-from shapeflow_p1.campaign.acquire import acquire_all, exa_params_from
-from shapeflow_p1.campaign.prepare import prepare_corpus
 from shapeflow_p1.campaign.runner import available_tasks, questions_for, write_status
 from shapeflow_p1.campaign.schedule import ArmSpec, cell_key
 from shapeflow_p1.campaign.settings import Settings
-from shapeflow_p1.bench.grading.judge_client import DeepSeekJudge
 
 REPO = Path(__file__).resolve().parents[2]
 PATCHED = REPO / ".build" / "open_deep_research-patched" / "src"
@@ -42,30 +37,17 @@ ARMS = [ArmSpec("P0", "P0", "P0"), ArmSpec("H_ID", "H02", "P0")]
 @pytest.fixture()
 def settings(tmp_path):
     s = Settings.load(REPO, data_root=tmp_path)
-    relaxed = dict(s.configs["task_source"])
-    relaxed["audit"] = {**relaxed["audit"], "require_distinct_topic_clusters": 4}
-    relaxed["splits"] = {"FORMATIVE_SCREEN": 4, "FORMATIVE_POWER_PILOT": 2, "RESERVE": 2}
-    relaxed["strata_min_counts"] = {"source_conflict": 1}
-    s.configs["task_source"] = relaxed
     return s
 
 
-async def _world(settings):
-    author = ScriptedAuthor(clusters=4, per_cluster=2)
-    judge = DeepSeekJudge(author, "deepseek-chat", "@SHAPEFLOW_PROVIDER@")
-    await prepare_corpus(settings, judge=judge, authored_at_utc="2026-07-24T00:00:00Z",
-                         target_model="Qwen3-14B-AWQ", total=8, clusters=4)
-    params = exa_params_from(settings)
-    fake = FakeExa(pages_per_query=2)
-    await acquire_all(
-        settings,
-        client_factory=lambda task_id: ExaCaptureClient(fake, params),
-        fetched_at_utc="2026-07-24T01:00:00Z")
+def _world(settings):
+    """Two tasks with frozen worlds, written straight to the runner-readable view."""
+    write_frozen_world(settings, task_ids=["T-CAMPAIGN-1", "T-CAMPAIGN-2"], pages_per_task=2)
 
 
 @pytest.fixture()
 async def harness(settings, tmp_path):
-    await _world(settings)
+    _world(settings)
     engine = FakeEngine(selector_ids=["S1"])
     h = Harness(settings, tmp_path, engine, TOKENS, REPO)
     try:

@@ -1,4 +1,9 @@
-"""Acquisition: snapshot identity, vendor-visible dedup, deterministic search, capture."""
+"""The frozen world: snapshot identity, vendor-visible dedup, and deterministic search.
+
+These are the properties every arm depends on being identical. If two arms could see a
+different snapshot for one URL, a different vendor-visible order, or a different ranking for
+one query, the comparison between them would be measuring the corpus rather than the form.
+"""
 
 from __future__ import annotations
 
@@ -13,10 +18,8 @@ from shapeflow_p1.world.search_backend import (
 )
 from shapeflow_p1.world.snapshot_store import SnapshotStore, normalize_v1
 from shapeflow_p1.world.source_pool import QueryResponse, RawResult, build_source_pool
-from shapeflow_p1.acquire.tavily_client import TavilyCaptureClient, TavilyParams
 from shapeflow_p1.object_store import ObjectStore
 from shapeflow_p1.providers.retry import RetryDecision, capped_backoff, classify_status
-from shapeflow_p1.secrets import SecretRedactor
 
 
 # --- snapshot identity ----------------------------------------------------------------
@@ -161,51 +164,3 @@ def test_backoff_is_capped_and_monotone_ceiling():
     assert ceilings[0] == 0.5
     assert ceilings[-1] == 10.0  # capped
     assert all(b <= 10.0 for b in ceilings)
-
-
-# --- tavily capture client (fake transport, no network) -------------------------------
-
-
-async def test_tavily_client_captures_and_never_needs_key_in_hash():
-    red = SecretRedactor()
-    key = "tvly-FAKEFAKEFAKEFAKEFAKE"
-    red.register(key, label="tavily")
-
-    seen_bodies = []
-
-    async def fake_transport(url, body):
-        seen_bodies.append(body)
-        return 200, {
-            "request_id": "rq-1",
-            "response_time": 0.4,
-            "usage": {"credits": 1},
-            "failed_results": [],
-            "results": [
-                {"url": "https://a", "title": "A", "content": "snip", "raw_content": "full A", "score": 0.9},
-            ],
-        }
-
-    client = TavilyCaptureClient(fake_transport, TavilyParams(max_results=1), key)
-    cap = await client.search("t1", "some query")
-
-    assert cap.request_id == "rq-1"
-    assert cap.response.results[0].url == "https://a"
-    assert cap.response.results[0].rank == 1
-    # The response hash must be reproducible from key-free inputs.
-    cap2 = await client.search("t1", "some query")
-    assert cap.raw_response_sha256 == cap2.raw_response_sha256
-    # The key went into the request body (as Tavily requires) but not the snapshot id.
-    assert seen_bodies[0]["api_key"] == key
-    assert key not in cap.query_snapshot_id
-
-
-async def test_tavily_client_raises_on_http_error():
-    from shapeflow_p1.acquire.tavily_client import TavilyHTTPError
-
-    async def fake_transport(url, body):
-        return 429, {"error": "rate limited"}
-
-    client = TavilyCaptureClient(fake_transport, TavilyParams(), "tvly-FAKEFAKEFAKEFAKEFAKE")
-    with pytest.raises(TavilyHTTPError) as ei:
-        await client.search("t1", "q")
-    assert ei.value.status == 429

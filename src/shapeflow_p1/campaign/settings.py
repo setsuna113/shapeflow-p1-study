@@ -214,8 +214,6 @@ class Settings:
         block["deepseek_usd_per_1m_input_cached"] = pricing["usd_per_1m_input_tokens_cached"]
         block["deepseek_usd_per_1m_output"] = pricing["usd_per_1m_output_tokens"]
         block["deepseek_usd_worst_case"] = self.deepseek_usd_worst_case()
-        block["exa_usd_worst_case"] = self.exa_usd_worst_case()
-        block["exa_endpoint"] = str(self.get("week1", "provider", "exa_endpoint"))
         block.setdefault(
             "max_consecutive_failures",
             int(self.get("budget", "retry_policy", "max_consecutive_failures")),
@@ -348,8 +346,6 @@ class Settings:
         """
         from ..bench.grading.judge_client import SamplingEnvelope
 
-        self.validate_judge_policy_versions()
-
         block = self.get("judge", "model")
         return SamplingEnvelope(
             temperature=float(block["temperature"]),
@@ -366,58 +362,6 @@ class Settings:
         if value < 0:
             raise ConfigError("judge.retry.max_retries must be non-negative")
         return value
-
-    def validate_judge_policy_versions(self) -> None:
-        """Refuse a config/code mismatch in any evaluator measurement primitive."""
-        from ..evaluation.atomizer import ATOMIZE_VERSION
-        from .evaluate import RELATION_PROMPT_VERSION
-        from .truth import TRUTH_PROMPT_VERSION
-
-        declared = self.get("judge", "prompts")
-        expected = {
-            "atomize_version": ATOMIZE_VERSION,
-            "truth_version": TRUTH_PROMPT_VERSION,
-            "report_version": RELATION_PROMPT_VERSION,
-        }
-        mismatches = [
-            f"{key}={declared.get(key)!r}, code={value!r}"
-            for key, value in expected.items() if declared.get(key) != value
-        ]
-        if mismatches:
-            raise ConfigError(
-                "judge prompt/parser policy drift: " + "; ".join(mismatches))
-
-    def exa_usd_worst_case(self) -> float:
-        """The most one search can cost, derived from the pinned result count and price list.
-
-        Same rule as the DeepSeek bound: a reservation that is not an upper bound is not
-        admission control, so it is computed rather than declared and the declared value is
-        only allowed to be at least as conservative.
-        """
-        from ..acquire.exa_client import ExaParams, ExaPricing
-
-        block = self.get("acquisition", "exa")
-        prices = self.get("acquisition", "exa_pricing")
-        params = ExaParams(
-            type=str(block["type"]),
-            num_results=int(block["num_results_per_query"]),
-            text_max_characters=int(block["text_max_characters"]),
-            include_html_tags=bool(block["include_html_tags"]),
-            highlights=bool(block["highlights"]),
-            category=block.get("category") or None,
-        )
-        derived = params.worst_case_usd(ExaPricing(
-            usd_per_request=float(prices["usd_per_request"]),
-            usd_per_extra_result=float(prices["usd_per_extra_result"]),
-            results_included=int(prices["results_included"]),
-        ))
-        declared = self.get("week1", "provider").get("exa_usd_worst_case")
-        if declared is not None and float(declared) < derived:
-            raise ConfigError(
-                f"provider.exa_usd_worst_case ({declared}) does not cover the {derived:.4f} "
-                f"USD implied by {params.num_results} results at the snapshot prices"
-            )
-        return max(derived, float(declared or 0.0))
 
     def judge_model(self) -> str:
         """Resolve the judge model from the environment, and refuse a forbidden one.

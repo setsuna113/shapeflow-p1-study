@@ -41,7 +41,7 @@ from ..experiment.state_machine import Phase
 from ..hashing import sha256_hex
 from ..object_store import ObjectStore
 from ..strategies.factory import StrategyFactory, load_registry
-from .acquire import acquired_task_ids, load_frozen_pool
+from ..world.pools import acquired_task_ids, load_frozen_pool
 from .graph_driver import CellSpec, run_cell, summarize_events
 from .phases import PhaseStore
 from .schedule import (

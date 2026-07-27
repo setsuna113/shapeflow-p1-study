@@ -17,8 +17,6 @@ from typing import Optional
 
 import httpx
 
-from ..acquire.exa_client import load_exa_key
-from ..acquire.tavily_client import load_tavily_key
 from ..campaign.settings import Settings
 from ..bench.grading.judge_client import load_deepseek_key
 from ..experiment.budget import Budget
@@ -107,22 +105,16 @@ def build_service(settings: Settings, *, upstream=None, uids: Optional[dict] = N
         config,
         ledger=ledger, budget=budget, store=store, redactor=REDACTOR, tokens=tokens,
         upstream=upstream or httpx_upstream(),
-        exa_key=load_exa_key(REDACTOR),
-        # Kept loadable only so an interrupted Tavily world can still be read back;
-        # nothing new is acquired through it.
-        tavily_key=_optional(load_tavily_key),
+        # No live-search credential is loaded. The campaign retrieves from a frozen corpus, so
+        # a provider holding a search key would be holding the one thing that could put a
+        # treatment run back on the live web. The routes remain and fail closed without it.
+        exa_key=None,
+        tavily_key=None,
         deepseek_key=load_deepseek_key(REDACTOR),
         allowed_uids=_resolve_uids(),
     )
     return service, config, ledger
 
-
-def _optional(loader):
-    """A credential the campaign no longer acquires through. Absent is not an error."""
-    try:
-        return loader(REDACTOR)
-    except RuntimeError:
-        return None
 
 
 def _resolve_uids() -> dict[str, int]:

@@ -26,17 +26,12 @@ from pathlib import Path
 
 import pytest
 
-from shapeflow_p1.acquire.exa_client import ExaCaptureClient
-from shapeflow_p1.campaign.acquire import acquire_all, exa_params_from
-from shapeflow_p1.campaign.prepare import prepare_corpus
 from shapeflow_p1.campaign.runner import available_tasks, questions_for
 from shapeflow_p1.campaign.schedule import ArmSpec, cell_key
 from shapeflow_p1.campaign.settings import Settings
-from shapeflow_p1.bench.grading.judge_client import DeepSeekJudge
 from shapeflow_p1.experiment.budget import Budget
 from shapeflow_p1.experiment.ledger import TERMINAL_STATES, Ledger
 from shapeflow_p1.object_store import ObjectStore
-from shapeflow_p1.providers.provider_client import PROVIDER_KEY_PLACEHOLDER
 from shapeflow_p1.runtime.provider_server import (
     PROVIDER_KEY_PLACEHOLDER as PLACEHOLDER,
     ProviderConfig,
@@ -47,8 +42,7 @@ from shapeflow_p1.runtime.provider_server import (
 from shapeflow_p1.secrets import SecretRedactor
 
 from fixtures.fake_engine import FakeEngine
-from fixtures.fake_exa import FakeExa
-from fixtures.scripted_author import ScriptedAuthor
+from fixtures.frozen_world import write_frozen_world
 
 REPO = Path(__file__).resolve().parents[2]
 PATCHED = REPO / ".build" / "open_deep_research-patched" / "src"
@@ -176,32 +170,19 @@ def test_the_budget_cap_is_never_exceeded_by_a_crash_loop(tmp_path):
 @pytest.fixture()
 def settings(tmp_path):
     s = Settings.load(REPO, data_root=tmp_path)
-    relaxed = dict(s.configs["task_source"])
-    relaxed["audit"] = {**relaxed["audit"], "require_distinct_topic_clusters": 4}
-    relaxed["splits"] = {"FORMATIVE_SCREEN": 4, "FORMATIVE_POWER_PILOT": 2, "RESERVE": 2}
-    relaxed["strata_min_counts"] = {"source_conflict": 1}
-    s.configs["task_source"] = relaxed
     return s
 
 
-async def _world(settings):
-    author = ScriptedAuthor(clusters=4, per_cluster=2)
-    judge = DeepSeekJudge(author, "deepseek-chat", PROVIDER_KEY_PLACEHOLDER)
-    await prepare_corpus(settings, judge=judge, authored_at_utc="2026-07-24T00:00:00Z",
-                         target_model="Qwen3-14B-AWQ", total=8, clusters=4)
-    params = exa_params_from(settings)
-    fake = FakeExa(pages_per_query=2)
-    await acquire_all(
-        settings,
-        client_factory=lambda t: ExaCaptureClient(fake, params),
-        fetched_at_utc="2026-07-24T01:00:00Z")
+def _world(settings):
+    """Two tasks with frozen worlds, written straight to the runner-readable view."""
+    write_frozen_world(settings, task_ids=["T-CRASH-1", "T-CRASH-2"], pages_per_task=2)
 
 
 @pytest.fixture()
 async def campaign(settings, tmp_path):
     from fixtures.campaign_harness import Harness
 
-    await _world(settings)
+    _world(settings)
     harness = Harness(settings, tmp_path, FakeEngine(selector_ids=["S1"]), TOKENS, REPO)
     try:
         yield harness
