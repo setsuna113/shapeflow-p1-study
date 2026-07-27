@@ -202,6 +202,22 @@ async def _run_candidate(
         max_retries=settings.judge_max_retries(),
         sampling=envelope,
     )
+    # A second instrument for the stability probe, identical but for the seed. Without the
+    # offset the repeat is a byte-identical body, the provider replays the committed call, and
+    # the metric reads a perfect 1.000 for every candidate while measuring nothing.
+    resampler = DeepSeekJudge(
+        client.deepseek_transport(op_class="JUDGE_TRUTH", work_key="judge-calibration"),
+        spec["model"], PROVIDER_KEY_PLACEHOLDER,
+        max_retries=settings.judge_max_retries(),
+        sampling=SamplingEnvelope(
+            temperature=envelope.temperature, top_p=envelope.top_p,
+            seed=(envelope.seed or 0) + 7919,
+            max_tokens=envelope.max_tokens,
+            enable_thinking=envelope.enable_thinking,
+            send_thinking_switch=envelope.send_thinking_switch,
+            reasoning_effort=envelope.reasoning_effort,
+        ),
+    )
 
     for task in tasks:
         task_id = task["task_id"]
@@ -229,10 +245,15 @@ async def _run_candidate(
             result.atoms_bound_valid += valid
             accepted_here += valid
 
-            # Stability: ask the first batch of each task a second time. Same input, same
-            # declared sampling policy -- any disagreement is the instrument, not the evidence.
+            # Stability: ask the first batch of each task a second time.
+            #
+            # The repeat MUST advance the seed. A byte-identical body has the same call_key, so
+            # the provider replays the committed response instead of resampling -- and the
+            # metric would read 1.000 for every candidate while measuring nothing at all. With
+            # temperature 0 a differing seed should still give the same answer, so whatever
+            # disagreement shows up here is genuine nondeterminism in the serving stack.
             if index == 0:
-                repeat = await _one(result, judge, prompt)
+                repeat = await _one(result, resampler, prompt)
                 if repeat is not None:
                     a, b = _atom_keys(payload), _atom_keys(repeat)
                     union = a | b
