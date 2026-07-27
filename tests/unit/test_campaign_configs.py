@@ -517,3 +517,45 @@ def test_the_summarization_timeout_is_protocol_and_defaults_to_vendor(settings):
     assert 'os.environ.get("SHAPEFLOW_SUMMARIZE_TIMEOUT_S") or 60.0' in patch, (
         "the patch must fall back to vendor's own default when the variable is unset"
     )
+
+
+def test_every_declared_isolation_layer_is_accepted_by_the_provider_schema(settings):
+    """A layer the config declares but the schema rejects fails every cell, at register time.
+
+    This is the third instance of one shape: a value enumerated in two places that must agree
+    and nothing asserting it. The op-class registries drifted this way, the handle grammar
+    drifted this way, and adding `causal_native` to stack.yaml without adding it to the closed
+    request schema made the provider answer 400 on `cells.register` for all 19 arms -- P0
+    included -- so the canary reported an entirely inert P1 when nothing had run at all.
+
+    The schema being closed and enumerated is what caught it in one round instead of silently
+    mislabelling every cell's layer, so the fix is to assert the agreement, not to loosen it.
+    """
+    import json
+
+    schema = json.loads(
+        (REPO / "schemas" / "provider_request.schema.json").read_text(encoding="utf-8"))
+
+    accepted: set[str] = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            values = node.get("enum")
+            if isinstance(values, list) and "causal" in values:
+                accepted.update(map(str, values))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(schema)
+    declared = set(map(str, settings.get("stack", "isolation")))
+    assert declared, "no isolation layers declared"
+    assert declared <= accepted, (
+        f"layers declared in stack.yaml but rejected by the provider schema: "
+        f"{sorted(declared - accepted)}"
+    )
+    # And the two the campaign actually names must be among them.
+    assert settings.measurement_layer in accepted
+    assert str(settings.get("week1", "measurement", "mechanism_layer")) in accepted

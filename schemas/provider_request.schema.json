@@ -236,6 +236,7 @@
         "layer": {
           "type": "string",
           "enum": [
+            "causal_native",
             "causal",
             "operational"
           ]
