@@ -141,7 +141,7 @@ def main() -> int:
     )
     # The graph's own concurrency: one tool call returns this many pages and summarises them
     # together. Testing more would measure a system nobody runs; testing fewer would pass.
-    concurrency = int(acquisition["num_results_per_query"])
+    concurrency = int(acquisition["exa"]["num_results_per_query"])
     tokenizer = FrozenModelTokenizer(
         pathlib.Path(str(stack["model"]["path"])) / str(stack["model"]["tokenizer_file"]))
 
