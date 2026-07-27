@@ -1044,7 +1044,7 @@ async def run_cell(
         on_event=on_event,
     )
 
-    max_results = int(settings.get("acquisition", "frozen_corpus", "top_k"))
+    max_results = int(settings.get("retrieval", "frozen_corpus", "top_k"))
     result = CellResult(
         events=events,
         checkpoints=checkpoints,

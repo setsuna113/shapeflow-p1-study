@@ -18,17 +18,9 @@ from shapeflow_p1.experiment.freeze import (
 CONFIGS = Path(__file__).resolve().parents[2] / "configs"
 
 
-def test_real_decision_and_budget_configs_load_and_hash():
-    for name in ("decision.yaml", "budget_v1.yaml"):
-        data, sha = load_config(CONFIGS / name)
-        assert isinstance(data, dict) and len(sha) == 64
-
-
-def test_decision_thresholds_are_the_v01_values():
-    data, _ = load_config(CONFIGS / "decision.yaml")
-    assert require(data, "utility", "minimum_meaningful_work_reduction") == 0.10
-    assert require(data, "coverage", "conditional_task_exposure_coverage_lcb_min") == 0.30
-    assert require(data, "quality_ni_margin", "critical_harm_risk_pp_max") == 3
+def test_real_budget_config_loads_and_hashes():
+    data, sha = load_config(CONFIGS / "budget_v1.yaml")
+    assert isinstance(data, dict) and len(sha) == 64
 
 
 def test_budget_caps_are_the_v01_hard_bounds():

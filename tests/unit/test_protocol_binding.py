@@ -49,9 +49,9 @@ def test_the_binding_covers_every_input_that_changes_the_result():
     """
     binding = compute_binding(REPO)
     covered = set(binding.content())
-    assert {"protocol_sha", "decision_thresholds_sha", "budget_sha", "variants_sha",
-            "stack_sha", "stack_manifest_sha", "vendor_commit", "patched_tree_sha",
-            "approved_commit"} <= covered
+    assert {"protocol_sha", "budget_sha", "variants_sha", "retrieval_sha", "judge_sha",
+            "week1_sha", "stack_sha", "stack_manifest_sha", "vendor_commit",
+            "patched_tree_sha", "approved_commit"} <= covered
     assert binding.vendor_commit == "408da442a661ea5e40a6163329f82e3f22628949"
     assert binding.patched_tree_sha
 

@@ -28,7 +28,6 @@ app = typer.Typer(add_completion=False, help="ShapeFlow P1 Week-1 study CLI")
 
 _REPO = Path(__file__).resolve().parents[2]
 _CONFIGS = {
-    "decision": _REPO / "configs" / "decision.yaml",
     "budget": _REPO / "configs" / "budget_v1.yaml",
 }
 _SCHEMAS = _REPO / "schemas"

@@ -67,18 +67,15 @@ class ProtocolBinding:
     """Every input whose change would change what the campaign means."""
 
     protocol_sha: str
-    decision_thresholds_sha: str
     budget_sha: str
     variants_sha: str
     stack_sha: str
     stack_manifest_sha: str
-    # The campaign, acquisition, corpus and judge configs decide the arm set, the size and
-    # composition of the frozen world, how many tasks exist and which model scores them. A
-    # result depends on all four, so an approval that did not pin them would still verify while
-    # describing a different experiment.
+    # The campaign, retrieval and judge configs decide the arm set, what every arm retrieves
+    # and ranks, and which model scores the results. A result depends on all three, so an
+    # approval that did not pin them would still verify while describing a different experiment.
     week1_sha: str
-    acquisition_sha: str
-    task_source_sha: str
+    retrieval_sha: str
     judge_sha: str
     vendor_commit: str
     patched_tree_sha: str
@@ -87,14 +84,12 @@ class ProtocolBinding:
     def content(self) -> dict:
         return {
             "protocol_sha": self.protocol_sha,
-            "decision_thresholds_sha": self.decision_thresholds_sha,
             "budget_sha": self.budget_sha,
             "variants_sha": self.variants_sha,
             "stack_sha": self.stack_sha,
             "stack_manifest_sha": self.stack_manifest_sha,
             "week1_sha": self.week1_sha,
-            "acquisition_sha": self.acquisition_sha,
-            "task_source_sha": self.task_source_sha,
+            "retrieval_sha": self.retrieval_sha,
             "judge_sha": self.judge_sha,
             "vendor_commit": self.vendor_commit,
             "patched_tree_sha": self.patched_tree_sha,
@@ -114,25 +109,21 @@ def compute_binding(repo: Path, *, approved_commit: str = "") -> ProtocolBinding
     """Read the live configuration and produce the binding it implies."""
     repo = Path(repo)
     configs = repo / "configs"
-    _, decision = load_config(configs / "decision.yaml")
     _, budget = load_config(configs / "budget_v1.yaml")
     _, variants = load_config(configs / "variants.yaml")
     _, stack = load_config(configs / "stack.yaml")
     _, week1 = load_config(configs / "week1.yaml")
-    _, acquisition = load_config(configs / "acquisition.yaml")
-    _, task_source = load_config(configs / "task_source.yaml")
+    _, retrieval = load_config(configs / "retrieval.yaml")
     _, judge = load_config(configs / "judge.yaml")
     manifest = repo / "protocol" / "stack_manifest.json"
     return ProtocolBinding(
         protocol_sha=protocol_sha(repo),
-        decision_thresholds_sha=decision,
         budget_sha=budget,
         variants_sha=variants,
         stack_sha=stack,
         stack_manifest_sha=_sha_of(manifest),
         week1_sha=week1,
-        acquisition_sha=acquisition,
-        task_source_sha=task_source,
+        retrieval_sha=retrieval,
         judge_sha=judge,
         vendor_commit=read_vendor_pin(repo),
         patched_tree_sha=(repo / "patches" / "patched_tree.sha256").read_text().strip()

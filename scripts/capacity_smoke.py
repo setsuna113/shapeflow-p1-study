@@ -129,8 +129,8 @@ def main() -> int:
     repo = pathlib.Path(args.repo)
     stack = yaml.safe_load((repo / "configs" / "stack.yaml").read_text(encoding="utf-8"))
     week1 = yaml.safe_load((repo / "configs" / "week1.yaml").read_text(encoding="utf-8"))
-    acquisition = yaml.safe_load(
-        (repo / "configs" / "acquisition.yaml").read_text(encoding="utf-8"))
+    retrieval = yaml.safe_load(
+        (repo / "configs" / "retrieval.yaml").read_text(encoding="utf-8"))
 
     cap = int(week1["odr"]["summarization_model_max_tokens"])
     budget = SharedContentBudget.derive(
@@ -141,7 +141,7 @@ def main() -> int:
     )
     # The graph's own concurrency: one tool call returns this many pages and summarises them
     # together. Testing more would measure a system nobody runs; testing fewer would pass.
-    concurrency = int(acquisition["exa"]["num_results_per_query"])
+    concurrency = int(retrieval["frozen_corpus"]["top_k"])
     tokenizer = FrozenModelTokenizer(
         pathlib.Path(str(stack["model"]["path"])) / str(stack["model"]["tokenizer_file"]))
 

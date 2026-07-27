@@ -56,11 +56,9 @@ LANE_ENV = "SHAPEFLOW_LANE"
 
 _CONFIG_FILES = {
     "week1": "week1.yaml",
-    "acquisition": "acquisition.yaml",
-    "task_source": "task_source.yaml",
+    "retrieval": "retrieval.yaml",
     "judge": "judge.yaml",
     "variants": "variants.yaml",
-    "decision": "decision.yaml",
     "budget": "budget_v1.yaml",
     "stack": "stack.yaml",
 }
@@ -314,27 +312,6 @@ class Settings:
             "remote_calls": float(api["max_remote_calls"]),
             "gpu_seconds": float(campaign["max_gpu_hours"]) * 3600.0,
         }
-
-    def authoring_sampling(self):
-        """The decoding policy the authoring calls must actually carry.
-
-        Read from the frozen config rather than defaulted in the client. Every one of these
-        keys existed in configs/task_source.yaml and none of them was ever read, so the
-        corpus fingerprint described a policy that never left the machine.
-        """
-        from ..bench.grading.judge_client import SamplingEnvelope
-
-        block = self.get("task_source", "authoring")
-        return SamplingEnvelope(
-            temperature=float(block["temperature"]),
-            top_p=float(block["top_p"]),
-            seed=int(block["seed"]),
-            max_tokens=int(block["max_tokens"]),
-            enable_thinking=bool(block.get("enable_thinking", False)),
-            # DeepSeek has no thinking switch: reasoning is a property of the model id. The
-            # attempts record the reasoning tokens that actually came back instead.
-            send_thinking_switch=bool(block.get("send_thinking_switch", False)),
-        )
 
     def judge_sampling(self):
         """Return the exact evaluator decoding envelope frozen in ``judge.yaml``.

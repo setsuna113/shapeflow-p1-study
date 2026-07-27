@@ -232,7 +232,7 @@ measurement:
   layer: causal_native
   # The serialized layer is still run, on the core 2x2 only, as a mechanism control. It answers
   # "with batching removed, what does an ID selector do that a prose reducer does not" and is
-  # barred from the product verdict; decision.yaml carries that restriction.
+  # barred from the product verdict; the frozen prereg carries that restriction.
   mechanism_layer: causal
   mechanism_layer_arms: [P0, H_MARKDOWN_ID, C_ID, H_PLUS_C]
   # Pre-registered before any A' data exists. Split, never summed: prompt and completion tokens
