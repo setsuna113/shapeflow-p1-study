@@ -505,3 +505,29 @@ def test_the_stored_document_validates_against_the_schema(tmp_path):
     repo = Path(__file__).resolve().parents[2]
     schema = json.loads((repo / "schemas" / "checkpoint.schema.json").read_text())
     Draft202012Validator(schema).validate(to_document(_c_checkpoint()))
+
+
+def test_the_summarize_timeout_binding_does_not_leak_out_of_a_cell():
+    """It must be scoped, or one cell silently reconfigures everything after it.
+
+    Assigning os.environ directly leaked the campaign's 300s ceiling into the whole process:
+    once any test had run a cell, every later test inherited it instead of vendor's 60s, and the
+    suite ran until it was killed. Vendor's fallback only means "byte-for-byte vendor by
+    default" if the variable is genuinely absent outside the cell that set it.
+    """
+    import os
+
+    from shapeflow_p1.campaign.graph_driver import _summarize_timeout_applied
+
+    os.environ.pop("SHAPEFLOW_SUMMARIZE_TIMEOUT_S", None)
+    with _summarize_timeout_applied("300.0"):
+        assert os.environ["SHAPEFLOW_SUMMARIZE_TIMEOUT_S"] == "300.0"
+    assert "SHAPEFLOW_SUMMARIZE_TIMEOUT_S" not in os.environ
+
+    os.environ["SHAPEFLOW_SUMMARIZE_TIMEOUT_S"] = "45.0"
+    try:
+        with _summarize_timeout_applied("300.0"):
+            assert os.environ["SHAPEFLOW_SUMMARIZE_TIMEOUT_S"] == "300.0"
+        assert os.environ["SHAPEFLOW_SUMMARIZE_TIMEOUT_S"] == "45.0"
+    finally:
+        os.environ.pop("SHAPEFLOW_SUMMARIZE_TIMEOUT_S", None)

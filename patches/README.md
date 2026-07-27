@@ -100,6 +100,45 @@ researcher control flow, result formatting, fallback behaviour, and the concurre
 (both the outer sibling `gather` and vendor's inner summarization `gather`). With no strategy
 bound, the graph must be byte-for-byte vendor.
 
+## The one deliberate exception: the summarization timeout
+
+`utils.summarize_webpage` wraps its model call in `asyncio.wait_for(..., timeout=60.0)` and, on
+timeout, **returns the raw webpage instead of a summary**. That default is tuned for a hosted
+API. This study serves a 14B AWQ model at `max_num_seqs=1` with chunked prefill off, precisely
+so that one request is in flight at a time — and on that engine a single page does not fit in
+60 seconds. Measured on the frozen corpus: pages reach `max_content_length` (50 000 chars
+≈ 12 500 tokens) and prefill alone runs 38–83 s at the observed 150–330 tok/s, before a summary
+token is generated. The first real GPU smoke logged **212** timeouts.
+
+The failure is not symmetric, which is what makes it fatal rather than slow. Under P1 the page
+hook returns from `defer_page_batch` *before* `_sf_vendor_summarize_and_format` is ever
+awaited, so P1 never reaches this timeout. Only P0 does. A timed-out P0 therefore carries the
+full raw page as its "compressed" note, inflating its own downstream token count — and it does
+so worst on the largest pages, which is exactly the high-evidence-volume stratum where P1 is
+hypothesised to help. Left alone it would have manufactured the study's headline result.
+
+So the patch replaces the literal with
+
+```python
+timeout=float(os.environ.get("SHAPEFLOW_SUMMARIZE_TIMEOUT_S") or 60.0)
+```
+
+and `configs/week1.yaml` sets `odr.summarization_timeout_seconds: 300`, which
+`graph_driver.run_cell` exports on the one path every arm takes. It changes how long the graph
+is willing to wait and nothing about what it computes: no prompt byte, no token limit, no
+control flow.
+
+**The fallback is vendor's own 60.0, and that is the point.** A first attempt hard-coded 300
+and broke the parity gate — which turned out to carry a scenario named `summarization_timeout`
+that drives the model into `asyncio.sleep(3600)` specifically to exercise this branch. The gate
+was right and the assumption ("a mock model never approaches a timeout") was wrong. With the
+environment variable unset, as it is under the probe, the patched tree waits exactly as long as
+pristine and the traces match, so P0 remains byte-for-byte vendor by default and the deviation
+exists only where the campaign explicitly configures it.
+
+This still moves `patches/patched_tree.sha256`, which is a new protocol version and a new
+approval — recorded, not silent.
+
 ## The fused variant is not here
 
 `C05-FUSED-EXT` changes the stopping policy, not just the reducer, and `ResearchComplete` has

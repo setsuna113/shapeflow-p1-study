@@ -731,6 +731,31 @@ def _environment(overrides: dict[str, str]):
 
 
 @contextlib.contextmanager
+def _summarize_timeout_applied(seconds: str):
+    """Bind vendor's summarization timeout for one cell, then put it back.
+
+    Vendor reads ``SHAPEFLOW_SUMMARIZE_TIMEOUT_S`` through the patch and falls back to its own
+    60.0 when unset, so an unconfigured graph stays byte-for-byte vendor. It is bound on the one
+    path every arm takes, because only P0 can reach vendor's summarizer at all -- P1 returns
+    from ``defer_page_batch`` first -- and a value that reached one arm and not the other would
+    be exactly the asymmetry this exists to remove.
+
+    Scoped rather than assigned. An earlier version set the variable directly and leaked it into
+    the rest of the process: once any test had run a cell, every later test in the session
+    inherited a 300s ceiling instead of vendor's 60s, and the suite ran until it was killed.
+    """
+    previous = os.environ.get("SHAPEFLOW_SUMMARIZE_TIMEOUT_S")
+    os.environ["SHAPEFLOW_SUMMARIZE_TIMEOUT_S"] = seconds
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("SHAPEFLOW_SUMMARIZE_TIMEOUT_S", None)
+        else:
+            os.environ["SHAPEFLOW_SUMMARIZE_TIMEOUT_S"] = previous
+
+
+@contextlib.contextmanager
 def _odr_seed_applied(seed: int):
     """Attach ``seed`` to both ODR model construction paths, scoped to one cell.
 
@@ -939,6 +964,9 @@ async def run_cell(
         if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
             raise ValueError(f"{label} must be a lowercase SHA-256 digest")
 
+    summarize_timeout = str(
+        float(settings.get("week1", "odr", "summarization_timeout_seconds")))
+
     if graph is None:
         import open_deep_research.deep_researcher as vendor_graph
 
@@ -1016,7 +1044,8 @@ async def run_cell(
         "PYTHONHASHSEED": "0",
         "TZ": "UTC",
     }
-    with _environment(env), _odr_seed_applied(cell.seed), install_frozen_search(
+    with _environment(env), _summarize_timeout_applied(summarize_timeout), \
+            _odr_seed_applied(cell.seed), install_frozen_search(
             pool, snapshots, max_results=max_results,
             on_query=lambda payload: recorder.record("SEARCH_QUERY", payload)), \
             strategies_bound(bundle), bind_run(binding):

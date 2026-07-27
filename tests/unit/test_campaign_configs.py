@@ -457,3 +457,24 @@ def test_atomizer_truth_and_report_measurements_have_distinct_code_identities(se
 def test_a_missing_key_is_an_error_not_a_default(settings):
     with pytest.raises(ConfigError, match="missing required key"):
         settings.get("week1", "campaign", "no_such_key")
+
+
+def test_the_summarization_timeout_is_protocol_and_defaults_to_vendor(settings):
+    """Vendor's 60s cap silently turns P0 into a no-op on this engine.
+
+    On timeout `summarize_webpage` returns the RAW page instead of a summary. Only P0 can reach
+    it -- under P1 the page hook returns from defer_page_batch before vendor's summarizer is
+    awaited -- so the degradation is asymmetric, and worst on the largest pages, which is the
+    stratum where P1 is hypothesised to help. That is a manufactured headline result, so the
+    value is protocol rather than tuning.
+
+    The patch reads it from the environment and falls back to vendor's own 60.0, so a graph
+    nobody configured stays byte-for-byte vendor and the parity gate is unaffected.
+    """
+    seconds = settings.get("week1", "odr", "summarization_timeout_seconds")
+    assert float(seconds) > 60.0, "a value at or below vendor's default fixes nothing"
+
+    patch = (REPO / "patches" / "odr_p1_hooks.patch").read_text(encoding="utf-8")
+    assert 'os.environ.get("SHAPEFLOW_SUMMARIZE_TIMEOUT_S") or 60.0' in patch, (
+        "the patch must fall back to vendor's own default when the variable is unset"
+    )

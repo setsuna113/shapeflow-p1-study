@@ -39,6 +39,9 @@
      # Character limit to stay within model token limits (configurable)
      max_char_to_include = configurable.max_content_length
      
+@@ -195 +195 @@
+-            timeout=60.0  # 60 second timeout for summarization
++            timeout=float(os.environ.get("SHAPEFLOW_SUMMARIZE_TIMEOUT_S") or 60.0)
 --- a/src/open_deep_research/deep_researcher.py
 +++ b/src/open_deep_research/deep_researcher.py
 @@ -303,0 +304,15 @@

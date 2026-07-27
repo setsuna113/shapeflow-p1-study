@@ -111,6 +111,21 @@ odr:
   search_api: tavily
   max_react_tool_calls: 5
   max_content_length: 50000
+  # Vendor hard-codes 60s here and, on timeout, returns the RAW page instead of a summary. That
+  # default suits a hosted API; this study serves a 14B AWQ model at max_num_seqs=1 with chunked
+  # prefill off, so one page can spend 38-83s in prefill alone before a summary token exists.
+  # The first real GPU smoke logged 212 timeouts.
+  #
+  # It is not a symmetric slowdown, which is why it is protocol rather than tuning: under P1 the
+  # page hook returns from defer_page_batch before vendor's summarizer is ever awaited, so only
+  # P0 can time out. A timed-out P0 carries the whole raw page as its "compressed" note, worst on
+  # the largest pages -- exactly the high-evidence-volume stratum where P1 is meant to win. Left
+  # at 60 it would have manufactured the study's headline result.
+  #
+  # The patch reads this through SHAPEFLOW_SUMMARIZE_TIMEOUT_S and defaults to vendor's own 60.0
+  # when unset, so an unconfigured graph stays byte-for-byte vendor and the P0 parity gate is
+  # untouched. Both arms run under the same value.
+  summarization_timeout_seconds: 300
   max_structured_output_retries: 3
   research_model_max_tokens: 4096
   summarization_model_max_tokens: 1024
