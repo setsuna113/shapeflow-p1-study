@@ -382,8 +382,21 @@ def build_eligibility_spec(settings, registry: Mapping[str, object]) -> dict:
     return body
 
 
-def _treatment_state_exists(path: Path) -> bool:
-    """Whether the runner ledger exists, refusing to guess when it cannot be observed.
+#: Directories the runner creates only while executing treatment. ``ledger.sqlite`` is
+#: deliberately absent: ``open_run_ledger`` creates that file merely by *opening* it, which
+#: several read-only gates in bootstrap_and_run.sh do before any cell has run. Treating its
+#: existence as treatment state made the guard fire on a ledger holding zero runs, zero work
+#: items and zero attempts -- refusing a pre-registration that was in fact perfectly timed.
+_TREATMENT_ARTIFACT_DIRS = (
+    "schedules",
+    "e2e_blocks",
+    "component_forks",
+    "trajectory_diagnostics",
+)
+
+
+def _treatment_state_exists(runs: Path) -> bool:
+    """Whether the runner has begun treatment, refusing to guess when it cannot be observed.
 
     ``Path.exists()`` answers *False* for EACCES, and this guard runs as the steward, who has
     traverse-only access to the runner tree -- the ``runner/runs`` ACL names the evaluator, not
@@ -391,22 +404,27 @@ def _treatment_state_exists(path: Path) -> bool:
     treatment state may have been observed") silently evaluated to "no treatment state exists",
     every time, on the run host and nowhere else.
 
-    An unobservable ledger is not an absent one. Raising here converts a guard that quietly did
-    nothing into one that says exactly what it could not check.
+    An unobservable path is not an absent one, so a refused stat still raises. Traverse alone is
+    enough to ask whether a *named* path is there, which is all this needs -- it never lists the
+    directory and never reads a block.
     """
-    try:
-        path.stat()
-    except FileNotFoundError:
-        return False
-    except PermissionError as e:
-        raise ValueError(
-            f"cannot determine whether treatment state exists at {path}: {e}. The "
-            "pre-registration guard must not be satisfied by an unreadable path; grant this "
-            "identity stat access or run the freeze before the runner tree is created."
-        ) from e
-    except OSError as e:
-        raise ValueError(f"cannot stat {path} to check for treatment state: {e}") from e
-    return True
+    for name in _TREATMENT_ARTIFACT_DIRS:
+        path = runs / name
+        try:
+            path.stat()
+        except FileNotFoundError:
+            continue
+        except PermissionError as e:
+            raise ValueError(
+                f"cannot determine whether treatment state exists at {path}: {e}. The "
+                "pre-registration guard must not be satisfied by an unreadable path; grant "
+                "this identity traverse access to the runner runs directory, or run the "
+                "freeze before the runner tree is created."
+            ) from e
+        except OSError as e:
+            raise ValueError(f"cannot stat {path} to check for treatment state: {e}") from e
+        return True
+    return False
 
 
 def _write_once(path: Path, body: Mapping[str, object]) -> None:
@@ -458,7 +476,7 @@ def freeze_analysis_design(settings) -> dict:
         ):
             raise ValueError("frozen eligibility spec does not bind its feature registry")
         if not receipt_path.exists() or not evaluator_receipt_path.exists():
-            if _treatment_state_exists(settings.path("runs") / "ledger.sqlite"):
+            if _treatment_state_exists(settings.path("runs")):
                 raise ValueError(
                     "one or more analysis design receipts are absent after treatment state "
                     "exists")
@@ -483,11 +501,10 @@ def freeze_analysis_design(settings) -> dict:
             "receipt_path": str(receipt_path),
             "evaluator_receipt_path": str(evaluator_receipt_path),
         }
-    runner_ledger = settings.path("runs") / "ledger.sqlite"
-    if _treatment_state_exists(runner_ledger):
+    if _treatment_state_exists(settings.path("runs")):
         raise ValueError(
-            "runner ledger already exists; pre-treatment analysis design cannot be authored "
-            "after treatment state may have been observed")
+            "runner treatment artifacts already exist; pre-treatment analysis design cannot be "
+            "authored after treatment state may have been observed")
     registry = build_task_feature_registry(settings)
     spec = build_eligibility_spec(settings, registry)
     receipt = _analysis_design_receipt(settings, registry, spec)

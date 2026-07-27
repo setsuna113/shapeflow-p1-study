@@ -182,6 +182,13 @@ setfacl -m u:sfsteward:--x,u:sfevaluator:--x,m::--x "$DATA_ROOT/runner"
 for published in runs object_store checkpoints; do
   readonly_acl "$DATA_ROOT/runner/$published" sfevaluator
 done
+# The steward needs *traverse* on runs/ -- not read -- so freeze-analysis-design can stat the
+# runner ledger. That freeze is the pre-registration guard: it must prove no treatment state
+# exists before it authors the feature registry. Without this the stat raises EACCES, and the
+# guard is left unable to check the one thing it exists to check. Traverse alone does not let
+# the steward list the directory or read a block; it only lets it ask whether a named path is
+# there, which is exactly the question the guard asks.
+setfacl -m u:sfsteward:--x "$DATA_ROOT/runner/runs"
 
 # frozen_corpus is the steward-to-runner publication boundary. Both the runner and evaluator
 # read it; only the steward owns/writes it.

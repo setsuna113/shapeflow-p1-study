@@ -127,15 +127,40 @@ def test_design_is_idempotent_but_cannot_first_be_authored_after_runner_state(tm
     settings = _world(tmp_path)
     first = freeze_analysis_design(settings)
     settings.path("runs").mkdir(parents=True)
-    (settings.path("runs") / "ledger.sqlite").write_bytes(b"treatment may exist")
+    (settings.path("runs") / "e2e_blocks").mkdir()
     second = freeze_analysis_design(settings)
     assert first["receipt"]["content_sha256"] == second["receipt"]["content_sha256"]
 
     other = _world(tmp_path / "late")
     other.path("runs").mkdir(parents=True)
-    (other.path("runs") / "ledger.sqlite").write_bytes(b"treatment may exist")
+    (other.path("runs") / "e2e_blocks").mkdir()
     with pytest.raises(ValueError, match="cannot be authored after treatment"):
         freeze_analysis_design(other)
+
+
+def test_a_bare_runner_ledger_is_not_treatment_state(tmp_path):
+    """Opening the ledger is not running a cell.
+
+    ``open_run_ledger`` creates runs/ledger.sqlite merely by opening it, and several read-only
+    gates do that before any cell exists. Treating the file as proof of treatment blocked a
+    pre-registration that was perfectly timed, against a ledger holding zero runs, zero work
+    items and zero attempts. The signal is the artifact directories the runner writes only while
+    executing.
+    """
+    settings = _world(tmp_path)
+    settings.path("runs").mkdir(parents=True)
+    (settings.path("runs") / "ledger.sqlite").write_bytes(b"opened, never used")
+
+    frozen = freeze_analysis_design(settings)
+    assert frozen["receipt"]["content_sha256"]
+
+    for marker in ("schedules", "e2e_blocks", "component_forks", "trajectory_diagnostics"):
+        world = _world(tmp_path / f"after-{marker}")
+        world.path("runs").mkdir(parents=True)
+        (world.path("runs") / "ledger.sqlite").write_bytes(b"opened")
+        (world.path("runs") / marker).mkdir()
+        with pytest.raises(ValueError, match="cannot be authored after treatment"):
+            freeze_analysis_design(world)
 
 
 def test_feature_build_fails_on_corrupt_source_bytes(tmp_path):
