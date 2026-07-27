@@ -126,3 +126,38 @@ def test_the_frozen_configuration_leaves_real_room_for_page_content():
     assert budget.max_tokens > 14_293
     # And the window must be within what the model declares (max_position_embeddings 40960).
     assert int(stack["engine"]["max_model_len"]) <= 40_960
+
+
+def test_the_bound_holds_after_re_encoding():
+    """Truncation is not idempotent, and a safety bound that is 'nearly' respected is not one.
+
+    BPE merges are context-sensitive: removing a suffix can change how the tokens just before
+    the cut combine, so the shortened text can encode to MORE tokens than the prefix it came
+    from. Measured on the real corpus at 23,554 tokens against a 23,552 bound. Small -- and
+    exactly the kind of small a bound must not be allowed to have, because the whole reason it
+    exists is that the engine refuses what it cannot hold.
+    """
+    class _Contextual:
+        """A tokenizer whose count depends on what follows, like a real BPE."""
+
+        def encode_offsets(self, text):
+            # Pairs merge, except a trailing odd character stands alone -- so cutting can add a
+            # token relative to the prefix of a longer encoding.
+            offsets = []
+            i = 0
+            while i < len(text):
+                step = 2 if i + 2 <= len(text) and not text.endswith(text[i:i + 2]) else 1
+                offsets.append((i, min(i + step, len(text))))
+                i += step
+            return offsets
+
+        def count(self, text):
+            return len(self.encode_offsets(text))
+
+    tokenizer = _Contextual()
+    budget = SharedContentBudget(max_chars=10_000, max_tokens=6)
+    result = apply_shared_budget("abcdefghijklmnopqrstuvwxyz", budget, tokenizer)
+    assert result.reason == OVERFLOW_REASON
+    # The property that matters: what comes out fits, measured the way the engine measures it.
+    assert tokenizer.count(result.text) <= budget.max_tokens
+    assert result.kept_tokens == tokenizer.count(result.text)

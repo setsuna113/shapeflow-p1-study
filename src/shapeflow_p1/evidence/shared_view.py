@@ -105,20 +105,42 @@ def apply_shared_budget(
         return SharedContent(text=clipped, truncated=len(clipped) < len(text))
 
     offsets = tokenizer.encode_offsets(clipped)
-    if len(offsets) <= budget.max_tokens:
+    original = len(offsets)
+    if original <= budget.max_tokens:
         return SharedContent(
             text=clipped,
             truncated=len(clipped) < len(text),
-            original_tokens=len(offsets),
-            kept_tokens=len(offsets),
+            original_tokens=original,
+            kept_tokens=original,
         )
+
     # Cut on the boundary of the last token that fits, so the surviving text is exactly the
     # decoding of the tokens the engine would have read -- not a byte prefix that splits one.
-    cut = offsets[budget.max_tokens - 1][1]
-    return SharedContent(
-        text=clipped[:cut],
-        truncated=True,
-        reason=OVERFLOW_REASON,
-        original_tokens=len(offsets),
-        kept_tokens=budget.max_tokens,
+    #
+    # Then re-encode and, if it is still over, cut again. Truncation is NOT idempotent under
+    # re-encoding: BPE merges are context-sensitive, so removing a suffix can change how the
+    # tokens just before the cut combine, and the shortened text can encode to *more* tokens
+    # than the prefix it was taken from. Measured here at 23,554 tokens against a 23,552 bound
+    # -- small, and exactly the kind of small that a safety bound must not be allowed to have,
+    # since the whole point is that the engine never sees more than it can hold.
+    keep = budget.max_tokens
+    for _ in range(8):
+        cut = offsets[keep - 1][1]
+        candidate = clipped[:cut]
+        recount = len(tokenizer.encode_offsets(candidate))
+        if recount <= budget.max_tokens:
+            return SharedContent(
+                text=candidate,
+                truncated=True,
+                reason=OVERFLOW_REASON,
+                original_tokens=original,
+                kept_tokens=recount,
+            )
+        keep -= max(1, recount - budget.max_tokens)
+        if keep < 1:
+            break
+    # Converging in eight passes is not in doubt for any real text -- each pass removes at least
+    # one token -- but refusing beats returning something over the bound.
+    raise ValueError(
+        f"could not bound content to {budget.max_tokens} tokens; re-encoding kept exceeding it"
     )
