@@ -111,16 +111,20 @@ odr:
   search_api: tavily
   max_react_tool_calls: 5
   max_content_length: 50000
-  # Vendor hard-codes 60s here and, on timeout, returns the RAW page instead of a summary. That
-  # default suits a hosted API; this study serves a 14B AWQ model at max_num_seqs=1 with chunked
-  # prefill off, so one page can spend 38-83s in prefill alone before a summary token exists.
-  # The first real GPU smoke logged 212 timeouts.
+  # Vendor hard-codes 60s here and, on timeout, returns the RAW page instead of a summary. The
+  # first real GPU smoke logged 212 timeouts.
   #
-  # It is not a symmetric slowdown, which is why it is protocol rather than tuning: under P1 the
-  # page hook returns from defer_page_batch before vendor's summarizer is ever awaited, so only
-  # P0 can time out. A timed-out P0 carries the whole raw page as its "compressed" note, worst on
-  # the largest pages -- exactly the high-evidence-volume stratum where P1 is meant to win. Left
-  # at 60 it would have manufactured the study's headline result.
+  # The cause was NOT slow prefill -- measured PAGE_P0_SUMMARY latency was p50 7.4s, max 12.7s.
+  # It was vendor summarising every page of a result set concurrently (utils.py asyncio.gather)
+  # while the causal layer admitted one upstream request at a time: eight concurrent summaries
+  # queued behind each other, and the eighth waited out the timeout it had already spent 7/8ths
+  # of. An earlier note here blamed "38-83s in prefill", read off vLLM's interval-averaged
+  # throughput line, which includes idle time; that reading was wrong.
+  #
+  # It is protocol rather than tuning because the failure is asymmetric: under P1 the page hook
+  # returns from defer_page_batch before vendor's summarizer is ever awaited, so only P0 can time
+  # out. A timed-out P0 carries the whole raw page as its "compressed" note, worst on the largest
+  # pages -- exactly the high-evidence-volume stratum where P1 is meant to win.
   #
   # The patch reads this through SHAPEFLOW_SUMMARIZE_TIMEOUT_S and defaults to vendor's own 60.0
   # when unset, so an unconfigured graph stays byte-for-byte vendor and the P0 parity gate is
@@ -128,11 +132,83 @@ odr:
   summarization_timeout_seconds: 300
   max_structured_output_retries: 3
   research_model_max_tokens: 4096
-  summarization_model_max_tokens: 1024
+  # The pinned vendor default (configuration.py: summarization_model_max_tokens = 8192). It was
+  # set to 1024 here, and that starved only P0: vendor's summarizer falls back to the RAW page
+  # when its completion is cut off, so 263 of 1839 P0 summaries (14.3%) published whole pages as
+  # their "compressed" note -- worst on the largest pages, which is exactly the stratum where P1
+  # is supposed to win. P1 never touches this path. An asymmetric truncation on the baseline is
+  # not a shared knob, so it goes back to vendor's own value.
+  summarization_model_max_tokens: 8192
   compression_model_max_tokens: 4096
   final_report_model_max_tokens: 8192
   max_researcher_iterations: 3
   max_concurrent_research_units: 1
+
+# Every knob above that differs from the pinned vendor default, with the reason it differs. A
+# deviation not listed here fails its test: `summarization_model_max_tokens` sat at 1024 for the
+# whole design without anyone having written down why, and because vendor's summarizer falls back
+# to the raw page when truncated, it silently degraded 14.3% of P0 summaries -- an asymmetric
+# handicap on the baseline, on exactly the largest pages, which is the stratum P1 must beat.
+#
+# The test that reads this asks two things: that the list matches the deviations exactly, and
+# that each carries `binds`, because a knob binding only one arm is a confound and a knob binding
+# both is a workload choice.
+odr_deviations:
+  - knob: max_react_tool_calls
+    vendor: 10
+    ours: 5
+    binds: BOTH_ARMS
+    reason: >-
+      Bounds tool calls per researcher so 19 arms x 64 tasks fits the GPU budget. Symmetric:
+      the same ceiling applies to the P0 and P1 graphs, so it changes the workload, not the
+      relative cost of the two forms.
+  - knob: max_researcher_iterations
+    vendor: 6
+    ours: 3
+    binds: BOTH_ARMS
+    reason: >-
+      The same budget bound one level up, on how many supervisor rounds a task may take.
+      Symmetric: both graphs stop at the same round, so neither form is given more research.
+  - knob: max_concurrent_research_units
+    vendor: 5
+    ours: 1
+    binds: BOTH_ARMS
+    reason: >-
+      One ConductResearch child at a time bounds per-task cost. This is a breadth choice, not a
+      serialization of the request stream: the concurrency A' restores is vendor's per-page
+      asyncio.gather inside a researcher, which this does not touch.
+  - knob: research_model_max_tokens
+    vendor: 10000
+    ours: 4096
+    binds: BOTH_ARMS
+    reason: >-
+      The served model is a 14B AWQ at 16384 max-model-len; vendor's default is sized for a
+      hosted frontier model. Applies to the same react agent in both arms.
+  - knob: compression_model_max_tokens
+    vendor: 8192
+    ours: 4096
+    binds: BOTH_ARMS
+    reason: >-
+      Same context bound. This is the C node's own cap and it binds P0's compressor and the C
+      arms identically; measured truncation-fallback rate at this value is 0%.
+  - knob: final_report_model_max_tokens
+    vendor: 10000
+    ours: 8192
+    binds: BOTH_ARMS
+    reason: >-
+      Same context bound, applied to the single final writer both arms share; measured
+      truncation rate 0%.
+  - knob: summarization_timeout_seconds
+    vendor: 60
+    ours: 300
+    binds: P0_ONLY
+    reason: >-
+      Vendor hard-codes 60s and returns the RAW page on timeout. Under P1 the page hook returns
+      before vendor's summarizer is awaited, so only P0 can time out -- the asymmetry is in
+      vendor's own design, and leaving it at 60 under a serialized gateway produced 212 timeouts
+      that would have manufactured the headline. A' removes the serialization that caused them;
+      this stays raised so the remaining tail cannot re-introduce the same asymmetry, and both
+      arms run under the same value.
 
 # The isolated causal layer is what this round runs. The operational layer is configured and has
 # its own unit, but a deployment claim needs it to run separately -- mixing the two would let a
@@ -145,6 +221,37 @@ measurement:
   # may emit, and reporting it as a decode cap would overstate the saving.
   selector_max_completion_tokens: 768
   guided_decoding: true
+
+# The frozen domain of an H publication handle. This is protocol, not tuning: the handle is the
+# pointer P1 spends its tokens on, so its cost bound is part of the form claim, and its coordinate
+# bounds decide when one handle could ever mean two spans.
+#
+# The first encoding rendered four coordinates with underscores (H3_1_0_1). Qwen charges a token
+# per underscore and per digit and never merges a digit with a letter, so every handle cost 9-10
+# tokens against a cap of 8; every H arm failed view construction before its first selector call
+# and fell back to P0, in all 146 canary cells, silently. The encoding now packs the coordinates
+# by mixed radix and renders them in bijective base 26, and preflight enumerates the entire
+# domain against the frozen tokenizer rather than arguing the bound.
+#
+# Each radix is deliberately larger than the configuration can reach; a coordinate outside them
+# fails its cell rather than widening the domain in place.
+p1_publication_handle:
+  format_version: h_publication_ordinal_bijective_base26_v1
+  max_publication_handle_tokens: 8
+  radices:
+    # odr.max_researcher_iterations is 3.
+    researcher_iteration: 8
+    # odr.max_concurrent_research_units is 1.
+    child_ordinal: 2
+    # odr.max_react_tool_calls is 5, plus structured-output retries; canary observed 3.
+    assistant_turn: 16
+    # Tool-call sets per assistant turn; canary observed 0.
+    toolset: 4
+    # Publication ordinals are allocated across every span of every page in one atomic batch,
+    # so this is the whole batch's chunk count. The frozen corpus's worst case is the eight
+    # largest pages under markdown_structure_v1 at 320 tokens: 23,782 spans. Median page 97,
+    # p95 656 -- this bound binds three pages in the entire corpus.
+    evidence: 24000
 
 # The first real GPU run. It checks engineering correctness and P1 non-inertness only; it may
 # never gate on a quality outcome, because choosing whether to continue based on how good the

@@ -461,6 +461,79 @@ def _format_query_attempts(attempts: Sequence[dict]) -> str:
     ) or "(no query attempts were recorded)"
 
 
+#: How many blocks an over-long facet is cut into when its contradiction answer will not fit.
+#: Four, not two. Contradiction is a property of a *pair*, so a split has to keep every pair
+#: co-resident in at least one call: with two halves the only call that holds a cross-half pair
+#: is the union, which is the request that just truncated. With four blocks, the six unordered
+#: block pairs each carry half the facts and together cover every pair of facts exactly.
+_CONFLICT_BLOCKS = 4
+
+
+async def _facet_contradictions(
+    judge,
+    task_id: str,
+    facet: str,
+    facts: Sequence["CandidateAtom"],
+    *,
+    responses: list,
+) -> tuple[set[tuple[str, str]], int]:
+    """Contradiction pairs within one facet, split by blocked pairs when the answer overflows.
+
+    The extraction pass above splits its batches when the output cap is hit, and that is safe
+    there because an atom belongs to one span. Contradiction does not decompose that way: naively
+    halving a facet's fact list silently drops every pair that straddles the cut, and a truth
+    packet that quietly lost contradictions makes an arm that missed them look correct. So this
+    splits into blocks and re-asks over each *pair of blocks*, which bounds both the prompt and
+    the answer while leaving no pair unexamined.
+
+    The judge's sampling envelope is frozen protocol and is deliberately not widened for this
+    pass: raising ``max_tokens`` for one call would make this stage's judge a different judge
+    from the one that authored everything else.
+    """
+    prompt = _CONFLICT_PROMPT.format(
+        facet=facet,
+        facts="\n".join(f"{fact.atom_id}: {fact.text}" for fact in facts),
+    )
+    try:
+        response = await judge.judge(
+            _CONFLICT_SYSTEM, prompt, validate=_checker_for(_CONFLICT_SCHEMA)
+        )
+    except JudgeTruncated as e:
+        if len(facts) <= _CONFLICT_BLOCKS:
+            # Below this the blocks stop shrinking and the recursion would not terminate.
+            raise JudgeUnavailable(
+                f"truth for {task_id} unavailable: facet {facet!r} still overflows the output "
+                f"cap at {len(facts)} facts ({e}); it cannot be split without dropping pairs, "
+                "and a packet missing contradictions makes an arm that missed them look right"
+            ) from e
+        blocks = [list(facts[index::_CONFLICT_BLOCKS]) for index in range(_CONFLICT_BLOCKS)]
+        pairs: set[tuple[str, str]] = set()
+        used = 0
+        for i in range(_CONFLICT_BLOCKS):
+            for j in range(i + 1, _CONFLICT_BLOCKS):
+                found, sub_used = await _facet_contradictions(
+                    judge, task_id, facet, blocks[i] + blocks[j], responses=responses
+                )
+                pairs |= found
+                used += sub_used
+        return pairs, used
+    except JudgeUnavailable as e:
+        raise JudgeUnavailable(f"truth for {task_id} unavailable: {e}") from e
+
+    responses.append(response)
+    known_atom_ids = {fact.atom_id for fact in facts}
+    pairs = set()
+    for pair in response.data.get("contradictions") or ():
+        canonical_pair = tuple(sorted(map(str, pair))) if len(pair) == 2 else ()
+        if (
+            len(canonical_pair) == 2
+            and canonical_pair[0] != canonical_pair[1]
+            and set(canonical_pair) <= known_atom_ids
+        ):
+            pairs.add(canonical_pair)
+    return pairs, 1
+
+
 def _stable_atom_id(proposed: str, facet_id: str, text: str) -> str:
     # The judge's slug is presentation, not identity: two batches may name the same fact
     # differently. Identity comes from the normalized fact and facet.
@@ -648,27 +721,15 @@ async def build_truth_for_task(
     for candidate in candidates:
         if candidate.supporting_span_ids:
             verified_by_facet.setdefault(candidate.facet_id, []).append(candidate)
+    conflict_blocks = 0
     for facet, facts in sorted(verified_by_facet.items()):
         if len(facts) < 2:
             continue
-        response = await judge.judge(
-            _CONFLICT_SYSTEM,
-            _CONFLICT_PROMPT.format(
-                facet=facet,
-                facts="\n".join(f"{fact.atom_id}: {fact.text}" for fact in facts),
-            ),
-            validate=_checker_for(_CONFLICT_SCHEMA),
+        facet_pairs, blocks = await _facet_contradictions(
+            judge, task_id, facet, facts, responses=responses
         )
-        responses.append(response)
-        known_atom_ids = {fact.atom_id for fact in facts}
-        for pair in response.data.get("contradictions") or ():
-            canonical_pair = tuple(sorted(map(str, pair))) if len(pair) == 2 else ()
-            if (
-                len(canonical_pair) == 2
-                and canonical_pair[0] != canonical_pair[1]
-                and set(canonical_pair) <= known_atom_ids
-            ):
-                pairs.add(canonical_pair)
+        conflict_blocks += blocks
+        pairs |= facet_pairs
 
     support_index = await _atom_support_index(
         settings, task_id,
@@ -732,6 +793,13 @@ async def build_truth_for_task(
         # so a packet built from adapted batching is distinguishable from one that was not.
         "span_batches": len(responses),
         "span_batches_split_for_output_cap": split_batches,
+        # Contradiction calls actually made. It exceeds the facet count exactly when a facet's
+        # answer overflowed and had to be re-asked as blocked pairs, so a packet whose
+        # contradictions came from a split is distinguishable from one whose did not.
+        "conflict_blocks": conflict_blocks,
+        "conflict_facets": sum(
+            1 for facts in verified_by_facet.values() if len(facts) >= 2
+        ),
         "judge_calls_total": len(all_responses),
         "judge_calls_by_stage": {
             "truth_extraction": extraction_batches,

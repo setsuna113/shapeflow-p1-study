@@ -43,7 +43,13 @@ from shapeflow_p1.odr.checkpoints import (
 from shapeflow_p1.odr.hooks import TaskContext
 from shapeflow_p1.p1.aggregators import stable_union_v1
 from shapeflow_p1.p1.contracts import parse_selection
+from shapeflow_p1.p1 import handle_codec
 from shapeflow_p1.p1.view import CandidateViewRecord
+
+# Handles are found in rendered text by shape, but their *grammar* belongs to the codec: a
+# second grammar written next to a caller is how the producer and the trajectory validator came
+# to disagree about a handle's arity, which made every H arm fall back to P0 in silence.
+_HANDLE_IN_TEXT = r"\[(H[a-z]+)\]"
 from shapeflow_p1.providers.provider_client import ProviderCallError
 from shapeflow_p1.strategies.close_visible import (
     CloseSelectionError,
@@ -471,6 +477,26 @@ def _c_checkpoint() -> CCheckpoint:
     )
 
 
+def test_a_batch_beyond_the_frozen_handle_domain_stops_the_cell_instead_of_falling_back():
+    """Domain overflow is a protocol defect, not a treatment outcome.
+
+    Every other P1 failure degrades to the whole-batch P0 fallback, which is a legitimate part
+    of the ITT design. That is exactly why this one must not: a cell recorded as "P1 tried and
+    fell back" is indistinguishable from one where P1 was never reachable, and that
+    indistinguishability is what let a 100%-inert P1 look like 146 completed canary cells.
+    """
+    from shapeflow_p1.p1.handle_codec import HandleDomainError
+
+    page = _factory().build("H02").page
+    beyond = replace(
+        _h_checkpoint(),
+        # Past odr.max_react_tool_calls and past the frozen assistant_turn radix.
+        assistant_turn_index=handle_codec.FROZEN_RADICES.assistant_turn,
+    )
+    with pytest.raises(HandleDomainError, match="exceeds the frozen domain"):
+        asyncio.run(page.transform_tool_batch(task_ctx=TASK, checkpoint=beyond))
+
+
 def test_the_h_arm_actually_publishes_selected_evidence_and_records_work():
     """A P1 arm that produced vendor's output would be inert -- exactly what the canary checks."""
     page = _factory().build("H02").page
@@ -478,7 +504,9 @@ def test_the_h_arm_actually_publishes_selected_evidence_and_records_work():
     assert len(out) == 1
     assert out[0].tool_call_id == "c1"
     assert "Selected evidence" in out[0].content
-    assert "[H0_0_" in out[0].content
+    published = re.findall(_HANDLE_IN_TEXT, out[0].content)
+    assert published, out[0].content
+    assert all(handle_codec.validate(handle) for handle in published), published
     assert "[E1]" not in out[0].content
     # Work is recorded whether or not the output was usable: tokens spent on a failed selection
     # are still tokens spent, and recording them only on success flatters P1 when it goes wrong.
@@ -521,9 +549,10 @@ def test_h_publication_handles_are_unique_across_pages_and_stable_across_turns()
     first = asyncio.run(
         page.transform_tool_batch(task_ctx=TASK, checkpoint=first_checkpoint)
     )[0].content
-    handles = re.findall(r"\[(H[0-9a-z]+_[0-9a-z]+_[0-9a-z]+)\]", first)
+    handles = re.findall(_HANDLE_IN_TEXT, first)
     assert len(handles) == 2
     assert len(set(handles)) == 2
+    assert all(handle_codec.validate(handle) for handle in handles), handles
     assert "[E1]" not in first
 
     later_checkpoint = replace(
@@ -536,14 +565,14 @@ def test_h_publication_handles_are_unique_across_pages_and_stable_across_turns()
         page.transform_tool_batch(task_ctx=TASK, checkpoint=first_checkpoint)
     )[0].content
     assert re.findall(
-        r"\[(H[0-9a-z]+_[0-9a-z]+_[0-9a-z]+)\]", replay
+        _HANDLE_IN_TEXT, replay
     ) == handles
 
     later = asyncio.run(
         page.transform_tool_batch(task_ctx=TASK, checkpoint=later_checkpoint)
     )[0].content
     later_handles = re.findall(
-        r"\[(H[0-9a-z]+_[0-9a-z]+_[0-9a-z]+)\]", later
+        _HANDLE_IN_TEXT, later
     )
     assert len(later_handles) == 2
     assert set(later_handles).isdisjoint(handles)

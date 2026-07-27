@@ -51,6 +51,7 @@ _PLACEHOLDERS = ",".join("?" * len(SELECTOR_OPS))
 CANARY_CHECKS = (
     "patched_graph_invoked",
     "p1_strategy_invocations",
+    "p1_published_output",
     "selector_decode",
     "checkpoints_present",
     "direct_denominator_provenance",
@@ -69,8 +70,17 @@ CANARY_CHECKS = (
 )
 
 
-def _check(name: str, ok: bool, detail: str) -> dict:
-    return {"name": name, "status": PASS if ok else FAIL, "detail": detail}
+def _check(name: str, ok: bool, detail: str, data: dict | None = None) -> dict:
+    """One gate's verdict, optionally carrying the per-arm numbers behind it.
+
+    ``data`` exists so a diagnosis does not have to be reconstructed from the object store after
+    the fact. When every H arm published nothing, the counters said "reduced" and the reason
+    lived only in per-span records that nobody reads unless they already suspect something.
+    """
+    result = {"name": name, "status": PASS if ok else FAIL, "detail": detail}
+    if data:
+        result["data"] = data
+    return result
 
 
 async def run_canary(settings: Settings, *, repo: Path,
@@ -318,6 +328,43 @@ def _verify(
                          f"{len(_by_arm(p1_cells))} P1 arm(s) all reduced something"
                          if p1_cells and not inert
                          else f"arms that reduced nothing: {inert or 'no P1 cells at all'}"))
+
+    # 2b. Something was actually PUBLISHED. Reducing a batch is not producing P1 output: a batch
+    #     that fails and falls back to P0 still counts as reduced, so the check above passed on
+    #     every arm of a run in which not one P1 span was ever published. That is not
+    #     hypothetical -- across 19 arms and 146 cells, every H arm raised
+    #     `publication handle ... exceeds frozen cap 8` on its first candidate and fell back, and
+    #     the only place it was visible was the object store, after the fact.
+    #
+    #     The P0 fallback is a legitimate part of the ITT design, which is exactly why total
+    #     inertness must be a gate: "P1 tried and fell back" and "P1 was never reachable" produce
+    #     the same artifacts, and only the second is a defect.
+    publication = _p1_publication_by_arm(p1_cells)
+    silent = sorted(
+        arm_id for arm_id, stats in publication.items() if stats["published_spans"] == 0
+    )
+    checks.append(_check(
+        "p1_published_output",
+        bool(publication) and not silent,
+        f"{len(publication)} P1 arm(s) published spans; "
+        + ", ".join(
+            f"{arm_id}={stats['published_spans']}"
+            for arm_id, stats in sorted(publication.items())
+        )
+        if publication and not silent
+        else (
+            "arms that published nothing: "
+            + "; ".join(
+                f"{arm_id} (selector_attempted="
+                f"{publication[arm_id]['selector_attempted']}, "
+                f"fallbacks={publication[arm_id]['page_fallbacks']}, "
+                f"top failure={publication[arm_id]['top_failure'] or 'none recorded'})"
+                for arm_id in silent
+            )
+            if silent else "no P1 cells at all"
+        ),
+        data={"by_arm": publication},
+    ))
 
     # 3. The selector decoded. Live runs consume a provider-signed sanitized aggregate because
     # the runner cannot read the provider's 0700 ledger/object store. The direct-file branch is
@@ -1135,6 +1182,51 @@ def _expected_selector_ops_by_arm(settings: Settings, manifest) -> dict[str, tup
     return expected
 
 
+def _p1_publication_by_arm(p1_cells: dict) -> dict[str, dict]:
+    """Per-arm evidence that P1 output actually reached the graph, plus why it did not.
+
+    Read from the direct-node records rather than the cell counters, because the counters
+    describe attempts: ``page_batches_reduced`` is incremented for a batch that failed and fell
+    back, so an arm can look invoked, look reduced, and have published nothing at all. The
+    diagnostics travel with the verdict so a failure is legible from the canary summary instead
+    of requiring the object store to be read afterwards.
+    """
+    summary: dict[str, dict] = {}
+    for arm_id, records in _by_arm(p1_cells).items():
+        stats = summary.setdefault(arm_id, {
+            "cells": 0,
+            "published_spans": 0,
+            "selector_attempted": 0,
+            "direct_node_records": 0,
+            "page_fallbacks": 0,
+            "failures": {},
+            "top_failure": "",
+        })
+        for record in records:
+            stats["cells"] += 1
+            stats["page_fallbacks"] += int(record.get("counts", {}).get("page_fallbacks", 0))
+            for node_record in record.get("direct_node_records") or ():
+                stats["direct_node_records"] += 1
+                stats["published_spans"] += len(node_record.get("published_span_ids") or ())
+                if node_record.get("selector_attempted"):
+                    stats["selector_attempted"] += 1
+                failure = node_record.get("failure")
+                if failure:
+                    # Group by reason and keep one example: 2,067 occurrences of the same
+                    # publication-handle overflow is one defect, not 2,067 of them.
+                    if isinstance(failure, dict):
+                        reason = str(failure.get("reason") or "")
+                        detail = str(failure.get("detail") or "")
+                    else:
+                        reason, _, detail = str(failure).partition(":")
+                    key = f"{reason.strip()}: {detail.strip()[:120]}"
+                    stats["failures"][key] = stats["failures"].get(key, 0) + 1
+        if stats["failures"]:
+            reason, count = max(stats["failures"].items(), key=lambda item: item[1])
+            stats["top_failure"] = f"{reason} (x{count})"
+    return summary
+
+
 def _arms_identical_to_p0(p0_cells: dict, p1_cells: dict) -> list:
     """P1 arms whose every compared cell is byte-identical to P0 on the same task."""
     p0_by_task = {v["cell"]["task_id"]: v.get("final_report", "")
@@ -1610,4 +1702,27 @@ def _report(
         "|---|---|---|",
     ]
     lines += [f"| {c['name']} | {c['status']} | {c['detail']} |" for c in checks]
+
+    # The per-arm publication table is printed whether or not its gate passed. A summary that
+    # only shows numbers when something is already known to be wrong is a summary nobody reads
+    # in time: these counts were all zero for 19 arms and 146 cells, and the run looked healthy.
+    by_arm = next(
+        (c.get("data", {}).get("by_arm") for c in checks
+         if c["name"] == "p1_published_output"),
+        None,
+    )
+    if by_arm:
+        lines += [
+            "",
+            "## P1 output per arm",
+            "",
+            "| Arm | Cells | Published spans | Selector attempts | Page fallbacks | Top failure |",
+            "|---|---|---|---|---|---|",
+        ]
+        lines += [
+            f"| {arm_id} | {s['cells']} | {s['published_spans']} | "
+            f"{s['selector_attempted']} | {s['page_fallbacks']} | "
+            f"{s['top_failure'] or '-'} |"
+            for arm_id, s in sorted(by_arm.items())
+        ]
     return {"json": body, "markdown": "\n".join(lines) + "\n"}

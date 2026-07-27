@@ -130,6 +130,11 @@ def _outputs(manifest, *, p1_report="P1 report", p0_report="P0 report", counts=N
                     "stage": "single",
                     "offered_span_ids": [f"span-{arm}"],
                     "offered_source_occurrence_ids": [f"occ-{arm}"],
+                    # A healthy arm publishes. Leaving this out of the "healthy" fixture is how
+                    # a run with zero P1 output all the way through looked like a healthy one.
+                    "selector_attempted": True,
+                    "published_span_ids": [f"span-{arm}"],
+                    "failure": None,
                 }]
             ),
             "work_summary": {
@@ -732,6 +737,54 @@ def test_a_selector_that_never_decoded_fails(settings, monkeypatch, proved_repo)
     checks = canary._verify(settings, manifest, _states(manifest),
                             _outputs(manifest), repo=proved_repo)
     assert _status(checks, "selector_decode") == "FAIL"
+
+
+def test_an_arm_that_reduced_every_batch_but_published_nothing_fails(
+    settings, monkeypatch, proved_repo
+):
+    """The exact shape of the run that looked healthy for 19 arms and 146 cells.
+
+    Every H batch was reduced, so ``page_batches_reduced`` was 1 and ``p1_strategy_invocations``
+    passed. Every batch then raised on its first candidate -- ``publication handle 'H3_1_0_1'
+    costs 9 exact model tokens, exceeding the frozen cap 8`` -- and fell back to P0 as a whole.
+    Not one P1 span was published anywhere, and nothing was red.
+    """
+    manifest, canary = _run(settings, monkeypatch, _good_inference())
+    outputs = _outputs(manifest)
+    for record in outputs.values():
+        for node_record in record["direct_node_records"]:
+            node_record["published_span_ids"] = []
+            node_record["selector_attempted"] = False
+            node_record["failure"] = {
+                "reason": "VIEW_CONSTRUCTION",
+                "detail": "publication handle 'H3_1_0_1' costs 9 exact model tokens, "
+                          "exceeding the frozen cap 8",
+            }
+        record["counts"] = {**record["counts"], "page_fallbacks": 1}
+    checks = canary._verify(settings, manifest, _states(manifest), outputs, repo=proved_repo)
+
+    # The attempt-counting gate is satisfied: this is exactly why it is not sufficient.
+    assert _status(checks, "p1_strategy_invocations") == "PASS"
+    assert _status(checks, "p1_published_output") == "FAIL"
+    published = next(c for c in checks if c["name"] == "p1_published_output")
+    assert "VIEW_CONSTRUCTION" in published["detail"]
+    assert all(
+        stats["published_spans"] == 0 for stats in published["data"]["by_arm"].values()
+    )
+
+
+def test_the_canary_summary_reports_publication_per_arm_even_when_green(
+    settings, monkeypatch, proved_repo
+):
+    """Numbers that only appear once something is known to be wrong appear too late."""
+    manifest, canary = _run(settings, monkeypatch, _good_inference())
+    checks = canary._verify(settings, manifest, _states(manifest),
+                            _outputs(manifest), repo=proved_repo)
+    assert _status(checks, "p1_published_output") == "PASS"
+    report = canary._report(checks, tasks=["T1"], arms=[a.arm_id for a in ARMS],
+                            settings=settings)
+    assert "## P1 output per arm" in report["markdown"]
+    assert "H_ID" in report["markdown"]
 
 
 def test_p1_bytes_identical_to_p0_fails(settings, monkeypatch, proved_repo):

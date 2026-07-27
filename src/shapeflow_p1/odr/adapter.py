@@ -29,6 +29,7 @@ from typing import Any, Callable, Optional, Sequence
 
 from ..canonical import canonical_json
 from ..hashing import sha256_hex
+from ..p1.handle_codec import HandleDomainError
 from .checkpoints import (
     FrozenMessage,
     FrozenToolCall,
@@ -408,6 +409,13 @@ async def reduce_tool_batch(
     except asyncio.CancelledError:
         # The run is being torn down. Converting this into "P1 failed, use P0" would fabricate
         # a P0 result for work that was abandoned -- and charge the arm for it.
+        raise
+    except HandleDomainError:
+        # The frozen publication-handle domain cannot name this batch's spans. That is a defect
+        # in frozen protocol, not a property of the treatment, and the fallback is not an honest
+        # reading of it: a cell recorded as "P1 tried and fell back" would be indistinguishable
+        # from one where P1 was never reachable at all. That indistinguishability is what let an
+        # entirely inert P1 look like 146 completed canary cells, so this stops the cell instead.
         raise
     except Exception as e:  # noqa: BLE001
         failure = PageFailure(reason="STRATEGY_ERROR", detail=f"{type(e).__name__}: {e}")

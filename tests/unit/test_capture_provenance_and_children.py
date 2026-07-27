@@ -37,6 +37,7 @@ from shapeflow_p1.odr.vendor_hooks import (
     refine_child_research_tasks,
     run_close_strategy,
 )
+from shapeflow_p1.p1 import handle_codec
 from shapeflow_p1.p1.view import compact_publication_handle
 from shapeflow_p1.strategies.p0 import VendorPageStrategy
 from shapeflow_p1.strategies.page_h import PageSelectionStrategy
@@ -419,4 +420,11 @@ def test_child_structural_slot_conflict_and_compact_handle_aliasing_fail_closed(
         0, 0, 1, researcher_coordinate=(2, 0)
     )
     assert len({a, b, later}) == 3
-    assert compact_publication_handle(0, 0, 1) == "H0_0_1"
+    # Absence of a researcher coordinate is its own structural position, not a shorter handle:
+    # the predecessor dropped the field and changed the handle's arity, which is what the
+    # trajectory validator's grammar then failed to match.
+    unnested = compact_publication_handle(0, 0, 1)
+    assert unnested == "Ha"
+    assert unnested not in {a, b, later}
+    for handle in (a, b, later, unnested):
+        assert handle_codec.validate(handle), handle

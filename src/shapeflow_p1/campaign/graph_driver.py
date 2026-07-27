@@ -354,15 +354,20 @@ def _publication_handle_trace(record: dict) -> dict:
     if span_ids != offered:
         errors.append("publication handle mapping does not cover offered order exactly")
     if str(record.get("node") or "").upper().startswith("H"):
+        # One grammar, owned by the codec the producer encodes with. A regex written here
+        # instead is how the validator came to accept three coordinate groups while the
+        # producer emitted four.
+        from ..p1 import handle_codec
+
         invalid_handles = [
-            handle for handle in handles
-            if re.fullmatch(r"H[0-9a-z]+_[0-9a-z]+_[0-9a-z]+", handle) is None
+            handle for handle in handles if not handle_codec.validate(handle)
         ]
         if invalid_handles:
             errors.append("H publication handles are not structural ordinals")
-        from ..p1.view import MAX_PUBLICATION_HANDLE_TOKENS
-
-        if any(token_count > MAX_PUBLICATION_HANDLE_TOKENS for _, token_count in counts):
+        if any(
+            token_count > handle_codec.MAX_PUBLICATION_HANDLE_TOKENS
+            for _, token_count in counts
+        ):
             errors.append("H publication handle exceeds exact-token cap")
     actual_sha = sha256_hex(canonical_json({
         "handle_to_span": mapping,

@@ -39,6 +39,12 @@ from ..canonical import canonical_json
 from ..evidence.chunkers import Tokenizer
 from ..evidence.identity import CandidateSet
 from ..hashing import sha256_hex
+from .handle_codec import (
+    MAX_PUBLICATION_HANDLE_TOKENS,
+    HandleDomainError,
+    encode as encode_publication_handle,
+    structural_ordinal,
+)
 from .prompts import PROMPT_BUNDLE_VERSION, render_selector_prompt
 
 __all__ = [
@@ -60,22 +66,6 @@ class ViewConstructionError(ValueError):
     """
 
 
-MAX_PUBLICATION_HANDLE_TOKENS = 8
-
-
-def _base36(value: int) -> str:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError("publication coordinates must be non-negative integers")
-    alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
-    if value == 0:
-        return "0"
-    out = ""
-    while value:
-        value, remainder = divmod(value, 36)
-        out = alphabet[remainder] + out
-    return out
-
-
 def compact_publication_handle(
     assistant_turn_index: int,
     toolset_ordinal: int,
@@ -87,24 +77,18 @@ def compact_publication_handle(
 
     The handle is an encoding of structural ordinals, not a truncated hash.  Its scope is one
     ConductResearch child (when present) -> assistant turn -> ordered sibling search-result set
-    -> evidence ordinal in that atomic publication batch.  The child pair
-    ``(supervisor iteration, allowed-call ordinal)`` is Cantor-paired into one non-negative
-    integer, keeping the handle compact without truncation collisions. The exact tool-call id
-    remains in HCheckpoint.researcher_coordinate and detects structural-slot reuse.
+    -> evidence ordinal in that atomic publication batch.  The exact tool-call id remains in
+    HCheckpoint.researcher_coordinate and detects structural-slot reuse.
+
+    The encoding itself lives in :mod:`shapeflow_p1.p1.handle_codec`, which producer, validator,
+    preflight and evaluator all share.  This wrapper only folds the optional researcher
+    coordinate into the codec's four-coordinate form.
     """
-    if evidence_ordinal <= 0:
-        raise ValueError("evidence_ordinal must be positive")
-    prefix = "H"
-    if researcher_coordinate is not None:
-        iteration, child_ordinal = researcher_coordinate
-        _base36(iteration)
-        _base36(child_ordinal)
-        total = iteration + child_ordinal
-        structural_ordinal = total * (total + 1) // 2 + child_ordinal
-        prefix += _base36(structural_ordinal) + "_"
-    return (
-        f"{prefix}{_base36(assistant_turn_index)}_"
-        f"{_base36(toolset_ordinal)}_{_base36(evidence_ordinal)}"
+    return encode_publication_handle(
+        structural_ordinal(researcher_coordinate),
+        assistant_turn_index,
+        toolset_ordinal,
+        evidence_ordinal,
     )
 
 
@@ -205,12 +189,16 @@ class CandidateViewRecord:
                     "H publication scope must be (turn, toolset) or "
                     "(researcher iteration, child ordinal, turn, toolset)"
                 )
-            # Validate coordinates even for an empty view.
-            if researcher_coordinate is not None:
-                _base36(researcher_coordinate[0])
-                _base36(researcher_coordinate[1])
-            _base36(turn_index)
-            _base36(toolset_ordinal)
+            # Validate coordinates even for an empty view: an out-of-domain scope must fail
+            # here, before a selector call, not on whichever span first happens to use it.
+            #
+            # HandleDomainError is deliberately NOT wrapped in ViewConstructionError. A view
+            # that cannot be built is a treatment outcome and falls back to P0; a publication
+            # domain too small to name this batch is a defect in frozen protocol, and laundering
+            # it into a P0 fallback is precisely how an entirely inert P1 came to look like a
+            # completed run in all 146 canary cells.
+            structural = structural_ordinal(researcher_coordinate)
+            encode_publication_handle(structural, turn_index, toolset_ordinal, 1)
             if publication_ordinals is None:
                 publication_ordinals = {
                     _span_id_of(span): index for index, span in enumerate(spans, 1)
@@ -288,6 +276,8 @@ class CandidateViewRecord:
                         f"candidate {span_id[:12]} has no publication ordinal in its atomic "
                         "H batch"
                     ) from exc
+                # Out-of-domain raises HandleDomainError, which is not a ViewConstructionError
+                # and so does not fall back to P0. See the note at the scope check above.
                 publication_handle = compact_publication_handle(
                     turn_index,
                     toolset_ordinal,
@@ -303,10 +293,15 @@ class CandidateViewRecord:
                 namespace == "RAW_SOURCE"
                 and publication_handle_tokens > MAX_PUBLICATION_HANDLE_TOKENS
             ):
+                # Unreachable if the codec's exhaustive proof holds: every handle the frozen
+                # domain can produce was enumerated against this tokenizer. It stays because the
+                # proof is over one tokenizer file, and the run host is the only place that
+                # knows which file is actually loaded.
                 raise ViewConstructionError(
                     f"publication handle {publication_handle!r} costs "
                     f"{publication_handle_tokens} exact model tokens, exceeding the frozen cap "
-                    f"{MAX_PUBLICATION_HANDLE_TOKENS}"
+                    f"{MAX_PUBLICATION_HANDLE_TOKENS}. The frozen handle domain was proven to "
+                    "fit this cap, so either the tokenizer or the codec radices moved."
                 )
             candidates.append(OfferedCandidate(
                 label=f"E{index}",

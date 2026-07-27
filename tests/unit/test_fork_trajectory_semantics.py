@@ -24,6 +24,7 @@ from shapeflow_p1.campaign.settings import Settings
 from shapeflow_p1.canonical import canonical_json
 from shapeflow_p1.evaluation.runner import score_direct_node_records
 from shapeflow_p1.hashing import sha256_hex
+from shapeflow_p1.p1 import handle_codec
 from shapeflow_p1.odr.checkpoints import (
     CCheckpoint,
     CheckpointStore,
@@ -235,8 +236,9 @@ def test_direct_node_record_keeps_treatment_fidelity_fields():
 def test_hook_token_trace_survives_recorder_artifact_and_scores():
     """Exercise the production chain; a hook-only unit test missed the recorder whitelist."""
     tokenizer_digest = "a" * 64
-    publication_map = (("H0_0_1", "s1"),)
-    publication_costs = (("H0_0_1", 1),)
+    handle = handle_codec.encode(0, 0, 0, 1)
+    publication_map = ((handle, "s1"),)
+    publication_costs = ((handle, 1),)
     publication_sha = sha256_hex(canonical_json({
         "handle_to_span": [list(item) for item in publication_map],
         "handle_token_counts": [list(item) for item in publication_costs],

@@ -223,6 +223,28 @@ def run_preflight(settings: Settings, *, repo: Path,
     except ApprovalError as e:
         checks.append(Gate("approval", FAIL, str(e)[:300]))
 
+    # Every handle the codec can emit, costed on the exact tokenizer this host will serve. The
+    # predecessor's cap held in the abstract and failed for every handle production actually
+    # produced, so this is enumerated rather than argued, and it runs before the first GPU hour
+    # rather than being discovered in the artifacts afterwards.
+    try:
+        from ..evidence.model_tokenizer import load_frozen_tokenizer
+        from ..p1.handle_proof import load_or_prove
+
+        proof = load_or_prove(
+            load_frozen_tokenizer(settings),
+            receipt_path=repo / "reports" / "HANDLE_DOMAIN_PROOF.json",
+        )
+        checks.append(Gate(
+            "publication_handle_domain", PASS,
+            f"{proof['capacity']} handles, max {proof['max_tokens']} tokens "
+            f"(cap {proof['max_publication_handle_tokens']}), "
+            f"proof {str(proof['content_sha256'])[:12]}",
+        ))
+    except Exception as e:  # noqa: BLE001 - any failure here must stop the launch
+        checks.append(Gate(
+            "publication_handle_domain", FAIL, f"{type(e).__name__}: {str(e)[:300]}"))
+
     # Runner preflight must not open the steward/evaluator trees it is meant to be unable to
     # read.  The steward publishes this content-addressed, non-secret receipt before treatment;
     # schedule freeze binds it below.  It contains task/split/pool hashes, never facets, truth,

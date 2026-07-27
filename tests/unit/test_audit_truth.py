@@ -606,3 +606,130 @@ def test_build_truth_skips_a_task_whose_packet_is_already_frozen(tmp_path, monke
 class _FakeClient:
     def deepseek_transport(self, **_kw):
         return None
+
+
+@pytest.mark.asyncio
+async def test_a_contradiction_pass_that_overflows_is_reblocked_without_losing_cross_pairs(
+    tmp_path, monkeypatch,
+):
+    """The conflict pass could not split at all, and build-truth died at 43 of 48 packets.
+
+    Copying the extraction splitter would have been wrong. An atom belongs to one span, so
+    halving an extraction batch loses nothing; a contradiction belongs to a *pair*, and halving a
+    facet's fact list drops every pair that straddles the cut. A packet quietly missing
+    contradictions is worse than no packet: it makes an arm that missed them look correct.
+
+    So the facet is cut into four blocks and re-asked over each pair of blocks. This test puts
+    the two contradicting facts in different blocks, which is exactly the case a naive halving
+    would silently lose.
+    """
+    import json
+
+    import shapeflow_p1.campaign.truth as truth_module
+    from shapeflow_p1.canonical import canonical_json
+    from shapeflow_p1.evaluation.judge_client import (
+        JudgeAttempt,
+        JudgeResponse,
+        JudgeTruncated,
+    )
+    from shapeflow_p1.hashing import sha256_hex
+
+    spans = [
+        {"span_id": f"{i:064x}", "text": f"Fact number {i} is established.",
+         "source_occurrence_ids": ["o1"], "char_start": 0, "char_end": 30}
+        for i in range(8)
+    ]
+    monkeypatch.setattr(truth_module, "_excerpt_spans", lambda _s, _t: spans)
+    monkeypatch.setattr(truth_module, "_query_attempts", lambda _s, _t: [])
+
+    def _ok(data):
+        return JudgeResponse(
+            data=data, requested_model="m", returned_model="m", usage={}, request_id="r",
+            system_fingerprint="f", attempts=(JudgeAttempt(0, "p", {}, 200, "accepted"),))
+
+    # The two facts that contradict each other. Their atom ids are content-derived, so they are
+    # computed the same way the builder computes them.
+    texts = [f"Claim {i} holds." for i in range(8)]
+    ids = [truth_module._stable_atom_id("", "f", text) for text in texts]
+    contradicting = {ids[0], ids[1]}
+
+    class ConflictOverflowJudge:
+        """Answers extraction and binding; truncates any conflict call over four facts."""
+
+        def __init__(self):
+            self.conflict_sizes: list[int] = []
+
+        async def judge(self, system, user, *, validate=None):
+            if "verify one proposed atomic fact" in system:
+                return _ok({"relation": "entail"})
+            if "identify genuine contradictions" in system:
+                offered = [
+                    line.split(":", 1)[0].strip()
+                    for line in user.splitlines() if line.startswith("atom-")
+                ]
+                self.conflict_sizes.append(len(offered))
+                if len(offered) > 4:
+                    raise JudgeTruncated(
+                        "every one of 4 attempts hit the 8000 token output cap")
+                # Only report the pair when both sides are in this block pair -- a judge cannot
+                # name a fact it was not shown, which is the whole reason halving loses pairs.
+                if contradicting <= set(offered):
+                    return _ok({"contradictions": [sorted(contradicting)]})
+                return _ok({"contradictions": []})
+            return _ok({
+                "atoms": [
+                    {"atom_id": f"a{i}", "facet_id": "f", "text": texts[i],
+                     "critical": False, "supporting_span_ids": [spans[i]["span_id"]]}
+                    for i in range(8)
+                ],
+                "contradictions": [], "negative_evidence": [], "known_gaps": [],
+            })
+
+    class FakeSettings:
+        shas = {"judge": "j" * 64}
+        claim_scope = "FORMATIVE_ONLY"
+        repo = Path(__file__).resolve().parents[2]
+
+        def path(self, name):
+            return {
+                "truth_packets": tmp_path / "truth",
+                "frozen_corpus_for_runner": tmp_path / "frozen",
+                "acquisition": tmp_path / "acquisition",
+            }[name]
+
+        def get(self, *keys):
+            return {("week1", "odr", "max_content_length"): 50_000}[keys]
+
+    settings = FakeSettings()
+    pool_dir = settings.path("frozen_corpus_for_runner") / "pools"
+    pool_dir.mkdir(parents=True)
+    pool_body = {"occurrences": [], "snapshots": {}}
+    pool_body["pool_sha256"] = sha256_hex(canonical_json(pool_body))
+    (pool_dir / "T1.json").write_text(json.dumps(pool_body), encoding="utf-8")
+    acquisition_body = {
+        "task_id": "T1", "acquisition_spec_sha256": "s" * 64,
+        "fetched_at_utc": "2026-07-25T00:00:00Z", "tavily_params": {},
+        "queries": [], "occurrences": [], "snapshots": [],
+    }
+    acquisition_body["acquisition_digest"] = sha256_hex(canonical_json(acquisition_body))
+    acquisition_body["merkle_root"] = "m" * 64
+    acquisition_path = settings.path("acquisition") / "T1.json"
+    acquisition_path.parent.mkdir(parents=True)
+    acquisition_path.write_text(json.dumps(acquisition_body), encoding="utf-8")
+
+    judge = ConflictOverflowJudge()
+    result = await truth_module.build_truth_for_task(
+        settings, judge=judge, task_id="T1",
+        question="Which claims hold?", required_facets=["f"],
+        semantic_verifier=None, max_prompt_chars=100_000,
+    )
+
+    assert judge.conflict_sizes[0] == 8, "the first conflict call should see the whole facet"
+    assert max(judge.conflict_sizes[1:]) <= 4, "the overflowing facet was not re-blocked"
+    artifact = json.loads(result.path.read_text(encoding="utf-8"))
+    # The pair straddles two blocks and survives; a naive halving would have dropped it.
+    packet = artifact["packet"] if "packet" in artifact else artifact
+    assert packet["contradiction_pairs"], "a cross-block contradiction pair was lost"
+    recorded = packet["contradiction_pairs"][0]
+    assert {recorded["atom_id_a"], recorded["atom_id_b"]} == contradicting
+    assert artifact["provenance"]["conflict_blocks"] > artifact["provenance"]["conflict_facets"]
