@@ -93,6 +93,33 @@ class Settings:
     def campaign_id(self) -> str:
         return str(self.get("week1", "campaign", "id"))
 
+    @property
+    def measurement_layer(self) -> str:
+        return str(self.get("week1", "measurement", "layer"))
+
+    @property
+    def layer_is_serialized(self) -> bool:
+        """Does the active layer admit one upstream request at a time?
+
+        Read from the layer's own declaration rather than from its *name*. Several checks used
+        to ask ``layer == "causal"`` and act on the answer as though it meant "serialized", but
+        those are different properties: what makes a layer causal is prefix caching off, so one
+        arm's prefill cannot subsidise another's. Serialization was only ever a precondition of
+        the summed-service metric, and conflating the two is how a metric's requirement came to
+        reshape the system under test.
+        """
+        return int(
+            self.get("stack", "isolation", self.measurement_layer,
+                     "gateway_max_upstream_inflight")
+        ) == 1
+
+    @property
+    def layer_is_causal(self) -> bool:
+        """Is the active layer free of cross-arm prefix-cache carry-over?"""
+        return self.get(
+            "stack", "isolation", self.measurement_layer, "enable_prefix_caching"
+        ) is False
+
     def provider_config(self):
         """Build the provider's frozen configuration from the campaign config."""
         from ..runtime.provider_server import ProviderConfig

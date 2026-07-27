@@ -28,6 +28,8 @@ __all__ = [
     "OverlapError",
     "assert_non_overlapping",
     "isolated_service_work",
+    "interval_union_seconds",
+    "max_concurrent_treatment_requests",
     "queue_wait_total",
     "work_by_op",
     "token_work",
@@ -116,11 +118,77 @@ def assert_non_overlapping(events: Iterable[RequestEvent]) -> None:
 
 def isolated_service_work(events: Iterable[RequestEvent], *, verify: bool = True) -> float:
     """Sum treatment service seconds. With ``verify`` (the default), first assert non-overlap;
-    a summed overlap would over- or under-count work depending on scheduling, so it is refused."""
+    a summed overlap would over- or under-count work depending on scheduling, so it is refused.
+
+    Meaningful only in the serialized mechanism layer. Under the native-concurrent layer the
+    intervals overlap by design and this sum counts the same wall-clock second once per
+    concurrent request, so :func:`interval_union_seconds` is the primary metric there.
+    """
     events = list(events)
     if verify:
         assert_non_overlapping(events)
     return sum(e.service_seconds for e in _treatment(events))
+
+
+def interval_union_seconds(events: Iterable[RequestEvent]) -> float:
+    """Wall-clock seconds during which at least one treatment request was in service.
+
+    The measure the serialized regime was built to make legible, obtained without serializing
+    anything. ``isolated_service_work`` equals this only when nothing overlaps, which is why
+    the study previously admitted one upstream request at a time -- and why it was measuring a
+    system nobody would deploy: vendor summarises a result set with ``asyncio.gather``, so the
+    serialization queued eight concurrent summaries behind each other and produced 212 timeouts
+    that exist in no native run.
+
+    The union is regime-honest in both directions. It does not double-count concurrency the way
+    a sum does, and it does not credit a form for time the engine spent idle the way end-to-end
+    latency does. It is reported next to tokens and energy, never merged with them.
+    """
+    intervals = sorted(
+        (
+            (e.upstream_dispatch_ts, e.upstream_response_end_ts)
+            for e in _treatment(events)
+            if e.upstream_response_end_ts > e.upstream_dispatch_ts
+        ),
+        key=lambda iv: iv[0],
+    )
+    total = 0.0
+    current_start: float | None = None
+    current_end = 0.0
+    for start, end in intervals:
+        if current_start is None:
+            current_start, current_end = start, end
+            continue
+        if start > current_end:
+            total += current_end - current_start
+            current_start, current_end = start, end
+        else:
+            current_end = max(current_end, end)
+    if current_start is not None:
+        total += current_end - current_start
+    return total
+
+
+def max_concurrent_treatment_requests(events: Iterable[RequestEvent]) -> int:
+    """Peak simultaneous treatment requests, as evidence of which regime actually ran.
+
+    A native-concurrent layer that silently degraded to one-at-a-time would report the same
+    union as a serialized one and look correct. This makes the difference observable instead of
+    assumed.
+    """
+    boundaries: list[tuple[float, int]] = []
+    for event in _treatment(events):
+        if event.upstream_response_end_ts <= event.upstream_dispatch_ts:
+            continue
+        boundaries.append((event.upstream_dispatch_ts, 1))
+        boundaries.append((event.upstream_response_end_ts, -1))
+    # Ends before starts at equal timestamps: two requests that merely touch are not concurrent.
+    boundaries.sort(key=lambda item: (item[0], item[1]))
+    peak = current = 0
+    for _ts, delta in boundaries:
+        current += delta
+        peak = max(peak, current)
+    return peak
 
 
 def queue_wait_total(events: Iterable[RequestEvent]) -> float:
@@ -268,6 +336,11 @@ def summarize_work_extraction(
         "service_seconds": (
             isolated_service_work(events, verify=False) if not overlap_error else None
         ),
+        # Defined in both regimes, so it does not disappear when intervals legitimately overlap.
+        # `service_seconds` above is the serialized layer's metric and is None otherwise; the
+        # study previously had only that one, which is why the engine was made to serialize.
+        "interval_union_seconds": interval_union_seconds(events),
+        "max_concurrent_treatment_requests": max_concurrent_treatment_requests(events),
         "queue_wait_seconds": queue_wait_total(events),
         "tokens": token_work(events),
         "by_op": {

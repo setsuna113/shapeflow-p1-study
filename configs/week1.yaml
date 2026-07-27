@@ -214,7 +214,32 @@ odr_deviations:
 # its own unit, but a deployment claim needs it to run separately -- mixing the two would let a
 # batched result be read as a causal one.
 measurement:
-  layer: causal
+  # The primary layer. It preserves the pinned graph's own concurrency inside a cell -- vendor's
+  # asyncio.gather over a result set, and H's per-page selectors -- because the question is what
+  # happens when P1 is deployed into real ODR, not what happens in a system built to make one
+  # metric legible. See stack.yaml isolation.causal_native for why the previous layer existed.
+  layer: causal_native
+  # The serialized layer is still run, on the core 2x2 only, as a mechanism control. It answers
+  # "with batching removed, what does an ID selector do that a prose reducer does not" and is
+  # barred from the product verdict; decision.yaml carries that restriction.
+  mechanism_layer: causal
+  mechanism_layer_arms: [P0, H_MARKDOWN_ID, C_ID, H_PLUS_C]
+  # Pre-registered before any A' data exists. Split, never summed: prompt and completion tokens
+  # are priced differently, come from different phases of inference, and move in OPPOSITE
+  # directions between the arms -- P1 buys a shorter decode with a longer selector prefill. One
+  # combined "tokens" number with a threshold on it would hide the entire trade under study.
+  endpoints:
+    primary_work: interval_union_seconds
+    co_primary:
+      - prompt_tokens
+      - completion_tokens
+    secondary:
+      - e2e_latency_seconds
+      - energy_joules
+      - cached_prompt_tokens
+    # Defined only where intervals do not overlap, i.e. the mechanism layer.
+    mechanism_only:
+      - service_work_seconds
   selected_token_budget: 512
   # Generation is capped by the completion limit and guided decoding, never by a schema's
   # maxItems: maxItems bounds how many items may be *accepted*, not how many tokens the model

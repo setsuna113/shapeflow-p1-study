@@ -12,7 +12,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-__all__ = ["PowerSample", "integrate_energy_joules", "NvmlSampler"]
+__all__ = [
+    "PowerSample",
+    "integrate_energy_joules",
+    "NvmlSampler",
+    "EnergyCounter",
+    "read_total_energy_joules",
+]
 
 
 @dataclass(frozen=True)
@@ -54,3 +60,50 @@ class NvmlSampler:
             raise RuntimeError("call start() first (run host only)")
         milliwatts = pynvml.nvmlDeviceGetPowerUsage(self._handle)
         return PowerSample(ts=ts, power_w=milliwatts / 1000.0)
+
+
+def read_total_energy_joules(gpu_uuid: str) -> float | None:
+    """The driver's own monotonic energy counter for one GPU, in joules.
+
+    Preferred over integrating power samples: the counter is accumulated by the driver at its
+    own rate, so it cannot miss a burst between two of our reads, and it needs no sampling
+    thread competing with the run. Returns None when NVML, the device, or the counter is
+    unavailable -- energy is reported alongside work, never as a gate, so an absent reading must
+    degrade to "not measured" rather than to a fabricated zero.
+    """
+    try:  # pragma: no cover - requires NVML/GPU
+        import pynvml
+
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByUUID(gpu_uuid.encode())
+        return float(pynvml.nvmlDeviceGetTotalEnergyConsumption(handle)) / 1000.0
+    except Exception:  # noqa: BLE001 - any NVML failure means "not measured"
+        return None
+
+
+@dataclass
+class EnergyCounter:
+    """Energy drawn between two reads of the driver's counter.
+
+    A counter difference, not an integral, so the value is the GPU's own accounting rather than
+    ours. ``joules()`` returns None if either end is unavailable or if the counter went
+    backwards, which is what a driver reset looks like; a negative or invented energy figure
+    next to a work saving is worse than no figure, because it is the number that would decide
+    whether a saving is real or merely moved onto the power bill.
+    """
+
+    gpu_uuid: str
+    start_joules: float | None = None
+    end_joules: float | None = None
+
+    def start(self) -> None:
+        self.start_joules = read_total_energy_joules(self.gpu_uuid)
+
+    def stop(self) -> None:
+        self.end_joules = read_total_energy_joules(self.gpu_uuid)
+
+    def joules(self) -> float | None:
+        if self.start_joules is None or self.end_joules is None:
+            return None
+        delta = self.end_joules - self.start_joules
+        return delta if delta >= 0 else None

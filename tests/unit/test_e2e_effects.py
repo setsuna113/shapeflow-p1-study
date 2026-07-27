@@ -79,6 +79,12 @@ def _arm(
             "telemetry_complete": True,
             "overlap_valid": True,
             "service_seconds": work,
+            # The primary work endpoint under the native-concurrent layer. Kept distinct from
+            # `service_seconds` in the fixture so a test cannot pass by reading the one that
+            # only exists when the engine was serialized.
+            "interval_union_seconds": work * 0.8,
+            "max_concurrent_treatment_requests": 3,
+            "energy_joules": work * 250.0,
             "tokens": {
                 "prompt_tokens": prompt,
                 "completion_tokens": completion,
@@ -347,7 +353,9 @@ def test_builds_separate_factorial_endpoints_and_interaction():
     endpoints = result["factorial_endpoints"]
     assert set(endpoints) == {
         "quality",
+        "interval_union_seconds",
         "service_work_seconds",
+        "energy_joules",
         "e2e_latency_seconds",
         "prompt_tokens",
         "completion_tokens",
@@ -460,9 +468,14 @@ def test_eligibility_target_family_cannot_be_reduced_or_relabelled_after_outcome
 def test_hc_joint_choice_does_not_relabel_an_h_only_benefit_as_joint():
     records, receipt, features, spec = _make_study()
     for record in records:
-        record["per_arm"][f"H_MARKDOWN_ID:{record['replicate_id']}"][
+        summary = record["per_arm"][f"H_MARKDOWN_ID:{record['replicate_id']}"][
             "work_summary"
-        ]["service_seconds"] = 6.0
+        ]
+        # Both, kept consistent: eligibility reads the primary work endpoint, which is the
+        # interval union, and moving only the serialized sum would leave the test measuring an
+        # endpoint the decision path no longer uses.
+        summary["service_seconds"] = 6.0
+        summary["interval_union_seconds"] = 6.0 * 0.8
     _reseal_scope(records, receipt)
 
     result = _build((records, receipt, features, spec))["eligibility"]["target_results"]

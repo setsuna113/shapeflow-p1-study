@@ -152,6 +152,26 @@ QUALITY_GUARD_DIRECTIONS = {
     "unresolved_gap_reporting_recall": "higher_is_better",
 }
 
+#: The work endpoint the product claim rests on under the native-concurrent primary layer.
+#:
+#: It used to be ``service_work_seconds`` -- the sum of per-request service intervals -- and that
+#: choice reached back and changed the system under test: a sum of intervals is only a work
+#: figure when the intervals do not overlap, so the engine was configured to admit one upstream
+#: request at a time. The pinned graph summarises a result set with ``asyncio.gather``, so the
+#: serialization queued concurrent summaries behind each other and produced 212 timeouts that
+#: exist in no native run, on exactly the largest pages. The metric was distorting the
+#: measurement it was supposed to take.
+PRIMARY_WORK_ENDPOINT = "interval_union_seconds"
+
+#: Endpoints expressed as a paired log-ratio saving rather than a difference. All are strictly
+#: positive work quantities where "30% less" is the meaningful statement and an absolute
+#: difference is not comparable across tasks of different size.
+SAVING_SCALE_ENDPOINTS = frozenset({
+    "interval_union_seconds",
+    "service_work_seconds",
+    "energy_joules",
+})
+
 # End-to-end trajectory changes are outcomes, not pairing violations.  These are deliberately
 # bounded, interpretable counters/rates recomputed by the evaluator from each frozen event
 # stream.  No endpoint requires P1 to reproduce P0's queries, checkpoint IDs, or close path.
@@ -532,10 +552,36 @@ def _quality(row: Mapping[str, Any], *, view: str, metric: str) -> float:
 
 
 def _work_summary_optional(row: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """A work summary whose *telemetry* is complete.
+
+    Telemetry completeness and interval non-overlap were one condition, and they are not the
+    same question. Completeness asks whether every request was observed; non-overlap asks
+    whether the requests happened to be serialized. Merging them meant that under any regime
+    where the agent issues concurrent requests -- which is what the pinned graph does, via
+    ``asyncio.gather`` over a result set -- *every* endpoint went missing, including token
+    counts, which do not depend on scheduling at all.
+
+    Overlap is now checked only by the endpoints it actually invalidates; see
+    :func:`_serialized_work_summary_optional`.
+    """
     value = row.get("work_summary")
     if not isinstance(value, Mapping):
         return None
-    if value.get("telemetry_complete") is not True or value.get("overlap_valid") is not True:
+    if value.get("telemetry_complete") is not True:
+        return None
+    return value
+
+
+def _serialized_work_summary_optional(row: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """A work summary whose summed service time is also meaningful.
+
+    ``service_seconds`` adds up per-request intervals, so it counts one wall-clock second once
+    per concurrent request. That is a number only in a regime that admits one request at a time,
+    and it is the reason the engine was previously made to admit one request at a time. The
+    metric now carries its own precondition instead of imposing it on the system under test.
+    """
+    value = _work_summary_optional(row)
+    if value is None or value.get("overlap_valid") is not True:
         return None
     return value
 
@@ -565,8 +611,16 @@ def _endpoint_optional(
     if summary is None:
         return None
     if endpoint == "service_work_seconds":
-        # A log-ratio has no defined value at zero.
-        return _maybe_finite(summary.get("service_seconds"), strictly_positive=True)
+        # Summed intervals mean nothing when they overlap, so this endpoint -- and only this
+        # endpoint -- requires the serialized regime. A log-ratio has no defined value at zero.
+        serialized = _serialized_work_summary_optional(row)
+        if serialized is None:
+            return None
+        return _maybe_finite(serialized.get("service_seconds"), strictly_positive=True)
+    if endpoint == "interval_union_seconds":
+        return _maybe_finite(summary.get("interval_union_seconds"), strictly_positive=True)
+    if endpoint == "energy_joules":
+        return _maybe_finite(summary.get("energy_joules"), strictly_positive=True)
     if endpoint == "e2e_latency_seconds":
         value = row.get("e2e_latency_seconds")
         if value is None:
@@ -824,7 +878,7 @@ def _task_level_joint_outcomes(
             row = block["arms"][semantic]
             work = _endpoint_optional(
                 row,
-                "service_work_seconds",
+                PRIMARY_WORK_ENDPOINT,
                 quality_view="strict",
                 quality_metric="weighted_required_atom_recall",
             )
@@ -833,7 +887,7 @@ def _task_level_joint_outcomes(
                     {
                         "block_id": str(block["block_id"]),
                         "semantic": semantic,
-                        "endpoint": "service_work_seconds",
+                        "endpoint": PRIMARY_WORK_ENDPOINT,
                     }
                 )
             else:
@@ -962,7 +1016,7 @@ def _factorial_for(
 ) -> dict:
     scale = (
         "paired_log_ratio_saving"
-        if endpoint == "service_work_seconds"
+        if endpoint in SAVING_SCALE_ENDPOINTS
         else "treatment_minus_baseline"
     )
     invalid = [
@@ -1065,7 +1119,7 @@ def _factorial_for(
             "partial_missing_blocks": [],
         },
     }
-    if endpoint == "service_work_seconds":
+    if endpoint in SAVING_SCALE_ENDPOINTS:
         p0 = [item.p0 for item in outcomes]
         clusters = [item.cluster_id for item in outcomes]
         comparisons = {
@@ -1392,7 +1446,7 @@ def _target_observation(
         treatment_work_values = [
             _endpoint(
                 replicate["arms"][treatment],
-                "service_work_seconds",
+                PRIMARY_WORK_ENDPOINT,
                 quality_view=str(spec["quality_view"]),
                 quality_metric="weighted_required_atom_recall",
             )
@@ -1401,7 +1455,7 @@ def _target_observation(
         comparator_work_values = [
             _endpoint(
                 replicate["arms"][comparator],
-                "service_work_seconds",
+                PRIMARY_WORK_ENDPOINT,
                 quality_view=str(spec["quality_view"]),
                 quality_metric="weighted_required_atom_recall",
             )
@@ -1980,16 +2034,30 @@ def build_factorial_effects(
     if quality_metric not in QUALITY_GUARD_DIRECTIONS:
         raise ValueError(f"unregistered quality guard metric {quality_metric!r}")
 
+    # `service_work_seconds` is kept but is the *serialized* layer's metric: it is a sum of
+    # per-request intervals and is only defined when nothing overlaps, so under the
+    # native-concurrent primary layer it is simply absent. `interval_union_seconds` answers the
+    # same question -- how long was the engine busy on this cell -- without requiring the system
+    # under test to be serialized to make the arithmetic work.
+    #
+    # Token counts stay split. Prompt, completion and cached tokens are priced differently, come
+    # from different phases of inference, and move in opposite directions between P0 and P1
+    # (P1 trades a longer selector prefill for a much shorter decode). Summing them into one
+    # "tokens" number and thresholding it would hide exactly the trade the study is about.
     operational_endpoints = (
+        "interval_union_seconds",
         "service_work_seconds",
         "e2e_latency_seconds",
+        "energy_joules",
         "prompt_tokens",
         "completion_tokens",
         "cached_prompt_tokens",
     )
     directions = {
+        "interval_union_seconds": "higher_saving_is_better",
         "service_work_seconds": "higher_saving_is_better",
         "e2e_latency_seconds": "lower_is_better",
+        "energy_joules": "lower_is_better",
         "prompt_tokens": "lower_is_better",
         "completion_tokens": "lower_is_better",
         "cached_prompt_tokens": "descriptive_only",

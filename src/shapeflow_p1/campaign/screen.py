@@ -178,9 +178,9 @@ async def _run_screening_leased(
     async def fetch_work_summary(work_key: str):
         return await client.work_summary(
             work_key=work_key,
-            require_isolated=(
-                str(settings.get("week1", "measurement", "layer")) == "causal"
-            ),
+            # Only the serialized mechanism layer needs non-overlap: it is the precondition of
+            # the summed-service metric, not of causal isolation.
+            require_isolated=settings.layer_is_serialized,
         )
 
     def model_call_factory(cell_token: str, *, seed: int) -> SelectorModelCall:

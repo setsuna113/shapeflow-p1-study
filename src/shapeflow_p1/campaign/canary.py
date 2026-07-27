@@ -131,7 +131,7 @@ async def _run_canary_leased(settings: Settings, *, repo: Path,
     async def fetch_work_summary(work_key: str):
         return await client.work_summary(
             work_key=work_key,
-            require_isolated=(layer == "causal"),
+            require_isolated=settings.layer_is_serialized,
         )
 
     def model_call_factory(cell_token: str, *, seed: int) -> SelectorModelCall:
@@ -807,8 +807,13 @@ def _gpu_budget_projection_check(
     errors: list[str] = list(provider_audit_errors)
     values: list[float] = []
 
-    if str(settings.get("week1", "measurement", "layer")) != "causal":
-        errors.append("measurement layer is not causal/isolated")
+    # Causal means no cross-arm prefix-cache carry-over. It does not mean serialized: the
+    # projection needs comparable per-cell work, which the interval union provides in either
+    # regime.
+    if not settings.layer_is_causal:
+        errors.append(
+            f"measurement layer {settings.measurement_layer!r} has prefix caching on; "
+            "one arm's prefill could subsidise another's")
 
     if not isinstance(plan, dict):
         errors.append("frozen manifest has no gpu_budget_projection_plan")

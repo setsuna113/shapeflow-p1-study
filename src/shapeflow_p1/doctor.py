@@ -253,7 +253,9 @@ def check_git_clean(repo: Path) -> CheckResult:
     return CheckResult("git_clean", PASS, "working tree clean, submodules at their pins")
 
 
-def check_stack_manifest(repo: Path, stack_config: Path) -> CheckResult:
+def check_stack_manifest(
+    repo: Path, stack_config: Path, *, measurement_layer: str = ""
+) -> CheckResult:
     """Compare the live stack against a manifest a steward froze BEFORE approval.
 
     Read-only, always. A doctor that wrote the manifest itself at launch would take whatever it
@@ -317,9 +319,17 @@ def check_stack_manifest(repo: Path, stack_config: Path) -> CheckResult:
     observation.values["atomize_prompt_sha256"] = atomize_protocol_sha256()
     observation.values["truth_prompt_sha256"] = truth_prompt_sha256()
     observation.values["report_prompt_sha256"] = relation_prompt_sha256()
-    layer = declared.get("isolation", {}).get("causal", {})
+    # The layer this round actually runs, not a hard-coded name. Naming `causal` here while the
+    # campaign ran `causal_native` would have compared the live engine against flags nothing was
+    # using, which is a check that passes by being wrong about what it is checking.
+    layer_name = str(
+        (measurement_layer or "").strip()
+        or declared.get("isolation", {}).get("default_layer")
+        or "causal_native"
+    )
+    layer = declared.get("isolation", {}).get(layer_name, {})
     expected_flags = [
-        f"--max-num-seqs", str(layer.get("max_num_seqs", 1)),
+        "--max-num-seqs", str(layer.get("max_num_seqs", 1)),
     ] if engine_pid else []
     if engine_pid and layer.get("enable_prefix_caching") is False:
         expected_flags.append("--no-enable-prefix-caching")

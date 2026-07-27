@@ -98,6 +98,23 @@ def _vendor_today_str() -> str:
     return str(get_today_str())
 
 
+def _cell_energy_counter():
+    """An energy counter for the GPU this runner leased, or an inert one off the run host.
+
+    The UUID comes from the environment the unit sets, never from probing the machine: a lane
+    reading "whichever GPU is visible" would attribute one lane's joules to another's cells the
+    moment four lanes share a host.
+    """
+    from ..runtime.nvml_sampler import EnergyCounter
+
+    uuid = (
+        os.environ.get("SHAPEFLOW_GPU_UUID")
+        or os.environ.get("CUDA_VISIBLE_DEVICES")
+        or ""
+    ).strip()
+    return EnergyCounter(gpu_uuid=uuid) if uuid.startswith("GPU-") else EnergyCounter(gpu_uuid="")
+
+
 def _engine_epoch(settings: Settings) -> str:
     """Read the identity of the concrete vLLM boot serving cells.
 
@@ -475,6 +492,11 @@ class CampaignRunner:
         if attempt is None:
             return CellOutcome(cell_key=key, state="CLAIMED_ELSEWHERE")
         cell_started = time.monotonic()
+        # The GPU's own energy counter, read across the cell. A work saving that only moved cost
+        # onto the power draw is not a saving, and that is invisible in tokens and intervals.
+        # An unavailable counter yields None -- reported as not measured, never as zero.
+        energy = _cell_energy_counter()
+        energy.start()
 
         token = "cell-" + sha256_hex(canonical_json({
             "run": self.config.run_id, "block": cell.block_id, "arm": cell.arm.arm_id,
@@ -507,8 +529,10 @@ class CampaignRunner:
             e2e_latency_seconds = max(0.0, time.monotonic() - cell_started)
             recorded_epoch, end_epoch, epoch_stable = self._execution_epoch(
                 work_key, start_epoch)
+            energy.stop()
             work_summary = await self._durable_work_summary(work_key)
             work_summary["e2e_latency_seconds"] = e2e_latency_seconds
+            work_summary["energy_joules"] = energy.joules()
             failure_payload = canonical_json({
                 "cell": cell.content(),
                 "run_id": self.config.run_id,
@@ -544,9 +568,11 @@ class CampaignRunner:
         e2e_latency_seconds = max(0.0, time.monotonic() - cell_started)
         recorded_epoch, end_epoch, epoch_stable = self._execution_epoch(
             work_key, start_epoch)
+        energy.stop()
         counts = summarize_events(result.events)
         work_summary = await self._durable_work_summary(work_key)
         work_summary["e2e_latency_seconds"] = e2e_latency_seconds
+        work_summary["energy_joules"] = energy.joules()
         payload = {
             "cell": cell.content(),
             "run_id": self.config.run_id,
@@ -591,7 +617,9 @@ class CampaignRunner:
             not bool(work_summary.get("telemetry_complete"))
             or not bool(work_summary.get("by_op"))
             or (
-                str(self.settings.get("week1", "measurement", "layer")) == "causal"
+                # Overlapping intervals invalidate the summed-service metric and nothing else,
+                # so they are only a cell failure in the layer that reports it.
+                self.settings.layer_is_serialized
                 and not bool(work_summary.get("overlap_valid"))
             )
         )

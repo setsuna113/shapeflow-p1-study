@@ -80,11 +80,38 @@ evaluation:
   report_prompt_sha256: "@STEWARD_FREEZES@"
 
 isolation:
-  # Two measurement layers, two SEPARATE vLLM units. These values are the source of truth for
+  # Three measurement layers, three SEPARATE vLLM units. These values are the source of truth for
   # the unit templates; doctor asserts each running engine's flags match its layer, because a
   # causal arm that quietly ran with prefix caching on would make every quality and work number
   # incomparable to P0 (plan section 5.4).
+  #
+  # `causal_native` is the primary layer and is new. The study previously had only `causal`,
+  # which admits one upstream request at a time -- and that was not an isolation requirement, it
+  # was a requirement of the *metric*: summed per-request service intervals are a work figure
+  # only when the intervals do not overlap. The pinned graph summarises a result set with
+  # `asyncio.gather`, so serializing it queued eight concurrent summaries behind each other and
+  # produced 212 vendor timeouts, each of which publishes the whole raw page instead of a
+  # summary, worst on the largest pages. The apparatus was manufacturing an effect on exactly
+  # the stratum the study exists to measure. The metric now carries its own precondition
+  # (work_accounting.interval_union_seconds), so the engine does not have to.
+  causal_native:
+    unit: shapeflow-vllm-causal-native.service
+    # Chosen so the engine is never the limiter, then confirmed by the capacity gate rather than
+    # written by it -- a smoke that *sets* this would be tuning the apparatus against observed
+    # behaviour. The graph's own ceiling is 8 concurrent page summaries
+    # (acquisition.num_results_per_query) under max_concurrent_research_units 1, so 16 leaves the
+    # scheduler slack it will not use. The gate fails if the engine cannot sustain it without
+    # OOM, Xid, or sustained clock throttling.
+    max_num_seqs: 16
+    gateway_max_upstream_inflight: 0  # 0 = unbounded; the graph's concurrency is the point
+    # Still OFF. This is the causal layer: APC would let one arm's prefill subsidise another's,
+    # and cross-arm carry-over is an operational question, not this one.
+    enable_prefix_caching: false
+    enable_chunked_prefill: false
   causal:
+    # Demoted to a mechanism/control layer, run only on the core 2x2 and never decision-facing.
+    # It answers a narrower question -- with batching removed, what does an ID selector do that a
+    # prose reducer does not -- and cannot answer whether deploying P1 into real ODR helps.
     unit: shapeflow-vllm-causal.service
     max_num_seqs: 1                  # --max-num-seqs 1
     gateway_max_upstream_inflight: 1

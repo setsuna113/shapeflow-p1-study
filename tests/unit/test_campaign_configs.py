@@ -291,12 +291,51 @@ def test_replay_cannot_fall_back_to_a_live_search(settings):
 # --- measurement layer ----------------------------------------------------------------------
 
 
-def test_the_causal_layer_is_what_this_round_runs(settings):
-    assert settings.get("week1", "measurement", "layer") == "causal"
-    causal = settings.get("stack", "isolation", "causal")
-    assert causal["max_num_seqs"] == 1
-    assert causal["enable_prefix_caching"] is False
-    assert causal["gateway_max_upstream_inflight"] == 1
+def test_the_primary_layer_is_causal_without_serializing_the_graph(settings):
+    """Causal means no cross-arm prefix-cache carry-over. It never meant one request at a time.
+
+    Serialization was a precondition of the summed-service metric, not of isolation, and
+    imposing it on a graph that summarises a result set with ``asyncio.gather`` produced 212
+    vendor timeouts -- each of which publishes the whole raw page instead of a summary, worst on
+    the largest pages, which is the stratum the study exists to measure.
+    """
+    assert settings.measurement_layer == "causal_native"
+    active = settings.get("stack", "isolation", "causal_native")
+    assert active["enable_prefix_caching"] is False
+    assert settings.layer_is_causal is True
+    assert settings.layer_is_serialized is False
+    # Large enough that the engine is never the limiter: the graph's own ceiling is eight
+    # concurrent page summaries.
+    assert active["max_num_seqs"] > 8
+    assert active["gateway_max_upstream_inflight"] == 0
+
+
+def test_the_serialized_layer_survives_as_a_mechanism_control_on_the_core_2x2(settings):
+    """Kept, demoted, and still serialized -- otherwise its own metric means nothing."""
+    mechanism = settings.get("stack", "isolation", "causal")
+    assert mechanism["max_num_seqs"] == 1
+    assert mechanism["enable_prefix_caching"] is False
+    assert mechanism["gateway_max_upstream_inflight"] == 1
+    assert settings.get("week1", "measurement", "mechanism_layer") == "causal"
+    arms = settings.get("week1", "measurement", "mechanism_layer_arms")
+    assert set(arms) == {"P0", "H_MARKDOWN_ID", "C_ID", "H_PLUS_C"}
+
+
+def test_the_work_endpoints_are_pre_registered_and_tokens_are_never_summed(settings):
+    """Prompt and completion tokens move in opposite directions between P0 and P1.
+
+    P1 buys a shorter decode with a longer selector prefill. One combined "tokens" number with a
+    threshold on it would hide the entire trade the study is about, so they are co-primary and
+    separately reported.
+    """
+    from shapeflow_p1.analysis.e2e_effects import PRIMARY_WORK_ENDPOINT
+
+    endpoints = settings.get("week1", "measurement", "endpoints")
+    assert endpoints["primary_work"] == PRIMARY_WORK_ENDPOINT
+    assert endpoints["co_primary"] == ["prompt_tokens", "completion_tokens"]
+    # The summed-service metric is defined only where intervals do not overlap.
+    assert endpoints["mechanism_only"] == ["service_work_seconds"]
+    assert "energy_joules" in endpoints["secondary"]
 
 
 def test_the_generation_cap_is_a_completion_limit_not_a_schema_bound(settings):

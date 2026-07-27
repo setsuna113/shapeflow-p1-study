@@ -91,13 +91,40 @@ def run_acceptance(settings: Settings, *, repo: Path) -> dict:
              else "gitleaks not installed; the secret gate cannot be satisfied by assertion")
     )
 
-    # 6. The two measurement layers are declared separately, and the causal one is causal.
-    causal = settings.get("stack", "isolation", "causal")
-    causal_ok = (causal["max_num_seqs"] == 1 and causal["enable_prefix_caching"] is False
-                 and causal["gateway_max_upstream_inflight"] == 1)
-    gates.append(Gate("causal_layer", PASS if causal_ok else FAIL,
-                      "max_num_seqs=1, APC off, single upstream in flight" if causal_ok
-                      else f"declared {causal}"))
+    # 6. The measurement layers are declared separately, and the active one is causal without
+    #    being serialized. Prefix caching off is what makes a layer causal -- one arm's prefill
+    #    must not subsidise another's. Admitting one request at a time never was: that was a
+    #    requirement of the summed-service metric, and imposing it on a graph that issues
+    #    concurrent page summaries produced 212 vendor timeouts on the largest pages, which is
+    #    the stratum the study exists to measure. The gate now checks what makes the layer
+    #    causal, and separately that the active layer does not serialize the system under test.
+    active_name = str(settings.get("week1", "measurement", "layer"))
+    active = settings.get("stack", "isolation", active_name)
+    active_ok = (
+        active["enable_prefix_caching"] is False
+        and active["gateway_max_upstream_inflight"] == 0
+        and int(active["max_num_seqs"]) > 1
+    )
+    gates.append(Gate(
+        "causal_layer", PASS if active_ok else FAIL,
+        f"{active_name}: APC off, max_num_seqs={active.get('max_num_seqs')}, "
+        "graph concurrency preserved" if active_ok else f"declared {active}"))
+
+    # 6b. The serialized mechanism layer is still declared, and still serialized. It is a
+    #     control, not the product layer, so it must keep the property that makes summed
+    #     service seconds arithmetic mean something.
+    mechanism_name = str(settings.get("week1", "measurement", "mechanism_layer"))
+    mechanism = settings.get("stack", "isolation", mechanism_name)
+    mechanism_ok = (
+        mechanism["max_num_seqs"] == 1
+        and mechanism["enable_prefix_caching"] is False
+        and mechanism["gateway_max_upstream_inflight"] == 1
+        and mechanism_name != active_name
+    )
+    gates.append(Gate(
+        "mechanism_layer", PASS if mechanism_ok else FAIL,
+        f"{mechanism_name}: max_num_seqs=1, APC off, single upstream in flight"
+        if mechanism_ok else f"declared {mechanism}"))
 
     # 7. The claim scope travels with the corpus.
     scope_ok = (settings.claim_scope == "FORMATIVE_ONLY"

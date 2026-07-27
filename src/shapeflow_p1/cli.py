@@ -434,7 +434,10 @@ def doctor(
 
     report = run_pure_checks(repo=_REPO, configs=_CONFIGS, schema_dir=_SCHEMAS, role=role)
     report.add(check_git_clean(_REPO))
-    report.add(check_stack_manifest(_REPO, _REPO / "configs" / "stack.yaml"))
+    report.add(check_stack_manifest(
+        _REPO, _REPO / "configs" / "stack.yaml",
+        measurement_layer=_settings().measurement_layer,
+    ))
     if config is not None and not config.exists():
         _fail(f"  FAIL  config: {config} not found")
     for check in report.checks:

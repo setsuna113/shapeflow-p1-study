@@ -2159,7 +2159,9 @@ def build_final_decision(
         work_outcomes={
             key: factorial_endpoints[key]
             for key in (
+                "interval_union_seconds",
                 "service_work_seconds",
+                "energy_joules",
                 "prompt_tokens",
                 "completion_tokens",
                 "cached_prompt_tokens",

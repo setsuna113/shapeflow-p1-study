@@ -35,6 +35,28 @@ quality_ni_margin:
 utility:
   minimum_meaningful_work_reduction: 0.10
   preferred_strong_reduction: 0.20
+  # WHICH work. The threshold above used to apply to `service_work_seconds` -- the sum of
+  # per-request service intervals -- and that choice reached back and changed the system under
+  # test, because a sum of intervals is a work figure only when the intervals do not overlap.
+  # The engine was therefore configured to admit one upstream request at a time, against a graph
+  # that summarises a result set with asyncio.gather. The interval union answers the same
+  # question (how long was the engine busy on this cell) in either regime.
+  work_endpoint: interval_union_seconds
+
+# Which measurement layer a claim may be drawn from. The serialized layer is still run, on the
+# core 2x2, but it is a mechanism control: it describes what an ID selector does relative to a
+# prose reducer once batching is removed, and cannot answer whether deploying P1 into real ODR
+# helps. Reading a serialized result as a product effect is the error this block exists to
+# prevent.
+measurement_layers:
+  decision_facing: causal_native
+  mechanism_only:
+    layer: causal
+    arms: [P0, H_MARKDOWN_ID, C_ID, H_PLUS_C]
+    claim_scope: MECHANISM_ONLY_NOT_A_PRODUCT_EFFECT
+    # `service_work_seconds` is defined only here, because only here do the intervals not
+    # overlap. It is reported for this layer and is not a decision endpoint anywhere.
+    endpoints: [service_work_seconds]
 
 # Primary decisions are made only on the exact core-factorial arms frozen before outcomes are
 # observed.  The other 6 H and 3 C implementations are useful secondary mechanism/robustness

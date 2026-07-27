@@ -37,7 +37,9 @@ from ..canonical import canonical_json
 from ..hashing import sha256_hex
 from .bootstrap import cluster_bootstrap_ci, paired_log_ratio_saving, seed_from
 from .e2e_effects import (
+    PRIMARY_WORK_ENDPOINT,
     QUALITY_GUARD_DIRECTIONS,
+    SAVING_SCALE_ENDPOINTS,
     TRAJECTORY_ENDPOINT_DIRECTIONS,
     _verify_score_scope,
 )
@@ -47,7 +49,12 @@ __all__ = ["build_matched_contrasts", "resolve_arm_semantics"]
 
 _QUALITY_VIEWS = ("strict", "fallback_assisted", "worst_case", "best_case")
 _OPERATIONAL_ENDPOINTS = {
+    # interval_union_seconds, not service_work_seconds, is the primary work endpoint: a sum of
+    # per-request intervals is only a work figure when nothing overlaps, and requiring that made
+    # the engine serialize a graph that is natively concurrent. See e2e_effects.PRIMARY_WORK_ENDPOINT.
+    "interval_union_seconds": "higher_saving_is_better",
     "service_work_seconds": "higher_saving_is_better",
+    "energy_joules": "lower_is_better",
     "e2e_latency_seconds": "lower_is_better",
     "prompt_tokens": "lower_is_better",
     "completion_tokens": "lower_is_better",
@@ -447,10 +454,21 @@ def _operational_measurement(
     summary = row.get("work_summary")
     if not isinstance(summary, Mapping):
         return None, "MISSING"
-    if summary.get("telemetry_complete") is not True or summary.get("overlap_valid") is not True:
+    # Telemetry completeness and interval non-overlap are separate questions. Completeness asks
+    # whether every request was observed; overlap asks only whether they happened to be
+    # serialized, which nothing but the summed-service endpoint depends on. Conflating them
+    # dropped token counts -- which have no scheduling dependence at all -- for every cell in
+    # any concurrent regime.
+    if summary.get("telemetry_complete") is not True:
         return None, "MISSING"
     if endpoint == "service_work_seconds":
+        if summary.get("overlap_valid") is not True:
+            return None, "MISSING"
         value = _finite(summary.get("service_seconds"), strictly_positive=True)
+    elif endpoint == "interval_union_seconds":
+        value = _finite(summary.get("interval_union_seconds"), strictly_positive=True)
+    elif endpoint == "energy_joules":
+        value = _finite(summary.get("energy_joules"), strictly_positive=True)
     elif endpoint == "e2e_latency_seconds":
         raw = row.get("e2e_latency_seconds")
         if raw is None:
@@ -737,7 +755,7 @@ def _effect_bootstrap(
 ) -> dict[str, Any]:
     left, right, clusters, status = _paired_task_values(
         paired,
-        endpoint="service_work_seconds" if effect == "work_saving" else "quality",
+        endpoint=PRIMARY_WORK_ENDPOINT if effect == "work_saving" else "quality",
         quality_metric=quality_metric,
     )
     if status["status"] != "OK":
@@ -1040,7 +1058,7 @@ def _estimate_endpoint(
             )
     scale = (
         "paired_log_ratio_saving"
-        if endpoint == "service_work_seconds"
+        if endpoint in SAVING_SCALE_ENDPOINTS
         else "left_minus_right"
     )
     if missing:
@@ -1079,7 +1097,7 @@ def _estimate_endpoint(
             reason="FEWER_THAN_TWO_ESTIMABLE_SOURCE_TOPIC_CLUSTERS",
             not_applicable_blocks=not_applicable,
         )
-    if endpoint == "service_work_seconds":
+    if endpoint in SAVING_SCALE_ENDPOINTS:
         ci = paired_log_ratio_saving(
             [float(row["left"]) for row in task_rows],
             [float(row["right"]) for row in task_rows],
@@ -1116,8 +1134,8 @@ def _estimate_endpoint(
         "direction": direction,
         "contrast_scale": scale,
         "contrast_convention": (
-            "positive_means_left_saves_service_work_relative_to_right"
-            if endpoint == "service_work_seconds"
+            "positive_means_left_saves_work_relative_to_right"
+            if endpoint in SAVING_SCALE_ENDPOINTS
             else "left_arm_minus_right_arm"
         ),
         "replicate_reduction": "task_mean_before_cluster_bootstrap",
@@ -1149,7 +1167,7 @@ def _structurally_not_estimable(
         direction=direction,
         scale=(
             "paired_log_ratio_saving"
-            if endpoint == "service_work_seconds"
+            if endpoint in SAVING_SCALE_ENDPOINTS
             else "left_minus_right"
         ),
         reason="ALL_OFFERED_CONTAINS_STRUCTURALLY_INVALID_PAIR",

@@ -117,6 +117,9 @@ def _arm(
             "telemetry_complete": True,
             "overlap_valid": True,
             "service_seconds": work,
+            "interval_union_seconds": work * 0.8,
+            "max_concurrent_treatment_requests": 3,
+            "energy_joules": work * 250.0,
             "tokens": {
                 "prompt_tokens": 100.0,
                 "completion_tokens": 20.0,
@@ -258,7 +261,9 @@ def test_reports_all_quality_views_metrics_and_operational_endpoints():
         for by_metric in contrast["quality"].values()
     )
     assert set(contrast["operational"]) == {
+        "interval_union_seconds",
         "service_work_seconds",
+        "energy_joules",
         "e2e_latency_seconds",
         "prompt_tokens",
         "completion_tokens",

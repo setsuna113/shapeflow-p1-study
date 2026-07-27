@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from ..canonical import canonical_json, canonical_str
 from ..hashing import sha256_hex
 from .decision import Verdict
+from .e2e_effects import PRIMARY_WORK_ENDPOINT
 
 __all__ = [
     "EffectWithCI",
@@ -415,7 +416,7 @@ def _distribution_block(decision: DecisionObject) -> str:
         "- The primary complete-work effect is the paired task-mean log-ratio saving shown in "
         "Sections 5–8; its confidence bounds are not relabeled as a raw arithmetic mean.",
     ]
-    work = decision.work_outcomes.get("service_work_seconds")
+    work = decision.work_outcomes.get(PRIMARY_WORK_ENDPOINT)
     work_distribution = work.get("task_effect_distribution") if isinstance(work, dict) else None
     if isinstance(work_distribution, dict):
         lines.append(
@@ -567,7 +568,9 @@ def _work_balance_block(decision: DecisionObject) -> str:
             f"{node.work_saving.fmt() if node.work_saving else 'NOT_ESTABLISHED'}"
         )
     for endpoint in (
+        "interval_union_seconds",
         "service_work_seconds",
+        "energy_joules",
         "prompt_tokens",
         "completion_tokens",
         "cached_prompt_tokens",

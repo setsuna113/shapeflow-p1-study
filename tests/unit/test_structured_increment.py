@@ -193,6 +193,12 @@ def _arm_row(
             "telemetry_complete": True,
             "overlap_valid": True,
             "service_seconds": work,
+            # The primary work endpoint. Distinct from `service_seconds` in the fixture so a
+            # test cannot pass by reading the one that only exists when the engine was
+            # serialized.
+            "interval_union_seconds": work * 0.8,
+            "max_concurrent_treatment_requests": 3,
+            "energy_joules": work * 250.0,
             "tokens": {
                 "prompt_tokens": 100,
                 "completion_tokens": 20,

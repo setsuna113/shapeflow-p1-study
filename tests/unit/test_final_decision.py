@@ -376,6 +376,37 @@ def _inputs(
                 },
             },
             "factorial_endpoints": {
+                # The primary work endpoint under the native-concurrent layer. The serialized
+                # `service_work_seconds` below is the mechanism layer's metric and is kept so a
+                # test cannot pass by reading whichever one happens to be present.
+                "interval_union_seconds": {
+                    "status": "OK",
+                    "h_simple": {"point": 0.20, "lower": 0.12, "upper": None},
+                    "c_simple": {"point": 0.15, "lower": 0.08, "upper": None},
+                    "joint": {"point": 0.28, "lower": 0.18, "upper": None},
+                    "interaction": {"point": 0.01, "lower": -0.02, "upper": None},
+                    "task_effect_distribution": {
+                        name: {
+                            "n_tasks": 16,
+                            "mean": 0.2,
+                            "median": median,
+                            "p05": p05,
+                            "p10": p05 + 0.01,
+                            "p90": median + 0.08,
+                            "p95": median + 0.1,
+                            "minimum": p05 - 0.02,
+                            "maximum": median + 0.12,
+                            "scale": "per_task_fraction_saved",
+                            "inference": ("DESCRIPTIVE_ONLY_CLUSTER_BOOTSTRAP_REMAINS_PRIMARY"),
+                        }
+                        for name, median, p05 in (
+                            ("h_simple", 0.20, -0.04),
+                            ("c_simple", 0.15, -0.02),
+                            ("joint", 0.28, 0.03),
+                            ("interaction", 0.01, -0.05),
+                        )
+                    },
+                },
                 "service_work_seconds": {
                     "status": "OK",
                     "h_simple": {"point": 0.20, "lower": 0.12, "upper": None},
