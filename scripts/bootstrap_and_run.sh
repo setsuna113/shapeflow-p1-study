@@ -141,7 +141,7 @@ FREE_BYTES="$(df -B1 --output=avail "$DATA_ROOT" | tail -1 | tr -d ' ')"
 [ "$FREE_BYTES" -ge "$MIN_FREE_BYTES" ] || blocked "LOW_DISK" \
   "free ${FREE_BYTES}B is under the ${MIN_FREE_BYTES}B floor"
 
-step "one GPU, leased by UUID, with no foreign process on it"
+step "every lane has a GPU, leased by UUID, with no foreign process on it"
 command -v nvidia-smi >/dev/null 2>&1 || blocked "NO_GPU" "nvidia-smi not found"
 
 step "submodule + vendor commit"
@@ -285,8 +285,17 @@ as sfrunner "$SF" preflight --config "$CONFIG" \
   --approved-protocol-sha "$APPROVED_PROTOCOL_SHA" \
   || blocked "PREFLIGHT" "campaign preflight failed under protocol $APPROVED_PROTOCOL_SHA"
 
-step "GPU smoke (runner)"
-as sfrunner "$SF" smoke --config "$CONFIG" || blocked "GPU_SMOKE" "the GPU canary failed"
+step "seal the previous round's treatment artifacts as unanalysable"
+# It ran 146 cells across 19 arms and published no P1 output at all: every H batch failed view
+# construction on its first candidate and fell back to P0 as a whole. Nothing is deleted -- the
+# point is that a later reader can tell "no P1 effect" from "P1 never executed", which the
+# artifacts alone cannot say, because a P0 fallback is a legitimate part of the ITT design.
+# Idempotent: the record is write-once and a second run verifies rather than rewrites it.
+as sfrunner "$SF" invalidate-treatment --config "$CONFIG" \
+  --attempt-id serial-engineering-smoke \
+  --state INVALIDATED_SERIAL_ENGINEERING_SMOKE \
+  --note "sealed by bootstrap_and_run.sh before the A-prime round" \
+  || echo "  (already sealed)"
 
 # ---------------------------------------------------------------------------------------
 cat > "$REPORTS/LAUNCH_GATE_PASSED.json" <<JSON
@@ -307,25 +316,12 @@ cat > "$REPORTS/LAUNCH_GATE_PASSED.json" <<JSON
 JSON
 
 echo
-echo "All ${TOTAL_STEPS} hard gates passed. Starting screening (binding $APPROVED_BINDING_SHA)."
-# This host runs in a container where systemd is not PID 1. The launch used to be
-# `systemctl enable --now` unconditionally: the earlier `systemctl is-active` gate
-# short-circuited on the same absence, so every gate reported green and then the campaign
-# simply never started. sfsupervise is the documented substitute (plan §17.2) and was
-# already installed by install_host.sh; nothing used it for the coordinator.
-if [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ] && command -v systemctl >/dev/null 2>&1; then
-  # install_host already rendered @PROTOCOL_SHA@ (normally to UNSET), so replacing the
-  # template token here was a no-op. Replace the coordinator argument itself.
-  sed -i -E \
-    "s|--protocol-sha [^[:space:]]+|--protocol-sha $APPROVED_BINDING_SHA|" \
-    /etc/systemd/system/shapeflow-p1-week1.service
-  systemctl daemon-reload
-  systemctl enable --now shapeflow-p1-week1.service
-  systemctl --no-pager status shapeflow-p1-week1.service | head -20
-else
-  echo "systemd is not PID 1; supervising the campaign with sfsupervise instead."
-  setsid /usr/local/bin/sfsupervise week1 sfrunner "$REPO" "$DATA_ROOT" -- \
-    "$SF" run-screen --config "$CONFIG" --resume --protocol-sha "$APPROVED_BINDING_SHA" \
-    >> "$REPO/logs/coordinator.log" 2>&1 &
-  echo "sfsupervise started (pid $!); log: $REPO/logs/coordinator.log"
-fi
+echo "All ${TOTAL_STEPS} hard gates passed (binding $APPROVED_BINDING_SHA)."
+echo "Handing over to the lane gates; the campaign starts only if all five of them pass."
+echo
+# Everything above is single-host correctness: the right bytes, the right approval, the right
+# credentials. run_lanes.sh is the part that can only be checked with the GPUs actually running
+# -- that P1 publishes at all, that four engines coexist, that stopping one damages exactly one
+# lane, that a full-arm canary merges, and that the disk survives the projection. It starts the
+# four screening runners itself once they pass.
+exec "$REPO/scripts/run_lanes.sh"

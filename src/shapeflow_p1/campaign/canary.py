@@ -120,6 +120,30 @@ async def _run_canary_leased(settings: Settings, *, repo: Path,
                        execution_binding_sha256=execution_binding_sha256,
                        protocol_document_sha256=protocol_document_sha256)
 
+    # Under sharding each lane takes its own share of the canary's tasks, and every arm of a
+    # task still runs on one lane. Four lanes each running all four canary tasks would be four
+    # copies of the same smoke -- it would not exercise the partition, and it would not show
+    # whether a task's arms can survive being confined to one card.
+    lane = settings.lane_id
+    if lane is not None:
+        from .sharding import assign_tasks_to_lanes
+
+        lane_count = int(settings.get("week1", "measurement", "shards", "lane_count"))
+        assignment = assign_tasks_to_lanes(
+            {task_id: 1.0 for task_id in tasks},
+            lane_count=lane_count,
+            execution_binding_sha256=execution_binding_sha256,
+        )
+        tasks = [task_id for task_id in tasks if assignment[task_id] == lane]
+        if not tasks:
+            ledger.close()
+            return _report(
+                [_check("frozen_world", False,
+                        f"lane {lane} was given none of the {limit} canary tasks; the canary "
+                        f"needs at least {lane_count} tasks to cover every lane")],
+                execution_binding_sha256=execution_binding_sha256,
+                protocol_document_sha256=protocol_document_sha256)
+
     layer = str(settings.get("week1", "measurement", "layer"))
 
     async def register(spec):

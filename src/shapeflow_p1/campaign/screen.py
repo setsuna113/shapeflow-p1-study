@@ -54,7 +54,9 @@ def open_run_ledger(settings: Settings) -> tuple[Ledger, ObjectStore]:
 
 def provider_client_for(settings: Settings, role: str = "runner") -> ProviderClient:
     host = settings.get("week1", "provider", "bind_host")
-    port = settings.get("week1", "provider", "bind_port")
+    # settings.provider_port, not the configured base: a lane that dialled the base port would
+    # send every request to lane 0's provider while believing it was talking to its own.
+    port = settings.provider_port
     token_dir = str(settings.get("week1", "provider", "token_dir"))
     return ProviderClient(base_url=f"http://{host}:{port}",
                           token=load_role_token(token_dir, role))
@@ -238,8 +240,10 @@ async def _run_screening_leased(
                     "error": f"SHARD_MANIFEST_UNREADABLE: {shard_path}: {exc}"}
         verify_shard_manifest(shard_body, manifest)
         owned = shard_body["blocks_by_shard"][str(settings.lane_id)]
+        # The runner holds this same object, so setting the share here is what narrows both
+        # run_cells and freeze_blocks. It cannot be passed at construction: the share is keyed
+        # by block id, and the block ids do not exist until the schedule is built above.
         config.owned_block_ids = frozenset(map(str, owned))
-        runner.config = config
 
     from ..analysis.design import load_runner_analysis_design_receipt
 

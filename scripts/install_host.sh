@@ -190,6 +190,43 @@ done
 # there, which is exactly the question the guard asks.
 setfacl -m u:sfsteward:--x "$DATA_ROOT/runner/runs"
 
+# One runner tree per execution lane. The ledger is single-writer by design, so four concurrent
+# runners need four of them; a shared object store would also make "which lane produced this
+# artifact" unanswerable at exactly the moment the merge asks it. Same ownership and the same
+# evaluator/steward ACLs as the unsharded tree above -- a lane whose artifacts the evaluator
+# could not read would fail at scoring time, three days in.
+#
+# frozen_corpus is deliberately NOT duplicated: it is the steward-to-runner publication
+# boundary and every lane reads the same one. Four copies of the corpus would be four worlds.
+LANE_COUNT="$("$REPO/.venv/bin/python" - "$REPO" <<'PYX'
+import sys, yaml
+with open(f"{sys.argv[1]}/configs/week1.yaml", encoding="utf-8") as handle:
+    print(int(yaml.safe_load(handle)["measurement"]["shards"]["lane_count"]))
+PYX
+)"
+for lane in $(seq 0 $((LANE_COUNT - 1))); do
+  lane_root="$DATA_ROOT/runner-lane${lane}"
+  mkdir -p "$lane_root"/{runs,object_store,checkpoints}
+  chown -R sfrunner:sfrunner "$lane_root"
+  find "$lane_root" -type d -exec chmod 0700 {} +
+  setfacl -m u:sfsteward:--x,u:sfevaluator:--x,m::--x "$lane_root"
+  for published in runs object_store checkpoints; do
+    readonly_acl "$lane_root/$published" sfevaluator
+  done
+  setfacl -m u:sfsteward:--x "$lane_root/runs"
+done
+
+# The frozen task-to-lane partition. Steward-owned, readable by every lane: a lane that could
+# rewrite its own share could choose its tasks after seeing a result.
+mkdir -p "$DATA_ROOT/shards"
+chown -R sfsteward:sfsteward "$DATA_ROOT/shards"
+find "$DATA_ROOT/shards" -type d -exec chmod 0700 {} +
+# 0640 rather than 0600, for the reason spelled out at the approvals tree above: chmod sets the
+# ACL mask on a file that carries an ACL, and a 0600 mask is `---`, which would cancel every
+# named-user grant readonly_acl makes on the next line. The 0700 directory is the real gate.
+find "$DATA_ROOT/shards" -type f -exec chmod 0640 {} +
+readonly_acl "$DATA_ROOT/shards" sfrunner sfevaluator
+
 # frozen_corpus is the steward-to-runner publication boundary. Both the runner and evaluator
 # read it; only the steward owns/writes it.
 chown -R sfsteward:sfsteward "$DATA_ROOT/runner/frozen_corpus"

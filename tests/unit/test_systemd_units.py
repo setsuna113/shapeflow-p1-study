@@ -233,15 +233,31 @@ def test_the_coordinator_receives_the_leased_device():
         assert "SHAPEFLOW_GPU_UUID" in body, f"{launcher} does not pass the leased device through"
 
 
-def test_coordinator_unit_receives_the_approved_execution_binding():
+def test_every_screening_lane_receives_the_approved_execution_binding():
+    """The binding has to reach whatever actually starts the screen.
+
+    It used to reach a single systemd coordinator, which the bootstrap patched in place. The
+    campaign now starts four lane runners from run_lanes.sh, so the assertion follows the launch
+    rather than the mechanism it used to go through -- a check pinned to the old path would have
+    stayed green while the binding reached nothing.
+    """
     install = INSTALL_HOST.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
     supervisor = SUPERVISOR.read_text(encoding="utf-8")
+    lanes = (Path(__file__).resolve().parents[2] / "scripts" / "run_lanes.sh").read_text(
+        encoding="utf-8")
     runner_text = (
         SYSTEMD / "shapeflow-p1-week1.service.template").read_text(encoding="utf-8")
     assert "SHAPEFLOW_EXECUTION_BINDING_SHA" in install
-    assert 's|--protocol-sha [^[:space:]]+|--protocol-sha $APPROVED_BINDING_SHA|' in bootstrap
+    # The bootstrap derives it and hands over; run_lanes.sh derives it again for the launch, so
+    # a lane cannot start under a binding nobody verified.
     assert "verified_execution_binding(Path('.')).digest" in bootstrap
+    assert 'exec "$REPO/scripts/run_lanes.sh"' in bootstrap
+    assert "verified_execution_binding(Path('$REPO')).digest" in lanes
+    assert '--protocol-sha "$BINDING"' in lanes
+    # Every lane, not just the first: a lane started without it would run unverified.
+    assert 'for lane in $(seq 0 $((LANE_COUNT - 1))); do' in lanes
+    assert 'SHAPEFLOW_LANE="$lane" setsid /usr/local/bin/sfsupervise' in lanes
     assert "SHAPEFLOW_APPROVAL_FILE=@DATA_ROOT@/approvals/launch_approval.json" in runner_text
     assert "SHAPEFLOW_APPROVAL_FILE=" in supervisor
     assert 'readonly_acl "$DATA_ROOT/approvals" sfrunner sfevaluator' in install

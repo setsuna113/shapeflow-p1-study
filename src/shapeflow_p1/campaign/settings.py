@@ -174,6 +174,33 @@ class Settings:
             "stack", "isolation", self.measurement_layer, "enable_prefix_caching"
         ) is False
 
+    @property
+    def provider_port(self) -> int:
+        """The port THIS lane's provider binds, and the one its runner must dial.
+
+        Derived once here because it is needed in two places -- the server's own config and the
+        client that connects to it -- and a lane whose runner dialled the base port would send
+        every request to lane 0's provider while believing it was talking to its own. The two
+        would agree on nothing afterwards: work keys, budgets and the ledger would all land on
+        the wrong lane.
+        """
+        lane = self.lane_id
+        if lane is None:
+            return int(self.get("week1", "provider", "bind_port"))
+        return int(self.get("week1", "measurement", "shards", "provider_base_port")) + lane
+
+    @property
+    def provider_unix_socket(self) -> Optional[str]:
+        """This lane's socket path, or None. Four providers cannot share one socket."""
+        declared = self.get("week1", "provider", "unix_socket")
+        if not declared:
+            return None
+        lane = self.lane_id
+        if lane is None:
+            return str(declared)
+        path = Path(str(declared))
+        return str(path.with_name(f"{path.stem}-lane{lane}{path.suffix}"))
+
     def provider_config(self):
         """Build the provider's frozen configuration from the campaign config."""
         from ..runtime.provider_server import ProviderConfig
@@ -205,7 +232,8 @@ class Settings:
         shards = self.get("week1", "measurement", "shards")
         if lane is not None:
             block["lane_id"] = lane
-            block["bind_port"] = int(shards["provider_base_port"]) + lane
+            block["bind_port"] = self.provider_port
+            block["unix_socket"] = self.provider_unix_socket
             block["vllm_base_url"] = _with_port(
                 str(block["vllm_base_url"]), int(shards["vllm_base_port"]) + lane
             )

@@ -18,6 +18,12 @@ REPO="${SHAPEFLOW_REPO:-/storage/nvme/shapeflow-p1-study}"
 DATA_ROOT="${SHAPEFLOW_DATA_ROOT:-/storage/nvme/shapeflow-data}"
 CRED_DIR="${SHAPEFLOW_CRED_DIR:-/etc/shapeflow}"
 CONFIG="${SHAPEFLOW_CONFIG:-$REPO/configs/week1.yaml}"
+# Which execution lane this provider serves. Each lane runs its own provider bound to its own
+# port and pointed at its own engine; only the lane named by measurement.shards.paid_upstream_lane
+# may reach an upstream that costs money, and the provider refuses those routes on the others.
+# Four providers each admitting against the full DeepSeek cap would be a four-fold budget.
+LANE="${SHAPEFLOW_LANE:-}"
+UNIT_NAME="provider${LANE:+-lane$LANE}"
 
 [ "$(id -u)" -eq 0 ] || { echo "start_provider.sh switches identity and must run as root" >&2; exit 1; }
 
@@ -36,6 +42,6 @@ if [ -r "$CRED_DIR/tavily.key" ]; then
   CREDENTIAL_ENV+=("TAVILY_API_KEY_FILE=$CRED_DIR/tavily.key")
 fi
 
-exec setsid /usr/local/bin/sfsupervise provider sfprovider "$REPO" "$DATA_ROOT" -- \
-  env HOME=/tmp "${CREDENTIAL_ENV[@]}" \
+exec setsid /usr/local/bin/sfsupervise "$UNIT_NAME" sfprovider "$REPO" "$DATA_ROOT" -- \
+  env HOME=/tmp "${CREDENTIAL_ENV[@]}" ${LANE:+SHAPEFLOW_LANE="$LANE"} \
   "$REPO/.venv/bin/shapeflow-p1" serve-provider --config "$CONFIG"

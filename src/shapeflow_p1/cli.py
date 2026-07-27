@@ -127,6 +127,15 @@ def _assert_post_launch_flags(protocol_sha: Optional[str], resume: bool) -> None
         )
 
 
+def _content_sha(body: dict) -> str:
+    """The digest of everything except the digest field itself."""
+    from .canonical import canonical_json
+    from .hashing import sha256_hex
+
+    return sha256_hex(canonical_json(
+        {key: value for key, value in body.items() if key != "content_sha256"}))
+
+
 def _write_once_json(path: Path, body: dict, *, digest_field: str, label: str) -> None:
     """Create, or verify an identical existing artifact. Never replace.
 
@@ -626,6 +635,93 @@ def authorize_budget_raise(
     finally:
         ledger.close()
     typer.echo(f"raised {len(changes)} cap(s) under binding {binding.digest[:12]}")
+
+
+#: Why the first round's treatment artifacts cannot be analysed. Each is independently
+#: sufficient; together they mean no cell in that round observed the treatment it is labelled
+#: with. They are enumerated rather than summarised because a later reader deciding whether some
+#: subset is salvageable needs to see all four.
+TREATMENT_INVALIDATION_REASONS = {
+    "P1_PUBLISHED_OUTPUT_COUNT_ZERO": (
+        "Across 19 arms and 146 cells, not one P1 span was published. Every H batch raised "
+        "`publication handle 'H3_1_0_1' costs 9 exact model tokens, exceeding the frozen cap 8` "
+        "on its first candidate and fell back to P0 as a whole, so every H cell is a P0 cell "
+        "wearing an H label."
+    ),
+    "H_VIEW_CONSTRUCTION_FALLBACK_ALL": (
+        "The failure was total rather than partial: 2,067 recorded view-construction failures "
+        "across 87 distinct handles, with no arm publishing anything. A fallback rate is an "
+        "outcome; a 100% fallback rate before the first selector call is an apparatus that "
+        "never ran the treatment."
+    ),
+    "P0_NON_VENDOR_OUTPUT_CAP_1024": (
+        "summarization_model_max_tokens was 1024 against the pinned vendor default of 8192. "
+        "Vendor's summariser falls back to the raw page when truncated, so 263 of 1839 P0 "
+        "summaries (14.3%) published whole pages as compressed notes -- worst on the largest "
+        "pages, and P1 never reaches that code path. The baseline was handicapped exactly where "
+        "P1 was meant to win."
+    ),
+    "SERIAL_REGIME_NOT_TARGET_ODR": (
+        "The engine admitted one upstream request at a time, which was a precondition of the "
+        "summed-service metric rather than of causal isolation. The pinned graph summarises a "
+        "result set with asyncio.gather, so the serialization queued eight concurrent summaries "
+        "behind each other and produced 212 vendor timeouts that exist in no native run. The "
+        "measured system is not the system the study is about."
+    ),
+}
+
+
+@app.command("invalidate-treatment")
+def invalidate_treatment(
+    config: Path = _CFG,
+    attempt_id: str = typer.Option(..., "--attempt-id", help="e.g. serial-engineering-smoke"),
+    state: str = typer.Option("INVALIDATED_SERIAL_ENGINEERING_SMOKE", "--state"),
+    note: str = typer.Option("", "--note"),
+) -> None:
+    """Seal a round of treatment artifacts as unanalysable, without deleting any of them.
+
+    Nothing is removed and nothing is refunded. The point is that a later reader can tell the
+    difference between "this round produced no P1 effect" and "this round never executed P1" --
+    which the artifacts alone cannot say, because a P0 fallback is a legitimate part of the ITT
+    design and a run that fell back 146 times out of 146 looks exactly like a run.
+
+    The new campaign writes to per-lane trees, so the sealed round is not overwritten either.
+    """
+    _require_role("runner")
+    settings = _settings()
+    root = settings.data_root / str(settings.get("week1", "paths", "runner_root"))
+    marker = root / f"{state}.json"
+
+    inventory: dict[str, int] = {}
+    for name in ("runs", "object_store", "checkpoints"):
+        directory = settings.data_root / str(settings.get("week1", "paths", name))
+        inventory[name] = (
+            sum(1 for path in directory.rglob("*") if path.is_file())
+            if directory.exists() else 0
+        )
+
+    body = {
+        "schema_version": "invalidated_treatment_attempt_v1",
+        "attempt_id": attempt_id,
+        "state": state,
+        "reasons": TREATMENT_INVALIDATION_REASONS,
+        "note": note,
+        "sealed_at_utc": _now(),
+        "sealed_tree": str(root),
+        "artifact_counts": inventory,
+        "protocol_sha_at_sealing": __import__(
+            "shapeflow_p1.protocol", fromlist=["protocol_sha"]).protocol_sha(_REPO),
+        "analysis_permitted": False,
+    }
+    body["content_sha256"] = _content_sha(body)
+    _write_once_json(marker, body, digest_field="content_sha256",
+                     label="treatment invalidation record")
+    typer.echo(json.dumps({
+        "state": state, "sealed_tree": str(root),
+        "artifact_counts": inventory,
+        "reasons": sorted(TREATMENT_INVALIDATION_REASONS),
+        "content_sha256": body["content_sha256"],
+    }, indent=2, sort_keys=True))
 
 
 @app.command("freeze-corpus-attempt")
