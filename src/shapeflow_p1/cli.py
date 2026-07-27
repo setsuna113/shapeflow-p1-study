@@ -962,12 +962,19 @@ def build_truth(config: Path = _CFG) -> None:
 
 
 @app.command("freeze-analysis-design")
-def freeze_analysis_design_command(config: Path = _CFG) -> None:
+def freeze_analysis_design_command(
+    config: Path = _CFG,
+    rebind_stale_config: bool = typer.Option(
+        False, "--rebind-stale-config",
+        help=("Re-bind an UNCHANGED design to moved config hashes. Refused unless the "
+              "re-derived registry and spec are byte-identical to the frozen ones."),
+    ),
+) -> None:
     """Steward-only: freeze outcome-blind features and the eligibility spec once."""
     from .analysis.design import freeze_analysis_design
 
     _require_role("steward")
-    body = freeze_analysis_design(_settings())
+    body = freeze_analysis_design(_settings(), rebind_stale_config=rebind_stale_config)
     registry = body["registry"]
     spec = body["eligibility_spec"]
     typer.echo(json.dumps({

@@ -266,7 +266,12 @@ else
   as sfsteward "$SF" build-truth --config "$CONFIG" \
     || blocked "BUILD_TRUTH" "machine truth-candidate construction failed"
 fi
-as sfsteward "$SF" freeze-analysis-design --config "$CONFIG" \
+# --rebind-stale-config covers the case where the design is unchanged but the receipt names
+# config hashes that have since moved -- which happens whenever any hash-locked config is edited
+# for reasons unrelated to the analysis design. It is refused unless the re-derived registry and
+# eligibility spec are byte-identical to the frozen ones, so it cannot author a new design after
+# treatment state may have been observed; that guard is untouched.
+as sfsteward "$SF" freeze-analysis-design --config "$CONFIG" --rebind-stale-config \
   || blocked "ANALYSIS_DESIGN" \
     "pre-treatment feature registry or eligibility specification could not be frozen"
 

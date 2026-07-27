@@ -191,3 +191,63 @@ def test_existing_write_once_design_cannot_mask_an_obsolete_spec(tmp_path):
 
     with pytest.raises(ValueError, match="current hash-locked design"):
         freeze_analysis_design(settings)
+
+
+def test_rebinding_a_stale_config_hash_keeps_the_design_and_preserves_the_old_receipt(tmp_path):
+    """A receipt can go stale without the design changing at all.
+
+    Any hash-locked config edited for unrelated reasons -- a handle codec, a shard block, a
+    metric registration -- moves a hash the receipt names, and the receipt then refuses to
+    verify even though the features and the eligibility rule are untouched. Re-binding is
+    allowed exactly there, and the old receipt is kept rather than replaced.
+    """
+    settings = _world(tmp_path)
+    first = freeze_analysis_design(settings)
+    receipt_path = Path(first["receipt_path"])
+
+    # Move a config hash without touching anything the design derives from.
+    settings.shas["decision"] = "d" * 64
+    with pytest.raises(ValueError, match="does not bind the frozen evaluator artifacts"):
+        freeze_analysis_design(settings)
+
+    rebound = freeze_analysis_design(settings, rebind_stale_config=True)
+    assert rebound["registry"] == first["registry"]
+    assert rebound["eligibility_spec"] == first["eligibility_spec"]
+    assert rebound["receipt"]["decision_config_sha256"] == "d" * 64
+    assert rebound["receipt"]["content_sha256"] != first["receipt"]["content_sha256"]
+
+    superseded = list(receipt_path.parent.glob(f"{receipt_path.name}.superseded-*"))
+    assert len(superseded) == 1
+    kept = json.loads(superseded[0].read_text(encoding="utf-8"))
+    assert kept["content_sha256"] == first["receipt"]["content_sha256"]
+
+
+def test_rebinding_refuses_when_the_design_itself_changed(tmp_path):
+    """The escape hatch must not become a way around the pre-treatment guard.
+
+    Re-binding is safe only because the registry and spec are re-derived and required to be
+    byte-identical. A design that actually moved after treatment state may have been observed is
+    precisely what the guard exists to stop, and the flag does not weaken that.
+    """
+    settings = _world(tmp_path)
+    result = freeze_analysis_design(settings)
+    spec_path = Path(result["eligibility_spec_path"])
+    changed = dict(result["eligibility_spec"])
+    changed["min_tasks_per_leaf"] = int(changed.get("min_tasks_per_leaf", 8)) + 1
+    changed["content_sha256"] = sha256_hex(canonical_json({
+        key: value for key, value in changed.items() if key != "content_sha256"
+    }))
+    spec_path.chmod(0o640)
+    spec_path.write_text(json.dumps(changed), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="current hash-locked design"):
+        freeze_analysis_design(settings, rebind_stale_config=True)
+
+
+def test_rebinding_cannot_author_a_design_that_never_existed(tmp_path):
+    """With no frozen design, the flag is inert: the pre-treatment guard still decides."""
+    settings = _world(tmp_path)
+    settings.path("runs").mkdir(parents=True)
+    (settings.path("runs") / "e2e_blocks").mkdir()
+    with pytest.raises(ValueError, match="cannot be authored after treatment"):
+        freeze_analysis_design(settings, rebind_stale_config=True)

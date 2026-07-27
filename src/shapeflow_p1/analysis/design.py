@@ -444,8 +444,21 @@ def _write_once(path: Path, body: Mapping[str, object]) -> None:
     os.chmod(path, 0o440)
 
 
-def freeze_analysis_design(settings) -> dict:
-    """Write the feature registry and eligibility spec exactly once, before treatment."""
+def freeze_analysis_design(settings, *, rebind_stale_config: bool = False) -> dict:
+    """Write the feature registry and eligibility spec exactly once, before treatment.
+
+    ``rebind_stale_config`` handles one narrow case: the design is unchanged but the *receipt*
+    binds config hashes that have since moved. That happens whenever any hash-locked config is
+    edited for reasons unrelated to the analysis design -- a handle codec, a shard block, a
+    metric registration -- and the receipt then refuses to verify against the live configs even
+    though nothing about the features or the eligibility rule has changed.
+
+    It is not a way around the pre-treatment guard, and it must not become one. The registry and
+    spec are re-derived and required to be **byte-identical** to the frozen ones; if either
+    differs the rebind is refused, because a changed design after treatment state has been
+    observed is exactly what the guard exists to prevent. Only the receipt is rewritten, and the
+    old one is preserved rather than replaced, so the binding it certified stays auditable.
+    """
     directory = settings.path("evaluator_root") / "analysis_design"
     registry_path = directory / REGISTRY_FILENAME
     spec_path = directory / ELIGIBILITY_SPEC_FILENAME
@@ -491,6 +504,16 @@ def freeze_analysis_design(settings) -> dict:
             if evaluator_receipt != receipt:
                 raise ValueError(
                     "runner and evaluator analysis-design receipts differ")
+            expected = _analysis_design_receipt(settings, registry, spec)
+            if rebind_stale_config and dict(receipt) != expected:
+                # The design is provably unchanged -- the two equality checks above already
+                # required the re-derived registry and spec to equal the frozen ones byte for
+                # byte -- so what moved is only which config hashes the receipt names.
+                _supersede(receipt_path, receipt)
+                _supersede(evaluator_receipt_path, evaluator_receipt)
+                _write_once(receipt_path, expected)
+                _write_once(evaluator_receipt_path, expected)
+                receipt = expected
         _verify_receipt_binding(settings, receipt, registry, spec)
         return {
             "registry": registry,
@@ -558,6 +581,21 @@ def _analysis_design_receipt(
     }
     receipt["content_sha256"] = _unsigned_sha(receipt)
     return receipt
+
+
+def _supersede(path: Path, body: Mapping[str, object]) -> None:
+    """Move a stale artifact aside under its own digest instead of deleting it.
+
+    Named by what it recorded, so the superseded file cannot be confused with the live one and
+    the round it certified stays reconstructible.
+    """
+    digest = str(body.get("content_sha256") or "")[:12] or "unknown"
+    target = path.with_name(f"{path.name}.superseded-{digest}")
+    if target.exists():
+        return
+    os.chmod(path, 0o640)
+    path.rename(target)
+    os.chmod(target, 0o440)
 
 
 def _verify_receipt_binding(
