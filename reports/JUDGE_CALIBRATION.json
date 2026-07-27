@@ -1,0 +1,114 @@
+{
+  "batches_per_task": 2,
+  "candidates": [
+    {
+      "accepted_atoms_per_task": 11.333,
+      "atoms_bound_valid": 34,
+      "atoms_proposed": 38,
+      "calls": 9,
+      "candidate_id": "flash-none-8k",
+      "completion_tokens": 35008,
+      "errors": [],
+      "json_valid_non_truncated": 1.0,
+      "max_tokens": 8000,
+      "model": "deepseek-v4-flash",
+      "projected_total_usd": 12.69,
+      "prompt_tokens": 244162,
+      "reasoning_effort": null,
+      "reasoning_tokens": 25520,
+      "repeat_decision_stability": 0.0,
+      "span_binding_validity": 0.8947,
+      "truncated_calls": 0
+    },
+    {
+      "accepted_atoms_per_task": 11.0,
+      "atoms_bound_valid": 33,
+      "atoms_proposed": 33,
+      "calls": 9,
+      "candidate_id": "flash-none-32k",
+      "completion_tokens": 32752,
+      "errors": [],
+      "json_valid_non_truncated": 1.0,
+      "max_tokens": 32000,
+      "model": "deepseek-v4-flash",
+      "projected_total_usd": 12.51,
+      "prompt_tokens": 244162,
+      "reasoning_effort": null,
+      "reasoning_tokens": 24416,
+      "repeat_decision_stability": 0.0,
+      "span_binding_validity": 1.0,
+      "truncated_calls": 0
+    },
+    {
+      "accepted_atoms_per_task": 13.0,
+      "atoms_bound_valid": 39,
+      "atoms_proposed": 64,
+      "calls": 9,
+      "candidate_id": "pro-high-32k",
+      "completion_tokens": 115875,
+      "errors": [],
+      "json_valid_non_truncated": 1.0,
+      "max_tokens": 32000,
+      "model": "deepseek-v4-pro",
+      "projected_total_usd": 19.23,
+      "prompt_tokens": 244162,
+      "reasoning_effort": "high",
+      "reasoning_tokens": 102073,
+      "repeat_decision_stability": 0.0131,
+      "span_binding_validity": 0.6094,
+      "truncated_calls": 0
+    },
+    {
+      "accepted_atoms_per_task": 24.333,
+      "atoms_bound_valid": 73,
+      "atoms_proposed": 73,
+      "calls": 9,
+      "candidate_id": "pro-max-32k",
+      "completion_tokens": 199596,
+      "errors": [],
+      "json_valid_non_truncated": 1.0,
+      "max_tokens": 32000,
+      "model": "deepseek-v4-pro",
+      "projected_total_usd": 26.02,
+      "prompt_tokens": 244873,
+      "reasoning_effort": "max",
+      "reasoning_tokens": 180669,
+      "repeat_decision_stability": 0.0663,
+      "span_binding_validity": 1.0,
+      "truncated_calls": 0
+    }
+  ],
+  "decision": {
+    "reason": "no candidate cleared the admissibility gates; the incumbent stands",
+    "rejected": {
+      "flash-none-32k": [
+        "repeat_decision_stability 0.000 < 0.95"
+      ],
+      "flash-none-8k": [
+        "repeat_decision_stability 0.000 < 0.95",
+        "span_binding_validity 0.895 < 0.98"
+      ],
+      "pro-high-32k": [
+        "repeat_decision_stability 0.013 < 0.95",
+        "span_binding_validity 0.609 < 0.98"
+      ],
+      "pro-max-32k": [
+        "repeat_decision_stability 0.066 < 0.95"
+      ]
+    },
+    "selected": "flash-none-8k",
+    "status": "JUDGE_CALIBRATION_INCONCLUSIVE"
+  },
+  "held_out_tasks": [
+    "T06e85680b862be",
+    "T1592b4ec524aac",
+    "T1a516f20e652b2"
+  ],
+  "limitations_recorded_not_gated": [
+    "style_differential_bias",
+    "shared_model_preference",
+    "binding_recall_requires_human_audit"
+  ],
+  "projection_cells": 836,
+  "rule_config_sha256": "f64b95e552295026aa13aeea41e7fd7af80fd794b7d15fff3ab50ae9b0e8a880"
+}
