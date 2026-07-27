@@ -41,6 +41,10 @@ paths:
   visible_truth: evaluator/visible_truth
   judgments: evaluator/judgments
   provider_ledger: provider/provider_ledger.sqlite
+  # The frozen task-to-lane partition. Steward-owned like every other pre-registration artifact
+  # and readable by every lane: a lane that could rewrite its own share could choose its tasks
+  # after seeing a result.
+  shards: shards
 
 provider:
   bind_host: 127.0.0.1
@@ -241,6 +245,30 @@ measurement:
     mechanism_only:
       - service_work_seconds
   selected_token_budget: 512
+  # Four GPUs, one schedule. Tasks are partitioned across isolated lanes; arms and replicates
+  # are NOT. A block is paired-valid only under a single engine epoch, and the paired contrast
+  # is P1 against P0 on the same task, so P0 on one card and P1 on another would fold that
+  # card's clocks and thermals into the treatment effect with no way to separate them
+  # afterwards. Cross-GPU parallelism here is independent replication of whole tasks, which
+  # leaves the system under test unchanged.
+  #
+  # The partition is frozen before treatment from pre-treatment corpus size only, with ties
+  # broken from the approved execution binding. There is no rebalancing and no mid-task
+  # migration: moving a half-finished task would either splice two engine epochs into one block
+  # or move its remaining arms to another card, which is the pairing violation above.
+  shards:
+    lane_count: 4
+    # Only lane 0 reaches an upstream that costs money. Four providers each admitting against
+    # the full DeepSeek cap would be a four-fold budget, and a cap that can be multiplied by
+    # starting another process is not admission control. The provider refuses the paid routes on
+    # the other lanes rather than relying on a runbook.
+    paid_upstream_lane: 0
+    vllm_base_port: 8000
+    provider_base_port: 8787
+    # Each lane owns its own runner ledger and object store: the ledger is single-writer by
+    # design and four runners must not share one. They are merged only after the run, by a check
+    # that requires every pre-registered cell exactly once.
+    runner_root_template: "runner-lane{lane}"
   # Generation is capped by the completion limit and guided decoding, never by a schema's
   # maxItems: maxItems bounds how many items may be *accepted*, not how many tokens the model
   # may emit, and reporting it as a decode cap would overstate the saving.

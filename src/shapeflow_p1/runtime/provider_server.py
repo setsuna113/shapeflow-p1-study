@@ -66,6 +66,7 @@ from .request_tags import REMOTE_ALLOWED_OPS, OpClass
 __all__ = [
     "PROVIDER_KEY_PLACEHOLDER",
     "ROLE_ROUTES",
+    "PAID_UPSTREAM_ROUTES",
     "ProviderError",
     "ProviderConfig",
     "CellRegistration",
@@ -84,6 +85,12 @@ PROVIDER_KEY_PLACEHOLDER = "@SHAPEFLOW_PROVIDER@"
 #: Route -> the roles allowed to call it. The runner has no route that touches a credential:
 #: acquisition is the steward's, judging is the evaluator's. This is the boundary; the token
 #: check below only enforces it.
+#: Routes that spend real money. They are served by exactly one lane; see
+#: ProviderConfig.serves_paid_upstreams. vLLM inference is local and is served by every lane.
+PAID_UPSTREAM_ROUTES: frozenset[str] = frozenset({
+    "exa.search", "tavily.search", "deepseek.chat",
+})
+
 ROLE_ROUTES: dict[str, frozenset[str]] = {
     "exa.search": frozenset({"steward"}),
     "tavily.search": frozenset({"steward"}),
@@ -212,6 +219,15 @@ class ProviderConfig:
     disable_thinking: bool = True
     model_aliases: Mapping[str, OpClass] = field(
         default_factory=lambda: dict(DEFAULT_MODEL_ALIASES))
+
+    #: Which execution lane this provider serves. Four lanes run four providers, one per GPU,
+    #: because the runner ledger is single-writer by design and four runners must not share one.
+    lane_id: int = 0
+    #: Whether this lane may reach an upstream that costs money. Exactly one lane may -- four
+    #: providers each holding the full DeepSeek cap would be a 4x budget, and a cap that can be
+    #: multiplied by starting another process is not admission control. The paid routes are
+    #: refused here rather than merely omitted from a runbook.
+    serves_paid_upstreams: bool = True
 
     request_timeout_seconds: float = 120.0
     inference_timeout_seconds: float = 900.0
@@ -632,6 +648,13 @@ class ProviderService:
                 403,
                 f"role {role!r} may not call {route!r}; that route is not authorized "
                 "for this role",
+            )
+        if route in PAID_UPSTREAM_ROUTES and not self._cfg.serves_paid_upstreams:
+            raise ProviderError(
+                403,
+                f"lane {self._cfg.lane_id} does not serve paid upstreams; {route!r} belongs to "
+                "the single lane that holds the campaign's budget. Four lanes each admitting "
+                "against the full cap would be a four-fold budget.",
             )
         expected_uid = self._allowed_uids.get(role)
         if expected_uid is not None and peer_uid is not None and peer_uid != expected_uid:

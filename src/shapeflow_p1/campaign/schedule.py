@@ -514,13 +514,22 @@ def freeze_root_record(
     phase_id: str,
     split: str,
     block_records: Sequence[dict],
+    shard_id: int | None = None,
+    owned_block_ids: Sequence[str] | None = None,
 ) -> dict:
-    """Bind the complete offered schedule to every immutable terminal block.
+    """Bind the offered schedule to every immutable terminal block.
 
     Individual block files are necessary but insufficient evidence for an ITT denominator:
     deleting one successful/failed block still leaves a perfectly valid directory of hashes.
     This root names *all* assignments before analysis, including arm variants, seeds and order,
     and then binds each assignment to its terminal state/output through the block freeze hash.
+
+    ``owned_block_ids`` narrows "all" to one execution lane's frozen share when the campaign is
+    task-sharded across GPUs. The completeness requirement does not weaken -- it moves: a lane
+    must still freeze every block it was given, exactly, and the union of the lanes must
+    reconstitute the schedule, which ``sharding.merge_shard_freeze_roots`` requires. The whole
+    schedule is still carried here, so a lane's root commits to the assignments it did *not*
+    execute as well, and a lane cannot quietly redefine the denominator to be its own share.
     """
     if not run_id or not phase_id:
         raise ValueError("a frozen campaign root requires non-empty run_id and phase_id")
@@ -528,13 +537,25 @@ def freeze_root_record(
         raise ValueError(
             f"freeze split {split!r} does not match schedule split {manifest.split!r}")
 
+    scheduled = {block.block_id for block in manifest.blocks}
+    if owned_block_ids is None:
+        expected_ids = [block.block_id for block in manifest.blocks]
+    else:
+        owned = [str(block_id) for block_id in owned_block_ids]
+        unscheduled = sorted(set(owned) - scheduled)
+        if unscheduled or len(set(owned)) != len(owned):
+            raise ValueError(
+                f"lane share is not a subset of the schedule: unscheduled={unscheduled[:5]}")
+        expected_ids = [
+            block.block_id for block in manifest.blocks if block.block_id in set(owned)
+        ]
+
     by_id: dict[str, dict] = {}
     for record in block_records:
         block_id = str(record.get("block_id") or "")
         if not block_id or block_id in by_id:
             raise ValueError(f"duplicate or missing frozen block id {block_id!r}")
         by_id[block_id] = record
-    expected_ids = [block.block_id for block in manifest.blocks]
     if set(by_id) != set(expected_ids) or len(by_id) != len(expected_ids):
         missing = sorted(set(expected_ids) - set(by_id))
         extra = sorted(set(by_id) - set(expected_ids))
@@ -543,6 +564,8 @@ def freeze_root_record(
 
     frozen_blocks: list[dict] = []
     for block in manifest.blocks:
+        if block.block_id not in by_id:
+            continue
         record = by_id[block.block_id]
         if record.get("terminal_frozen") is not True:
             raise ValueError(f"block {block.block_id} is not terminal_frozen")
@@ -628,6 +651,9 @@ def freeze_root_record(
         "terminal_frozen": True,
         "blocks": frozen_blocks,
     }
+    if shard_id is not None:
+        body["shard_id"] = int(shard_id)
+        body["owned_block_ids"] = sorted(expected_ids)
     body["freeze_root_sha256"] = sha256_hex(canonical_json(body))
     return body
 

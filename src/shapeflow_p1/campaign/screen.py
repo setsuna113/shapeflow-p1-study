@@ -201,6 +201,7 @@ async def _run_screening_leased(
         lease_seconds=float(settings.get("week1", "runtime", "lease_seconds")),
         max_cells=max_cells,
         stop_sentinel=stop_sentinel,
+        shard_id=settings.lane_id,
     )
     runner = CampaignRunner(settings, ledger=ledger, store=store, config=config,
                             execution_binding_sha256=execution_binding_sha256,
@@ -222,6 +223,24 @@ async def _run_screening_leased(
         task_ids=tasks, arms=arms, split=split,
         second_seed_fraction=float(settings.get("week1", "screen", "second_seed_fraction")),
     )
+    # A sharded lane executes only the tasks the frozen partition gave it. The share is read
+    # from the pre-registered manifest rather than recomputed, so a lane cannot arrive at a
+    # different partition because its copy of the assignment code moved.
+    if settings.lane_id is not None:
+        from .sharding import SHARD_MANIFEST_FILENAME, verify_shard_manifest
+
+        shard_path = settings.path("shards") / SHARD_MANIFEST_FILENAME
+        try:
+            shard_body = json.loads(shard_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            ledger.close()
+            return {"ok": False, "run_id": run_id,
+                    "error": f"SHARD_MANIFEST_UNREADABLE: {shard_path}: {exc}"}
+        verify_shard_manifest(shard_body, manifest)
+        owned = shard_body["blocks_by_shard"][str(settings.lane_id)]
+        config.owned_block_ids = frozenset(map(str, owned))
+        runner.config = config
+
     from ..analysis.design import load_runner_analysis_design_receipt
 
     analysis_receipt = load_runner_analysis_design_receipt(settings)

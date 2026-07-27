@@ -72,6 +72,10 @@ class RunnerConfig:
     lease_seconds: float = 1800.0
     max_cells: Optional[int] = None
     stop_sentinel: Optional[Path] = None
+    #: This lane's identity and its frozen share of the schedule, when the campaign is sharded
+    #: across GPUs. None means one lane owning everything, which is the unsharded campaign.
+    shard_id: Optional[int] = None
+    owned_block_ids: Optional[frozenset[str]] = None
 
 
 @dataclass
@@ -242,14 +246,28 @@ class CampaignRunner:
     # --- schedule ---------------------------------------------------------------------
 
     def arms_from_config(self, block_name: str = "canary") -> list[ArmSpec]:
+        return self.arms_from_config_static(self.settings, block_name, registry=self.registry)
+
+    @staticmethod
+    def arms_from_config_static(
+        settings: Settings, block_name: str = "canary", *, registry=None
+    ) -> list[ArmSpec]:
+        """Resolve an arm block without a runner.
+
+        The steward needs the same arm set to derive the schedule that the shard partition is
+        frozen against, and deriving it a second way is how two "identical" schedules come to
+        have different digests.
+        """
+        if registry is None:
+            registry = load_registry(settings.repo / "configs")
         specs = [
             ArmSpec(arm_id=str(a["arm_id"]), page_variant=str(a["page_variant"]),
                     close_variant=str(a["close_variant"]))
-            for a in self.settings.get("week1", block_name, "arms")
+            for a in settings.get("week1", block_name, "arms")
         ]
         unknown = sorted(
             v for a in specs for v in (a.page_variant, a.close_variant)
-            if v != "P0" and v not in self.registry
+            if v != "P0" and v not in registry
         )
         if unknown:
             raise ValueError(
@@ -460,6 +478,11 @@ class CampaignRunner:
         executed = 0
 
         for block in manifest.blocks:
+            if not self._owns(block):
+                # Another lane's task. Not skipped as "already done" -- never claimed at all, so
+                # its work items stay PENDING in this lane's ledger and the merge can tell the
+                # difference between a block another lane ran and a block nobody ran.
+                continue
             for cell in sorted(block.cells, key=lambda c: c.order_index):
                 key = cell_key(cell)
                 if states.get(key) in TERMINAL_STATES:
@@ -745,7 +768,8 @@ class CampaignRunner:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         frozen: list[dict] = []
-        for block in manifest.blocks:
+        owned_blocks = [block for block in manifest.blocks if self._owns(block)]
+        for block in owned_blocks:
             record = freeze_record(block, states=states, outputs=outputs)
             if not record["terminal_frozen"]:
                 continue
@@ -796,17 +820,22 @@ class CampaignRunner:
             frozen.append(record)
 
         root_path = directory / FROZEN_ROOT_FILENAME
-        if len(frozen) == len(manifest.blocks):
+        if len(frozen) == len(owned_blocks):
             root = freeze_root_record(
                 manifest,
                 run_id=self.config.run_id,
                 phase_id=phase_id,
                 split=split,
                 block_records=frozen,
+                shard_id=self.config.shard_id,
+                owned_block_ids=(
+                    None if self.config.shard_id is None
+                    else [block.block_id for block in owned_blocks]
+                ),
             )
             expected_entries = {
                 FROZEN_ROOT_FILENAME,
-                *(f"{block.block_id}.json" for block in manifest.blocks),
+                *(f"{block.block_id}.json" for block in owned_blocks),
             }
             observed_entries = {path.name for path in directory.iterdir()}
             extra = sorted(observed_entries - expected_entries)
@@ -825,10 +854,21 @@ class CampaignRunner:
             )
         elif root_path.exists():
             raise RuntimeError(
-                f"{root_path} claims a complete campaign but only "
-                f"{len(frozen)}/{len(manifest.blocks)} scheduled blocks are terminal"
+                f"{root_path} claims a complete share but only "
+                f"{len(frozen)}/{len(owned_blocks)} of this lane's blocks are terminal"
             )
         return frozen
+
+    def _owns(self, block) -> bool:
+        """Is this block part of this lane's frozen share?
+
+        A lane that ran a block the partition gave to another lane would produce a task executed
+        on two GPUs -- exactly the pairing violation task-atomic sharding exists to prevent --
+        and each lane would still look internally consistent. The merge catches it too; catching
+        it here means the GPU time is never spent.
+        """
+        owned = self.config.owned_block_ids
+        return owned is None or block.block_id in owned
 
     def _block_epochs(self, block, *, phase_id: str, split: str) -> set:
         """Which engine epochs this block's committed cells were actually run under."""

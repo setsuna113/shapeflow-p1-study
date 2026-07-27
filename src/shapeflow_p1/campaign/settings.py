@@ -22,9 +22,37 @@ from typing import Any, Optional
 
 from ..config import ConfigError, load_config
 
-__all__ = ["Settings", "DATA_ROOT_ENV"]
+__all__ = ["Settings", "DATA_ROOT_ENV", "LANE_ENV"]
+
+
+def _resolve_lane(configs: dict[str, dict]) -> Optional[int]:
+    """Read this process's lane from the environment the unit sets.
+
+    Never inferred from a visible device: a lane that guessed its own identity from whichever
+    GPU it could see could write another lane's ledger, and the two would look equally valid
+    until the merge.
+    """
+    raw = os.environ.get(LANE_ENV, "").strip()
+    if not raw:
+        return None
+    if not raw.isdigit():
+        raise ValueError(f"{LANE_ENV} must be a non-negative integer, got {raw!r}")
+    lane = int(raw)
+    count = int(configs["week1"]["measurement"]["shards"]["lane_count"])
+    if lane >= count:
+        raise ValueError(f"{LANE_ENV} {lane} is outside the frozen {count}-lane campaign")
+    return lane
+
+
+def _with_port(url: str, port: int) -> str:
+    """Repoint a base URL at this lane's engine, preserving scheme, host and path."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    return urlunsplit(parts._replace(netloc=f"{parts.hostname or '127.0.0.1'}:{port}"))
 
 DATA_ROOT_ENV = "SHAPEFLOW_DATA_ROOT"
+LANE_ENV = "SHAPEFLOW_LANE"
 
 _CONFIG_FILES = {
     "week1": "week1.yaml",
@@ -44,6 +72,11 @@ class Settings:
     data_root: Path
     configs: dict[str, dict]
     shas: dict[str, str]
+    #: Which execution lane this process serves, or None for an unsharded campaign. Resolved
+    #: once at load rather than read from the environment on each access: a settings object
+    #: whose paths change underneath it would let one lane write another lane's ledger and both
+    #: would look correct until the merge.
+    lane_id: Optional[int] = None
 
     # --- loading ---------------------------------------------------------------------
 
@@ -57,7 +90,10 @@ class Settings:
             configs[name] = data
             shas[name] = sha
         root = data_root or os.environ.get(DATA_ROOT_ENV) or (repo / "data")
-        return cls(repo=repo, data_root=Path(root), configs=configs, shas=shas)
+        return cls(
+            repo=repo, data_root=Path(root), configs=configs, shas=shas,
+            lane_id=_resolve_lane(configs),
+        )
 
     # --- accessors -------------------------------------------------------------------
 
@@ -71,9 +107,27 @@ class Settings:
             node = node[key]
         return node
 
+    #: Paths that belong to one execution lane rather than to the campaign. The runner ledger
+    #: is single-writer by design, so four concurrent lanes need four of them; the corpus, the
+    #: evaluator tree and the provider are shared and must NOT be duplicated.
+    _LANE_SCOPED_PATHS = frozenset({
+        "runner_root", "runs", "object_store", "checkpoints",
+    })
+
     def path(self, name: str) -> Path:
-        """An absolute path for one of the declared relative locations."""
-        return self.data_root / str(self.get("week1", "paths", name))
+        """An absolute path for one of the declared relative locations.
+
+        Lane-scoped names are rehomed under this lane's runner root. Four runners sharing one
+        ledger would be four writers on a store designed for one; four runners sharing one
+        object store would make "which lane produced this artifact" unanswerable at merge time.
+        """
+        relative = str(self.get("week1", "paths", name))
+        lane = self.lane_id
+        if lane is not None and name in self._LANE_SCOPED_PATHS:
+            template = str(self.get("week1", "measurement", "shards", "runner_root_template"))
+            base = str(self.get("week1", "paths", "runner_root"))
+            relative = template.format(lane=lane) + relative[len(base):]
+        return self.data_root / relative
 
     def ensure_paths(self, *names: str) -> None:
         for name in names:
@@ -142,6 +196,21 @@ class Settings:
         layer = str(self.get("week1", "measurement", "layer"))
         block["max_upstream_inflight"] = int(
             self.get("stack", "isolation", layer, "gateway_max_upstream_inflight")
+        )
+        # One lane holds the campaign's budget and serves the paid upstreams; the others serve
+        # only local inference. Four providers each admitting against the full DeepSeek cap
+        # would be a four-fold budget, and a cap that another process can multiply is not
+        # admission control. The provider refuses those routes rather than trusting a runbook.
+        lane = self.lane_id
+        shards = self.get("week1", "measurement", "shards")
+        if lane is not None:
+            block["lane_id"] = lane
+            block["bind_port"] = int(shards["provider_base_port"]) + lane
+            block["vllm_base_url"] = _with_port(
+                str(block["vllm_base_url"]), int(shards["vllm_base_port"]) + lane
+            )
+        block["serves_paid_upstreams"] = (
+            lane is None or lane == int(shards["paid_upstream_lane"])
         )
         return ProviderConfig.from_mapping(block)
 

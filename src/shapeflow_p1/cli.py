@@ -127,6 +127,30 @@ def _assert_post_launch_flags(protocol_sha: Optional[str], resume: bool) -> None
         )
 
 
+def _write_once_json(path: Path, body: dict, *, digest_field: str, label: str) -> None:
+    """Create, or verify an identical existing artifact. Never replace.
+
+    Exclusive creation rather than exists()-then-write: two resumptions reaching a freeze at once
+    is a truncation race, and a pre-registration artifact that can be silently rewritten is not
+    pre-registration.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(body, indent=2, sort_keys=True) + "\n")
+        return
+    except FileExistsError:
+        pass
+    existing = json.loads(path.read_text(encoding="utf-8"))
+    if existing.get(digest_field) != body.get(digest_field):
+        _fail(
+            f"{path} already contains a different {label}; it is write-once. "
+            f"Existing {existing.get(digest_field, '')[:12]}, "
+            f"computed {str(body.get(digest_field, ''))[:12]}."
+        )
+
+
 def _require_approval():
     """Every command that can spend verifies the approval itself.
 
@@ -991,6 +1015,167 @@ def smoke(config: Path = _CFG,
 
 
 # --- the campaign ---------------------------------------------------------------------------
+
+
+@app.command("freeze-shards")
+def freeze_shards(config: Path = _CFG) -> None:
+    """Steward-only: freeze which GPU lane runs which task, before any of them runs.
+
+    Task-atomic. Every replicate and every arm of one task stays on one lane, because a block is
+    paired-valid only under a single engine epoch and the paired contrast is P1 against P0 on
+    the same task -- P0 on one card and P1 on another would fold that card's clocks and thermals
+    into the treatment effect with nothing afterwards able to separate them.
+
+    Balanced on the frozen corpus's own byte size, which exists before any arm runs. Written
+    write-once: a lane chosen after a result is seen is not a partition, it is a selection.
+    """
+    from .campaign.acquire import acquired_task_ids
+    from .campaign.schedule import build_blocks
+    from .campaign.screen import available_tasks
+    from .campaign.sharding import SHARD_MANIFEST_FILENAME, Lane, build_shard_manifest
+
+    _require_role("steward")
+    settings = _settings()
+    binding = _require_approval()
+    split = str(settings.get("week1", "screen", "split"))
+    tasks = available_tasks(settings, split)
+    if not tasks:
+        _fail(f"freeze-shards: no {split} task has a frozen world")
+
+    from .campaign.runner import CampaignRunner  # arm resolution lives with the runner
+
+    arms = CampaignRunner.arms_from_config_static(
+        settings, str(settings.get("week1", "screen", "arms_block")))
+    manifest = build_blocks(
+        execution_binding_sha256=binding.digest,
+        protocol_sha=binding.protocol_sha,
+        split=split,
+        task_ids=tasks,
+        arms=arms,
+        seeds=[int(s) for s in settings.get("week1", "screen", "seeds")],
+        layer=settings.measurement_layer,
+        claim_scope=settings.claim_scope,
+        second_seed_fraction=float(settings.get("week1", "screen", "second_seed_fraction")),
+    )
+
+    shards = settings.get("week1", "measurement", "shards")
+    lane_count = int(shards["lane_count"])
+    pool = list(settings.get("stack", "host", "gpu_uuid_pool"))
+    if len(pool) < lane_count:
+        _fail(f"freeze-shards: {lane_count} lanes but only {len(pool)} GPUs in the frozen pool")
+    lanes = [
+        Lane(
+            shard_id=index,
+            gpu_uuid=str(pool[index]),
+            vllm_port=int(shards["vllm_base_port"]) + index,
+            provider_port=int(shards["provider_base_port"]) + index,
+            runner_root=str(shards["runner_root_template"]).format(lane=index),
+            serves_paid_upstreams=(index == int(shards["paid_upstream_lane"])),
+        )
+        for index in range(lane_count)
+    ]
+
+    # Pre-treatment only: the frozen corpus's bytes for a task exist before any arm runs.
+    costs: dict[str, float] = {}
+    del acquired_task_ids
+    pool_dir = settings.path("frozen_corpus_for_runner") / "pools"
+    for task_id in tasks:
+        try:
+            costs[task_id] = float((pool_dir / f"{task_id}.json").stat().st_size)
+        except OSError as exc:
+            _fail(f"freeze-shards: no frozen pool for {task_id}: {exc}")
+
+    stack_manifest = _REPO / "protocol" / "stack_manifest.json"
+    try:
+        stack_sha = str(json.loads(
+            stack_manifest.read_text(encoding="utf-8")).get("manifest_sha256") or "")
+    except (OSError, json.JSONDecodeError) as exc:
+        _fail(f"freeze-shards: stack manifest unreadable ({exc}); run freeze-stack first")
+    body = build_shard_manifest(
+        manifest, lanes=lanes, task_costs=costs,
+        stack_manifest_sha256=stack_sha, protocol_sha256=binding.protocol_sha,
+    )
+    directory = settings.path("shards")
+    directory.mkdir(parents=True, exist_ok=True)
+    _write_once_json(directory / SHARD_MANIFEST_FILENAME, body,
+                     digest_field="shard_manifest_sha256", label="shard manifest")
+    typer.echo(json.dumps({
+        "shard_manifest_sha256": body["shard_manifest_sha256"],
+        "lane_count": lane_count,
+        "tasks": len(tasks),
+        "cells_by_shard": {k: len(v) for k, v in body["cells_by_shard"].items()},
+    }, indent=2, sort_keys=True))
+
+
+@app.command("merge-shards")
+def merge_shards(
+    config: Path = _CFG,
+    run_id: str = typer.Option(..., "--run-id"),
+) -> None:
+    """Steward-only: reconstitute one campaign from the lanes, or refuse.
+
+    Four separately-valid lanes are not a valid campaign. A task silently run twice, a lane's
+    blocks quietly missing, or one task's arms split across two GPUs each leave every individual
+    lane internally consistent -- the error exists only in the union, so this is the last place
+    it can be caught. Nothing downstream reads a lane's root directly.
+    """
+    from .campaign.schedule import FROZEN_ROOT_FILENAME, build_blocks
+    from .campaign.screen import available_tasks
+    from .campaign.sharding import (
+        SHARD_MANIFEST_FILENAME,
+        ShardMergeError,
+        merge_shard_freeze_roots,
+    )
+
+    _require_role("steward")
+    settings = _settings()
+    binding = _require_approval()
+    split = str(settings.get("week1", "screen", "split"))
+
+    from .campaign.runner import CampaignRunner
+
+    manifest = build_blocks(
+        execution_binding_sha256=binding.digest,
+        protocol_sha=binding.protocol_sha,
+        split=split,
+        task_ids=available_tasks(settings, split),
+        arms=CampaignRunner.arms_from_config_static(
+            settings, str(settings.get("week1", "screen", "arms_block"))),
+        seeds=[int(s) for s in settings.get("week1", "screen", "seeds")],
+        layer=settings.measurement_layer,
+        claim_scope=settings.claim_scope,
+        second_seed_fraction=float(settings.get("week1", "screen", "second_seed_fraction")),
+    )
+    shard_dir = settings.path("shards")
+    body = json.loads((shard_dir / SHARD_MANIFEST_FILENAME).read_text(encoding="utf-8"))
+
+    template = str(settings.get("week1", "measurement", "shards", "runner_root_template"))
+    suffix = str(settings.get("week1", "paths", "runs"))[
+        len(str(settings.get("week1", "paths", "runner_root"))):
+    ].lstrip("/")
+    roots: dict[int, dict] = {}
+    for lane in body["lanes"]:
+        shard_id = int(lane["shard_id"])
+        path = (
+            settings.data_root / template.format(lane=shard_id) / suffix
+            / "e2e_blocks" / run_id / FROZEN_ROOT_FILENAME
+        )
+        try:
+            roots[shard_id] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            _fail(f"merge-shards: lane {shard_id} freeze root unreadable at {path}: {exc}")
+    try:
+        merged = merge_shard_freeze_roots(body, manifest, roots)
+    except ShardMergeError as exc:
+        _fail(f"merge-shards: BLOCKED: {exc}")
+    _write_once_json(shard_dir / f"MERGED_ROOT_{run_id}.json", merged,
+                     digest_field="merged_root_sha256", label="merged campaign root")
+    typer.echo(json.dumps({
+        "merged_root_sha256": merged["merged_root_sha256"],
+        "lane_count": merged["lane_count"],
+        "total_cells": merged["total_cells"],
+        "blocks": len(merged["blocks"]),
+    }, indent=2, sort_keys=True))
 
 
 @app.command("run-screen")
