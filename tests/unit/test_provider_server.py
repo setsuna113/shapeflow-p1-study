@@ -11,10 +11,10 @@ import json
 
 import pytest
 
-from shapeflow_p1.experiment.budget import Budget
-from shapeflow_p1.experiment.ledger import Ledger
-from shapeflow_p1.object_store import ObjectStore
-from shapeflow_p1.runtime.provider_server import (
+from shapeflow.experiment.budget import Budget
+from shapeflow.experiment.ledger import Ledger
+from shapeflow.object_store import ObjectStore
+from shapeflow.runtime.provider_server import (
     PROVIDER_KEY_PLACEHOLDER,
     ProviderConfig,
     ProviderError,
@@ -23,7 +23,7 @@ from shapeflow_p1.runtime.provider_server import (
     resolve_route,
     serve_forever,
 )
-from shapeflow_p1.secrets import SecretRedactor
+from shapeflow.secrets import SecretRedactor
 
 FAKE_TAVILY = "tvly-FAKE-KEY-FOR-TESTS-00000"
 FAKE_DEEPSEEK = "sk-FAKE-DEEPSEEK-KEY-00000000"
@@ -417,7 +417,7 @@ def test_an_oversize_response_is_not_committed_with_a_truncated_body(tmp_path):
     could neither be recovered nor legitimately re-fetched. Failing the attempt keeps the
     logical call re-fetchable instead.
     """
-    from shapeflow_p1.runtime.provider_server import ProviderConfig
+    from shapeflow.runtime.provider_server import ProviderConfig
 
     huge = {"results": [{"content": "x" * 5000} for _ in range(50)], "usage": {"credits": 1}}
     config = ProviderConfig(served_model="Qwen3-14B-AWQ", max_frozen_response_bytes=1024)

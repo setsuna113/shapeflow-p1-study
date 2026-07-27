@@ -3,7 +3,7 @@
 Two things this module keeps apart on purpose.
 
 **What is hashed and what is not.** Every config file is loaded through
-:func:`~shapeflow_p1.config.load_config`, so its bytes reach the approval binding. The *data
+:func:`~shapeflow.config.load_config`, so its bytes reach the approval binding. The *data
 root* is not: it comes from ``SHAPEFLOW_DATA_ROOT`` and differs between the authoring machine
 and the run host. Putting an absolute path in a hashed config would give the same protocol two
 different SHAs depending on where it was read, and the approval would never verify anywhere.

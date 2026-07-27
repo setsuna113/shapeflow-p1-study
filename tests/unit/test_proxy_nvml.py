@@ -6,16 +6,16 @@ import asyncio
 
 import pytest
 
-from shapeflow_p1.runtime.nvml_sampler import PowerSample, integrate_energy_joules
-from shapeflow_p1.runtime.openai_proxy import (
+from shapeflow.runtime.nvml_sampler import PowerSample, integrate_energy_joules
+from shapeflow.runtime.openai_proxy import (
     InflightGate,
     OverlapViolation,
     ProxyRequest,
     TelemetryProxy,
     UpstreamResult,
 )
-from shapeflow_p1.runtime.request_tags import OpClass
-from shapeflow_p1.runtime.work_accounting import RequestEvent, isolated_service_work
+from shapeflow.runtime.request_tags import OpClass
+from shapeflow.runtime.work_accounting import RequestEvent, isolated_service_work
 
 
 class _Clock:

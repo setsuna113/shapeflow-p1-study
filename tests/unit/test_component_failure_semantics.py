@@ -7,15 +7,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from shapeflow_p1.odr.adapter import (
+from shapeflow.odr.adapter import (
     BatchOutcome,
     DeferredPageBatch,
     PageFailure,
     _resolve_failure,
 )
-from shapeflow_p1.odr.checkpoints import SamplingEnvelope
-from shapeflow_p1.odr.hooks import StrategyBundle, strategies_bound
-from shapeflow_p1.odr.vendor_hooks import (
+from shapeflow.odr.checkpoints import SamplingEnvelope
+from shapeflow.odr.hooks import StrategyBundle, strategies_bound
+from shapeflow.odr.vendor_hooks import (
     ComponentTrialFailure,
     RunBinding,
     bind_run,
@@ -62,7 +62,7 @@ async def test_e2e_whole_batch_fallback_preserves_vendor_sibling_concurrency():
 
 @pytest.mark.asyncio
 async def test_page_component_failure_aborts_before_toolmessage_publication(monkeypatch):
-    import shapeflow_p1.odr.vendor_hooks as vendor_hooks
+    import shapeflow.odr.vendor_hooks as vendor_hooks
 
     deferred = DeferredPageBatch(
         tool_call_id="",
@@ -140,7 +140,7 @@ async def test_close_component_failure_does_not_publish_vendor_compression():
 async def test_direct_selection_and_atomic_publish_are_emitted_at_their_real_boundaries(
     monkeypatch,
 ):
-    import shapeflow_p1.odr.vendor_hooks as vendor_hooks
+    import shapeflow.odr.vendor_hooks as vendor_hooks
 
     deferred = DeferredPageBatch(
         tool_call_id="",
@@ -240,7 +240,7 @@ async def test_direct_selection_and_atomic_publish_are_emitted_at_their_real_bou
 
 @pytest.mark.asyncio
 async def test_atomic_publish_rejects_a_reordered_or_partial_toolmessage_batch(monkeypatch):
-    import shapeflow_p1.odr.vendor_hooks as vendor_hooks
+    import shapeflow.odr.vendor_hooks as vendor_hooks
 
     deferred = DeferredPageBatch(
         tool_call_id="",

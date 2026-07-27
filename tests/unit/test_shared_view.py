@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.evidence.chunkers import WhitespaceTokenizer
-from shapeflow_p1.evidence.shared_view import (
+from shapeflow.evidence.chunkers import WhitespaceTokenizer
+from shapeflow.evidence.shared_view import (
     OVERFLOW_REASON,
     SharedContentBudget,
     apply_shared_budget,

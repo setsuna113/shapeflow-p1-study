@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.ops.gpu_pool import GpuDevice, GpuPoolError, select_devices
+from shapeflow.ops.gpu_pool import GpuDevice, GpuPoolError, select_devices
 
 # Real UUID shape: _require_uuid rejects anything else before it reaches an argv.
 POOL = [

@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from shapeflow_p1.object_store import CorruptObject, ObjectStore
+from shapeflow.object_store import CorruptObject, ObjectStore
 
 
 def test_roundtrip(tmp_path):

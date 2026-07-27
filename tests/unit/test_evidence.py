@@ -5,19 +5,19 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.evidence.chunkers import (
+from shapeflow.evidence.chunkers import (
     WhitespaceTokenizer,
     fixed_token_v1,
     markdown_structure_v1,
     paragraph_sentence_v1,
 )
-from shapeflow_p1.evidence.identity import (
+from shapeflow.evidence.identity import (
     CandidateSet,
     OutOfSetLabel,
     build_evidence_span,
     build_visible_message_span,
 )
-from shapeflow_p1.evidence.lineage import lineage_closure_errors, reconstruction_errors
+from shapeflow.evidence.lineage import lineage_closure_errors, reconstruction_errors
 
 TOK = WhitespaceTokenizer()
 

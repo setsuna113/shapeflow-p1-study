@@ -18,7 +18,7 @@ Three properties this store must guarantee, because the whole audit trail rests 
   that "the key exists" means "the bytes are whole".
 
 The key is a *plain* SHA-256 of the stored bytes, deliberately not the domain-separated
-``content_id`` from :mod:`shapeflow_p1.hashing`. The key's only job is integrity ("do
+``content_id`` from :mod:`shapeflow.hashing`. The key's only job is integrity ("do
 these bytes match what I asked for"); semantic identities live in the domain tables and
 point here via an object reference. Keeping them separate means a snapshot's
 ``content_hash`` and its ``object_ref`` are computed for different purposes and neither
@@ -107,7 +107,7 @@ class ObjectStore:
             # Widen from mkstemp's 0600 *before* the rename, so the blob is never visible at
             # its final key with an ACL mask that would deny the readers it was written for:
             # the steward publishes page bytes the runner must read, and the runner publishes
-            # treatment outputs the evaluator must score. See shapeflow_p1.fsmode.
+            # treatment outputs the evaluator must score. See shapeflow.fsmode.
             chmod_shared(tmp)
             os.replace(tmp, final)
         except BaseException:

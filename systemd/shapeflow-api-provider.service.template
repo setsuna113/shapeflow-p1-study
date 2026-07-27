@@ -20,7 +20,7 @@ StartLimitBurst=3
 Type=simple
 User=@API_USER@
 WorkingDirectory=@REPO@
-ExecStart=@REPO@/.venv/bin/shapeflow-p1 serve-provider --config @REPO@/configs/week1.yaml
+ExecStart=@REPO@/.venv/bin/shapeflow serve-provider --config @REPO@/configs/week1.yaml
 
 # The paths, never the values. The provider reads them once into memory and registers them with
 # the redactor; they never enter argv, the environment of any child, or a log line.

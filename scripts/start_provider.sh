@@ -44,4 +44,4 @@ fi
 
 exec setsid /usr/local/bin/sfsupervise "$UNIT_NAME" sfprovider "$REPO" "$DATA_ROOT" -- \
   env HOME=/tmp "${CREDENTIAL_ENV[@]}" ${LANE:+SHAPEFLOW_LANE="$LANE"} \
-  "$REPO/.venv/bin/shapeflow-p1" serve-provider --config "$CONFIG"
+  "$REPO/.venv/bin/shapeflow" serve-provider --config "$CONFIG"

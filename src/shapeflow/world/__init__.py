@@ -5,8 +5,8 @@ retrieval results -- otherwise P1, which changes the queries a researcher issues
 which pages exist, and the two arms would be compared across two different webs. Everything here
 exists to make that property structural rather than conventional.
 
-The seam is :class:`~shapeflow_p1.world.search_backend.SearchBackend`: given a query and a result
-count, return :class:`~shapeflow_p1.world.search_backend.SearchRecord` values. What sits behind it
+The seam is :class:`~shapeflow.world.search_backend.SearchBackend`: given a query and a result
+count, return :class:`~shapeflow.world.search_backend.SearchRecord` values. What sits behind it
 is a deliberate choice per campaign, and the implementations are kept strictly separate so a
 treatment run cannot silently fall back to a different world than the one it froze against.
 

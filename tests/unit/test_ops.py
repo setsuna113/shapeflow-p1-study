@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.ops.gpu_lease import GpuLease, LeaseHeld
-from shapeflow_p1.ops.watchdog import DriftGuard, check_drift, evaluate_auto_stop
+from shapeflow.ops.gpu_lease import GpuLease, LeaseHeld
+from shapeflow.ops.watchdog import DriftGuard, check_drift, evaluate_auto_stop
 
 # --- GPU lease ------------------------------------------------------------------------
 
@@ -91,7 +91,7 @@ def test_stop_reasons_listed():
 
 
 def test_a_report_that_claims_a_finished_block_fails_the_gate(tmp_path):
-    from shapeflow_p1.ops.acceptance import check_report_claims
+    from shapeflow.ops.acceptance import check_report_claims
 
     (tmp_path / "reports").mkdir()
     (tmp_path / "reports" / "WEEK1_P1_FINAL.md").write_text(
@@ -116,7 +116,7 @@ def test_the_gate_does_not_write_the_phrase_it_searches_for(tmp_path):
     """
     import json
 
-    from shapeflow_p1.ops.acceptance import UNSUPPORTED_CLAIMS, check_report_claims
+    from shapeflow.ops.acceptance import UNSUPPORTED_CLAIMS, check_report_claims
 
     (tmp_path / "reports").mkdir()
     (tmp_path / "reports" / "NOTES.md").write_text(
@@ -134,7 +134,7 @@ def test_the_gate_does_not_write_the_phrase_it_searches_for(tmp_path):
 
 
 def test_a_report_of_what_actually_happened_passes(tmp_path):
-    from shapeflow_p1.ops.acceptance import check_report_claims
+    from shapeflow.ops.acceptance import check_report_claims
 
     (tmp_path / "reports").mkdir()
     (tmp_path / "reports" / "FAILED_AUTHORING_ATTEMPT.md").write_text(
@@ -146,7 +146,7 @@ def test_a_report_of_what_actually_happened_passes(tmp_path):
 
 
 def test_the_gate_is_vacuous_only_when_there_are_no_reports(tmp_path):
-    from shapeflow_p1.ops.acceptance import check_report_claims
+    from shapeflow.ops.acceptance import check_report_claims
 
     gate = check_report_claims(tmp_path)
     assert gate.status == "PASS" and "no reports yet" in gate.detail

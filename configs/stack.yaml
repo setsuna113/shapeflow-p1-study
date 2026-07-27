@@ -20,7 +20,7 @@ model:
   revision: 31c69efc29464b6bb0aee1398b5a7b50a99340c3
   revision_source: hf_download_metadata
   # Merkle root over the weight + config + tokenizer files actually loaded. Written once by an
-  # explicit steward-run `shapeflow-p1 freeze-stack`, BEFORE approval -- never by the campaign's
+  # explicit steward-run `shapeflow freeze-stack`, BEFORE approval -- never by the campaign's
   # doctor. A doctor that froze what it happened to observe would launder a drifted environment
   # into a legitimate baseline, which is the opposite of what the check is for.
   artifact_merkle_root: "@STEWARD_FREEZES@"

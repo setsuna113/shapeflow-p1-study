@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/provider_request.schema.json",
+  "$id": "https://shapeflow/schemas/provider_request.schema.json",
   "title": "ProviderRequest",
   "description": "The closed request shapes the provider accepts (plan \u00a73.1: strict allowlist, closed schemas, no arbitrary URL/header/body forwarding). Every credential slot must carry the provider placeholder, never a real value -- a client that could send its own key would have had one in memory, which is exactly what this boundary exists to prevent. The chat-completions shape is closed too: an unrecognised field is refused by name rather than forwarded, so a caller cannot smuggle an engine parameter past the frozen serving configuration.",
   "type": "object",

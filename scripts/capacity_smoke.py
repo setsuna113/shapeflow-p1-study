@@ -41,7 +41,7 @@ def _load_pages(corpus: pathlib.Path, budget, tokenizer, limit: int) -> list[str
     """
     import zstandard as zstd
 
-    from shapeflow_p1.evidence.shared_view import apply_shared_budget
+    from shapeflow.evidence.shared_view import apply_shared_budget
 
     decompressor = zstd.ZstdDecompressor()
     sized: list[tuple[int, str]] = []
@@ -123,8 +123,8 @@ def main() -> int:
 
     import yaml
 
-    from shapeflow_p1.evidence.model_tokenizer import FrozenModelTokenizer
-    from shapeflow_p1.evidence.shared_view import SharedContentBudget
+    from shapeflow.evidence.model_tokenizer import FrozenModelTokenizer
+    from shapeflow.evidence.shared_view import SharedContentBudget
 
     repo = pathlib.Path(args.repo)
     stack = yaml.safe_load((repo / "configs" / "stack.yaml").read_text(encoding="utf-8"))

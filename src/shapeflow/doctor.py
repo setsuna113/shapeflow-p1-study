@@ -282,7 +282,7 @@ def check_stack_manifest(
         return CheckResult(
             "stack_manifest", FAIL,
             f"protocol/stack_manifest.json missing; {len(unresolved)} field(s) unresolved. "
-            "Run `shapeflow-p1 freeze-stack` as the steward before approval -- doctor will "
+            "Run `shapeflow freeze-stack` as the steward before approval -- doctor will "
             "not freeze it at launch.",
         )
 

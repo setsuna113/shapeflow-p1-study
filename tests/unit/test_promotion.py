@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from shapeflow_p1.experiment.promotion import (
+from shapeflow.experiment.promotion import (
     ScreenGates,
     ScreenResult,
     node_verdict_when_none_advance,

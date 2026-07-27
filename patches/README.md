@@ -42,7 +42,7 @@ batch. The middle column is why.
 Per plan §11.2, confined to:
 
 1. **Defer, don't transform, inside `tavily_search`.** When a strategy is bound
-   (`shapeflow_p1.odr.hooks.current_strategies()`), skip vendor steps 3–6 — the
+   (`shapeflow.odr.hooks.current_strategies()`), skip vendor steps 3–6 — the
    `summarize_webpage` calls and the string formatting — and return a tagged
    `DeferredPageBatch` carrying `unique_results` with each `raw_content[:max_content_length]`
    written to the object store. No transform, no publish, and the raw registry H needs is still

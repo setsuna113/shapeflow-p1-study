@@ -267,7 +267,7 @@ def _write_atomic(path: Path, body: dict) -> None:
         # Widen from mkstemp's 0600 before the rename: the approval must never be visible at
         # its published path with an ACL mask that denies the roles that have to verify it.
         # ``smoke``, ``run-screen``, ``preflight`` and doctor's phase record all run as
-        # sfrunner and call verified_execution_binding. See shapeflow_p1.fsmode.
+        # sfrunner and call verified_execution_binding. See shapeflow.fsmode.
         chmod_shared(tmp)
         os.replace(tmp, path)
     except BaseException:

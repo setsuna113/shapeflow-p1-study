@@ -17,22 +17,22 @@ from pathlib import Path
 
 import pytest
 
-from shapeflow_p1.campaign.graph_driver import CellSpec, run_cell, summarize_events
-from shapeflow_p1.campaign.runner import questions_for
-from shapeflow_p1.campaign.settings import Settings
-from shapeflow_p1.world.pools import acquired_task_ids, load_frozen_pool
-from shapeflow_p1.experiment.budget import Budget
-from shapeflow_p1.experiment.ledger import Ledger
-from shapeflow_p1.object_store import ObjectStore
-from shapeflow_p1.odr.hooks import StrategyBundle
-from shapeflow_p1.runtime.provider_server import (
+from shapeflow.campaign.graph_driver import CellSpec, run_cell, summarize_events
+from shapeflow.campaign.runner import questions_for
+from shapeflow.campaign.settings import Settings
+from shapeflow.world.pools import acquired_task_ids, load_frozen_pool
+from shapeflow.experiment.budget import Budget
+from shapeflow.experiment.ledger import Ledger
+from shapeflow.object_store import ObjectStore
+from shapeflow.odr.hooks import StrategyBundle
+from shapeflow.runtime.provider_server import (
     ProviderConfig,
     ProviderService,
     RoleTokens,
     serve_forever,
 )
-from shapeflow_p1.secrets import SecretRedactor
-from shapeflow_p1.strategies.p0 import VendorCloseStrategy, VendorPageStrategy
+from shapeflow.secrets import SecretRedactor
+from shapeflow.strategies.p0 import VendorCloseStrategy, VendorPageStrategy
 
 from fixtures.fake_engine import FakeEngine
 from fixtures.frozen_world import write_frozen_world
@@ -131,7 +131,7 @@ async def test_a_complete_p0_task_runs_with_no_network(frozen_world, tmp_path, n
         )
         import asyncio
 
-        from shapeflow_p1.providers.provider_client import ProviderClient
+        from shapeflow.providers.provider_client import ProviderClient
 
         await ProviderClient(base_url=base, token=TOKENS["runner"]).register_cell(
             cell_token=cell.cell_token, run_id=cell.run_id, task_id=cell.task_id,
@@ -187,7 +187,7 @@ async def test_the_frozen_search_never_reaches_the_network(frozen_world, tmp_pat
     task_id = acquired_task_ids(settings)[0]
     pool, snapshots = load_frozen_pool(settings, task_id)
 
-    from shapeflow_p1.campaign.graph_driver import install_frozen_search
+    from shapeflow.campaign.graph_driver import install_frozen_search
 
     with install_frozen_search(pool, snapshots, max_results=5):
         import open_deep_research.utils as vendor_utils
@@ -215,7 +215,7 @@ async def test_the_search_binding_is_restored_after_a_failure(frozen_world, tmp_
 
     import open_deep_research.utils as vendor_utils
 
-    from shapeflow_p1.campaign.graph_driver import install_frozen_search
+    from shapeflow.campaign.graph_driver import install_frozen_search
 
     original = vendor_utils.tavily_search_async
     with pytest.raises(RuntimeError):

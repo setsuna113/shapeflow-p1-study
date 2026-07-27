@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/selector_output.schema.json",
+  "$id": "https://shapeflow/schemas/selector_output.schema.json",
   "title": "SelectorOutput",
   "description": "What a P1 selector is allowed to emit. Identifiers here are SHORT PROMPT LABELS (E1, E2, Q1), not 64-hex digests: span identifiers are rendered into the selector prompt, and selector tokens are the quantity this study measures, so paying ~16-32 tokens per candidate ID would inflate the P1 arm's cost with an artifact of our own ID scheme. The adapter resolves each label against the exact candidate set offered in that call and rejects anything outside it, so the cheap form loses no validation strength. Labels are unique within one call only; the resolved span_id/visible_span_id is the global identity.",
   "oneOf": [

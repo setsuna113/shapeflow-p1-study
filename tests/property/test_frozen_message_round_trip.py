@@ -23,8 +23,8 @@ from __future__ import annotations
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from shapeflow_p1.odr.adapter import _canon, freeze_messages, thaw_message
-from shapeflow_p1.odr.checkpoints import (
+from shapeflow.odr.adapter import _canon, freeze_messages, thaw_message
+from shapeflow.odr.checkpoints import (
     CCheckpoint,
     EvidenceManifest,
     FrozenMessage,

@@ -18,5 +18,5 @@ uv pip install --python .venv/bin/python -q \
 uv pip install --python .venv/bin/python -q -e . --no-deps
 
 echo "dev venv ready: $(.venv/bin/python --version)"
-.venv/bin/python -c "import shapeflow_p1, pathlib; \
-print('shapeflow_p1 importable from', pathlib.Path(shapeflow_p1.__file__).parent)"
+.venv/bin/python -c "import shapeflow, pathlib; \
+print('shapeflow importable from', pathlib.Path(shapeflow.__file__).parent)"

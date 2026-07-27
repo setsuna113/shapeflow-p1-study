@@ -57,8 +57,8 @@ async def run(mode: str, scenario: str) -> dict:
             handle = None
             markers = []
             if mode == "bound":
-                from shapeflow_p1.odr import vendor_hooks as hooks
-                from shapeflow_p1.p1.view import compact_publication_handle
+                from shapeflow.odr import vendor_hooks as hooks
+                from shapeflow.p1.view import compact_publication_handle
 
                 binding = hooks.current_run()
                 coordinate = binding.researcher_coordinate
@@ -110,7 +110,7 @@ async def run(mode: str, scenario: str) -> dict:
 
     parent_sidecar = None
     if mode == "bound":
-        from shapeflow_p1.odr.vendor_hooks import (
+        from shapeflow.odr.vendor_hooks import (
             RunBinding,
             bind_run,
             current_published_tool_provenance,

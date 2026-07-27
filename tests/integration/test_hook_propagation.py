@@ -118,7 +118,7 @@ async def test_the_close_hook_fires_in_the_full_graph(monkeypatch):
     monkeypatch.setattr(u, "tavily_search_async", fake_search)
 
     fired = {"close": 0, "page": 0}
-    import shapeflow_p1.odr.vendor_hooks as vh
+    import shapeflow.odr.vendor_hooks as vh
 
     real_close = vh.run_close_strategy
 
@@ -128,18 +128,18 @@ async def test_the_close_hook_fires_in_the_full_graph(monkeypatch):
 
     monkeypatch.setattr(vh, "run_close_strategy", counting_close)
 
-    from shapeflow_p1.campaign.graph_driver import CellSpec, run_cell
-    from shapeflow_p1.campaign.settings import Settings
-    from shapeflow_p1.odr.hooks import StrategyBundle
-    from shapeflow_p1.strategies.close_visible import CloseSelectionStrategy, CloseStrategyConfig
-    from shapeflow_p1.strategies.p0 import VendorPageStrategy
-    from shapeflow_p1.evidence.chunkers import WhitespaceTokenizer
+    from shapeflow.campaign.graph_driver import CellSpec, run_cell
+    from shapeflow.campaign.settings import Settings
+    from shapeflow.odr.hooks import StrategyBundle
+    from shapeflow.strategies.close_visible import CloseSelectionStrategy, CloseStrategyConfig
+    from shapeflow.strategies.p0 import VendorPageStrategy
+    from shapeflow.evidence.chunkers import WhitespaceTokenizer
 
     settings = Settings.load(REPO, data_root=Path("/tmp/hook-probe"))
 
     class EchoSelector:
         async def select(self, *, task_ctx, view):
-            from shapeflow_p1.strategies.pipeline import WorkRecord
+            from shapeflow.strategies.pipeline import WorkRecord
             ids = [c.label for c in view.candidates[:2]]
             return ({"contract": "P1_ID", "selected_ids": ids},
                     WorkRecord(selector_calls=1, completion_tokens=5))
@@ -151,9 +151,9 @@ async def test_the_close_hook_fires_in_the_full_graph(monkeypatch):
         selector=EchoSelector(), tokenizer=WhitespaceTokenizer())
     bundle = StrategyBundle(variant_id="P0+C01", page=VendorPageStrategy({}), close=close)
 
-    from shapeflow_p1.world.snapshot_store import SnapshotStore
-    from shapeflow_p1.world.source_pool import QueryResponse, RawResult, build_source_pool
-    from shapeflow_p1.object_store import ObjectStore
+    from shapeflow.world.snapshot_store import SnapshotStore
+    from shapeflow.world.source_pool import QueryResponse, RawResult, build_source_pool
+    from shapeflow.object_store import ObjectStore
 
     store = SnapshotStore(ObjectStore(Path("/tmp/hook-probe-obj")))
     pool = build_source_pool("T", [QueryResponse("qs", "q", (

@@ -2,12 +2,12 @@
 
 Steward, runner and evaluator processes get their outbound access from here. The methods
 return transports shaped exactly like the ones
-:class:`~shapeflow_p1.acquire.tavily_client.TavilyCaptureClient` and
-:class:`~shapeflow_p1.bench.grading.judge_client.DeepSeekJudge` already accept, so those clients
+:class:`~shapeflow.acquire.tavily_client.TavilyCaptureClient` and
+:class:`~shapeflow.bench.grading.judge_client.DeepSeekJudge` already accept, so those clients
 are reused unchanged rather than reimplemented against a second code path -- two
 implementations of "call Tavily" would eventually disagree about what was frozen.
 
-Every body leaves here with :data:`~shapeflow_p1.runtime.provider_server.PROVIDER_KEY_PLACEHOLDER`
+Every body leaves here with :data:`~shapeflow.runtime.provider_server.PROVIDER_KEY_PLACEHOLDER`
 where a credential would be. That is not a convenience: it means a real key was never in this
 process's memory, so it cannot appear in its argv, its logs, its core dump or its exception text.
 

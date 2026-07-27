@@ -7,7 +7,7 @@ import pytest
 
 import contextvars
 
-from shapeflow_p1.odr.checkpoints import (
+from shapeflow.odr.checkpoints import (
     CCheckpoint,
     EvidenceManifest,
     FrozenMessage,
@@ -17,8 +17,8 @@ from shapeflow_p1.odr.checkpoints import (
     VendorVisibleResult,
     fork_key,
 )
-from shapeflow_p1.odr.close_reason import CloseReason, classify_close
-from shapeflow_p1.odr.hooks import (
+from shapeflow.odr.close_reason import CloseReason, classify_close
+from shapeflow.odr.hooks import (
     ResearcherHandoff,
     StrategyBundle,
     TaskContext,
@@ -26,7 +26,7 @@ from shapeflow_p1.odr.hooks import (
     bind_strategies,
     current_strategies,
 )
-from shapeflow_p1.odr.p0_parity import (
+from shapeflow.odr.p0_parity import (
     PublishBatch,
     ModelRequest,
     RunTrace,
@@ -163,8 +163,8 @@ def test_raw_content_is_referenced_not_inlined():
 
 
 def test_deferred_page_addresses_exact_vendor_truncated_bytes_and_occurrence():
-    from shapeflow_p1.hashing import sha256_hex
-    from shapeflow_p1.odr.adapter import DeferredPageBatch
+    from shapeflow.hashing import sha256_hex
+    from shapeflow.odr.adapter import DeferredPageBatch
 
     raw = "abcdefghij"
     batch = DeferredPageBatch(
@@ -327,7 +327,7 @@ def test_a_swallowed_exception_is_a_parity_difference():
 def test_strategy_binding_is_released_even_when_an_arm_raises():
     """A binding that survived an exception would execute one arm's strategy under another
     arm's id -- a mislabelled observation, not a crash, and undetectable downstream."""
-    from shapeflow_p1.odr.hooks import StrategyBundle, current_strategies, strategies_bound
+    from shapeflow.odr.hooks import StrategyBundle, current_strategies, strategies_bound
 
     bundle = StrategyBundle(variant_id="H02", page=object(), close=object())
     with pytest.raises(RuntimeError):
@@ -342,7 +342,7 @@ def test_both_strategy_protocols_are_async():
     the event loop, changing the batching and timing this study measures."""
     import inspect
 
-    from shapeflow_p1.odr.hooks import PageTransformStrategy, ResearchCloseStrategy
+    from shapeflow.odr.hooks import PageTransformStrategy, ResearchCloseStrategy
 
     assert inspect.iscoroutinefunction(PageTransformStrategy.transform_tool_batch)
     assert inspect.iscoroutinefunction(ResearchCloseStrategy.close_researcher)
@@ -354,7 +354,7 @@ def test_frozen_message_keeps_the_fields_a_rendered_prompt_depends_on():
     The compressor sees the rendered message list, so a dropped field is a field the clone
     lacks -- the two prompts differ by however it renders, while every hash we compute agrees.
     """
-    from shapeflow_p1.odr.checkpoints import FrozenMessage
+    from shapeflow.odr.checkpoints import FrozenMessage
 
     keys = set(FrozenMessage(role="ai", content="x").content_dict())
     assert {"additional_kwargs", "response_metadata", "usage_metadata", "artifact",
@@ -381,14 +381,14 @@ def test_close_reason_divergence_fails_parity():
 
 
 def _sampling():
-    from shapeflow_p1.odr.checkpoints import SamplingEnvelope
+    from shapeflow.odr.checkpoints import SamplingEnvelope
 
     return SamplingEnvelope(model="Qwen3-14B-AWQ", temperature=0.3, top_p=1.0,
                             max_tokens=4096, seed=11)
 
 
 def _c_checkpoint():
-    from shapeflow_p1.odr.checkpoints import (
+    from shapeflow.odr.checkpoints import (
         CCheckpoint,
         EvidenceManifest,
         FrozenMessage,
@@ -420,8 +420,8 @@ def _c_checkpoint():
 def test_a_checkpoint_round_trips_byte_for_byte(tmp_path):
     """The forked-state design says every variant starts from byte-identical input. That is
     a claim about a document that can be read back, not about an object in memory."""
-    from shapeflow_p1.canonical import canonical_json
-    from shapeflow_p1.odr.checkpoints import CheckpointStore, to_document
+    from shapeflow.canonical import canonical_json
+    from shapeflow.odr.checkpoints import CheckpointStore, to_document
 
     original = _c_checkpoint()
     store = CheckpointStore(tmp_path / "checkpoints")
@@ -442,8 +442,8 @@ def test_an_h_checkpoint_round_trips_including_its_researcher_coordinate(tmp_pat
     rebuilt with ``None``, hashed differently, and tripped its own digest check on load. The
     store was effectively write-only for exactly the boundaries a fork has to start from.
     """
-    from shapeflow_p1.canonical import canonical_json
-    from shapeflow_p1.odr.checkpoints import CheckpointStore, to_document
+    from shapeflow.canonical import canonical_json
+    from shapeflow.odr.checkpoints import CheckpointStore, to_document
 
     original = _h_checkpoint(researcher_coordinate=(2, 1, "call-abc"))
     store = CheckpointStore(tmp_path / "checkpoints")
@@ -458,7 +458,7 @@ def test_an_h_checkpoint_round_trips_including_its_researcher_coordinate(tmp_pat
 
 def test_an_h_checkpoint_without_a_coordinate_still_round_trips(tmp_path):
     """``None`` is reserved for direct researcher-subgraph probes and must stay ``None``."""
-    from shapeflow_p1.odr.checkpoints import CheckpointStore
+    from shapeflow.odr.checkpoints import CheckpointStore
 
     original = _h_checkpoint()
     store = CheckpointStore(tmp_path / "checkpoints")
@@ -486,7 +486,7 @@ def test_a_checkpoint_document_that_does_not_rebuild_to_its_digest_is_refused(tm
 
     import pytest
 
-    from shapeflow_p1.odr.checkpoints import CheckpointStore, from_document, to_document
+    from shapeflow.odr.checkpoints import CheckpointStore, from_document, to_document
 
     body = to_document(_c_checkpoint())
     body["close_reason"] = "NO_TOOL_CALL"          # the state changed; the digest did not
@@ -500,7 +500,7 @@ def test_the_stored_document_validates_against_the_schema(tmp_path):
 
     from jsonschema import Draft202012Validator
 
-    from shapeflow_p1.odr.checkpoints import to_document
+    from shapeflow.odr.checkpoints import to_document
 
     repo = Path(__file__).resolve().parents[2]
     schema = json.loads((repo / "schemas" / "checkpoint.schema.json").read_text())
@@ -517,7 +517,7 @@ def test_the_summarize_timeout_binding_does_not_leak_out_of_a_cell():
     """
     import os
 
-    from shapeflow_p1.campaign.graph_driver import _summarize_timeout_applied
+    from shapeflow.campaign.graph_driver import _summarize_timeout_applied
 
     os.environ.pop("SHAPEFLOW_SUMMARIZE_TIMEOUT_S", None)
     with _summarize_timeout_applied("300.0"):

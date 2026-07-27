@@ -13,8 +13,8 @@ from collections import Counter
 
 import pytest
 
-from shapeflow_p1.campaign.phases import PhaseError, PhaseStore
-from shapeflow_p1.campaign.schedule import (
+from shapeflow.campaign.phases import PhaseError, PhaseStore
+from shapeflow.campaign.schedule import (
     ArmSpec,
     block_is_complete,
     block_is_terminal,
@@ -23,8 +23,8 @@ from shapeflow_p1.campaign.schedule import (
     cells_needing_work,
     freeze_record,
 )
-from shapeflow_p1.experiment.ledger import Ledger, LedgerError
-from shapeflow_p1.experiment.state_machine import IllegalPhaseTransition, Phase
+from shapeflow.experiment.ledger import Ledger, LedgerError
+from shapeflow.experiment.state_machine import IllegalPhaseTransition, Phase
 
 ARMS = [
     ArmSpec("P0", "P0", "P0"),
@@ -384,9 +384,9 @@ def test_the_gpu_smoke_phase_is_unreachable_without_the_gates_before_it(tmp_path
     """The exact shape of the bug: only three phases were ever recorded, and the first legal
     edge out of NEW is DOCTOR_PASSED. A *passing* canary crashed on success -- begin() raised
     -- while a failing one exited cleanly, and run-screen could not start at all."""
-    from shapeflow_p1.campaign.phases import IllegalPhaseTransition, PhaseStore
-    from shapeflow_p1.experiment.ledger import Ledger
-    from shapeflow_p1.experiment.state_machine import Phase
+    from shapeflow.campaign.phases import IllegalPhaseTransition, PhaseStore
+    from shapeflow.experiment.ledger import Ledger
+    from shapeflow.experiment.state_machine import Phase
 
     ledger = Ledger(str(tmp_path / "l.sqlite"))
     phases = PhaseStore(ledger, protocol_sha="p")
@@ -396,9 +396,9 @@ def test_the_gpu_smoke_phase_is_unreachable_without_the_gates_before_it(tmp_path
 
 
 def test_the_recorded_gates_make_the_smoke_and_screen_phases_reachable(tmp_path):
-    from shapeflow_p1.campaign.phases import PhaseStore
-    from shapeflow_p1.experiment.ledger import Ledger
-    from shapeflow_p1.experiment.state_machine import Phase
+    from shapeflow.campaign.phases import PhaseStore
+    from shapeflow.experiment.ledger import Ledger
+    from shapeflow.experiment.state_machine import Phase
 
     ledger = Ledger(str(tmp_path / "l.sqlite"))
     phases = PhaseStore(ledger, protocol_sha="p")

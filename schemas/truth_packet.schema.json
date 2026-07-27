@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/truth_packet.schema.json",
+  "$id": "https://shapeflow/schemas/truth_packet.schema.json",
   "title": "TruthPacket",
   "description": "The frozen ground truth a task is scored against. EVALUATOR-ONLY: it never reaches a selector, aggregator, or preflight. Every accepted atom binds to exact source spans; a fact with no span cannot enter accepted truth, a contradiction has spans on both sides, and a gap binds to a real query attempt rather than a model's assertion. A machine-authored packet is marked MACHINE_CANDIDATE_PENDING_HUMAN_AUDIT and its verdicts stay PROVISIONAL until the audit gate.",
   "type": "object",

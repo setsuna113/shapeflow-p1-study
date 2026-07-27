@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from shapeflow_p1.hashing import (
+from shapeflow.hashing import (
     content_id,
     derive_id,
     occurrence_id,

@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.experiment.budget import Budget, BudgetCapRaised, BudgetExceeded
-from shapeflow_p1.experiment.ledger import Ledger
-from shapeflow_p1.object_store import ObjectStore
-from shapeflow_p1.providers.external_call_ledger import (
+from shapeflow.experiment.budget import Budget, BudgetCapRaised, BudgetExceeded
+from shapeflow.experiment.ledger import Ledger
+from shapeflow.object_store import ObjectStore
+from shapeflow.providers.external_call_ledger import (
     CallAlreadyCommitted,
     CallNotReplayable,
     ExternalCallLedger,
     IllegalCallTransition,
 )
-from shapeflow_p1.secrets import SecretRedactor
+from shapeflow.secrets import SecretRedactor
 
 
 def _budget(tmp_path, caps):
@@ -328,8 +328,8 @@ def test_a_v1_database_keeps_every_row_it_already_paid_for(tmp_path):
 
 
 def _capped_budget(tmp_path):
-    from shapeflow_p1.experiment.budget import Budget
-    from shapeflow_p1.experiment.ledger import Ledger
+    from shapeflow.experiment.budget import Budget
+    from shapeflow.experiment.ledger import Ledger
 
     ledger = Ledger(str(tmp_path / "l.sqlite"))
     budget = Budget(ledger)
@@ -339,7 +339,7 @@ def _capped_budget(tmp_path):
 
 def test_a_config_edit_alone_cannot_widen_a_ceiling(tmp_path):
     """The guard that matters: loading a bigger number must not spend against it."""
-    from shapeflow_p1.experiment.budget import BudgetCapRaised
+    from shapeflow.experiment.budget import BudgetCapRaised
 
     _ledger, budget = _capped_budget(tmp_path)
     with pytest.raises(BudgetCapRaised):

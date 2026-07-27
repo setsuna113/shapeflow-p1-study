@@ -13,20 +13,37 @@ echo "== package is installed (not just on sys.path) =="
 "$PY" - <<'PYEOF'
 import pathlib, sys
 try:
-    import shapeflow_p1
+    import shapeflow
 except ModuleNotFoundError:
-    sys.exit("shapeflow_p1 is not installed in .venv -- run scripts/dev_setup.sh")
-print("shapeflow_p1 <-", pathlib.Path(shapeflow_p1.__file__).parent)
+    sys.exit("shapeflow is not installed in .venv -- run scripts/dev_setup.sh")
+print("shapeflow <-", pathlib.Path(shapeflow.__file__).parent)
 PYEOF
 
 echo "== import every module =="
 "$PY" - <<'PYEOF'
-import importlib, pkgutil, shapeflow_p1
+import importlib, pkgutil, shapeflow
 ok = 0
-for m in pkgutil.walk_packages(shapeflow_p1.__path__, "shapeflow_p1."):
+for m in pkgutil.walk_packages(shapeflow.__path__, "shapeflow."):
     importlib.import_module(m.name); ok += 1
 print(f"imported {ok} submodules cleanly")
 PYEOF
+
+echo "== the patched vendor tree is the tree we say it is =="
+# The patch injects our imports into vendor bytes, so a package rename, a moved module or an
+# edited hunk all change the patched tree -- and `patched_tree_sha` is inside the approval
+# binding. Materializing here means a divergence surfaces as a local failure with an obvious
+# cause, rather than as an approval that mysteriously stops verifying on the run host, where the
+# tempting fix is to re-mint the approval instead of re-running parity.
+if [ -d vendor/open_deep_research/.git ]; then
+  bash scripts/materialize_vendor.sh >/dev/null || {
+    echo "PATCHED TREE MISMATCH: scripts/materialize_vendor.sh disagrees with"
+    echo "patches/patched_tree.sha256. Regenerate the hash and re-run test-p0-parity;"
+    echo "do not re-mint the approval to make this pass."
+    exit 1; }
+  echo "patched tree matches patches/patched_tree.sha256"
+else
+  echo "vendor submodule not checked out; skipping (run git submodule update --init)"
+fi
 
 echo "== shell syntax =="
 # The launch gate, the host installer and the supervisor are shell. A syntax error in any of

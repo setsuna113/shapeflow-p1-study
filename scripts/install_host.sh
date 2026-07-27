@@ -17,7 +17,7 @@ TOKEN_DIR="/etc/shapeflow-tokens"
 VLLM_VENV="${SHAPEFLOW_VLLM_VENV:-/storage/nvme/drbat/.venv}"
 MODEL_PATH="${SHAPEFLOW_MODEL_PATH:-/storage/nvme/reme/models/Qwen3-14B-AWQ}"
 # The permitted devices, mirroring configs/stack.yaml host.gpu_uuid_pool. Which one a run
-# actually leases is resolved from what is idle at launch (shapeflow_p1.ops.gpu_pool) and
+# actually leases is resolved from what is idle at launch (shapeflow.ops.gpu_pool) and
 # recorded by freeze-stack into the stack manifest -- it is not decided here.
 SHAPEFLOW_GPU_UUID_POOL="${SHAPEFLOW_GPU_UUID_POOL:-\
 GPU-ef013951-e496-78da-da70-a5a289dcc634 \
@@ -146,7 +146,7 @@ chown -R sfsteward:sfsteward "$DATA_ROOT/approvals"
 find "$DATA_ROOT/approvals" -type d -exec chmod 0700 {} +
 # 0640, not 0600: chmod sets the ACL *mask* on a file that carries an ACL, and a 0600 mask is
 # `---`, which cancels every u:<role>:r-x entry readonly_acl grants below. The 0700 directory
-# is the real gate; see shapeflow_p1.fsmode.
+# is the real gate; see shapeflow.fsmode.
 find "$DATA_ROOT/approvals" -type f -exec chmod 0640 {} +
 # sfprovider reads it too. It is the identity that enforces the budget ceilings, so an
 # authorized cap raise has to be checkable against the approval that granted it -- otherwise
@@ -173,7 +173,7 @@ readonly_acl "$DATA_ROOT/steward/acquisition" sfevaluator
 # it (`mask &= mode >> 3`), so 0600 yields mask `---` and every named-user grant below becomes
 # `#effective:---`. The umask is genuinely ignored when a default ACL exists, which is why the
 # `umask 077` probes passed while the Python writers -- which ask for 0600 explicitly through
-# tempfile.mkstemp -- did not. See shapeflow_p1.fsmode.
+# tempfile.mkstemp -- did not. See shapeflow.fsmode.
 mkdir -p "$DATA_ROOT/runner"/{runs,object_store,checkpoints,frozen_corpus}
 chown -R sfrunner:sfrunner "$DATA_ROOT/runner"
 find "$DATA_ROOT/runner" -type d -exec chmod 0700 {} +
@@ -383,7 +383,7 @@ new_probe_at_mode() {  # <owner-uid> <path> <octal-mode>
     "$2" "$3"
 }
 # The real publication sequence: create restricted, widen to 0640 before publishing, exactly as
-# shapeflow_p1.fsmode.chmod_shared does.
+# shapeflow.fsmode.chmod_shared does.
 new_shared_probe() {  # <owner-uid> <path>
   new_probe_at_mode "$1" "$2" 0600
   runuser -u "$1" -- chmod 0640 "$2"

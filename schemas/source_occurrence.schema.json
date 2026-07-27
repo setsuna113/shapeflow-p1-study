@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/source_occurrence.schema.json",
+  "$id": "https://shapeflow/schemas/source_occurrence.schema.json",
   "title": "SourceOccurrence",
   "description": "One URL, at one rank, in one specific query's result set. Deliberately independent of content: a page reachable from three queries is three occurrences over one CanonicalSnapshot. Collapsing them would erase the citation lineage every quality metric is computed against.",
   "type": "object",

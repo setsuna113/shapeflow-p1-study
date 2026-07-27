@@ -20,7 +20,7 @@ comparison the study exists to make. So each span carries both:
 
 The adapter maps labels back to ``span_id`` deterministically and rejects any label
 outside the offered candidate set, so the short form never weakens validation. Label
-allocation lives in :mod:`shapeflow_p1.evidence.identity` because it needs the candidate
+allocation lives in :mod:`shapeflow.evidence.identity` because it needs the candidate
 set; this module only provides the digests.
 """
 
@@ -44,6 +44,12 @@ __all__ = [
 #: Bump only with a protocol version bump: changing it changes every derived ID.
 ID_SCHEME_VERSION = "v1"
 
+#: Deliberately still the old name, and deliberately not swept up in the package rename. This
+#: byte string is domain separation for every derived ID, so editing it is not a rename -- it
+#: silently re-derives every content id, query snapshot id and occurrence id in the system. It
+#: changes once, together with ``ID_SCHEME_VERSION``, when the protocol document it belongs to
+#: changes; a cosmetic edit here would be the same act without the version bump that makes it
+#: visible.
 _PREFIX = b"shapeflow-p1"
 _SEP = b"\x1f"  # ASCII unit separator; forbidden inside domain tags below.
 

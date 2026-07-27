@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from shapeflow_p1.p1 import handle_codec
-from shapeflow_p1.p1.handle_codec import (
+from shapeflow.p1 import handle_codec
+from shapeflow.p1.handle_codec import (
     FROZEN_RADICES,
     HandleDomainError,
     HandleFormatError,
@@ -217,8 +217,8 @@ def test_the_domain_proof_enumerates_and_reports_the_worst_case(tmp_path):
     The predecessor's cap held for most handles and failed for every one production actually
     emitted, so a sampled check would have passed while P1 was completely inert.
     """
-    from shapeflow_p1.evidence.chunkers import WhitespaceTokenizer
-    from shapeflow_p1.p1.handle_proof import HandleProofError, load_or_prove, prove_handle_domain
+    from shapeflow.evidence.chunkers import WhitespaceTokenizer
+    from shapeflow.p1.handle_proof import HandleProofError, load_or_prove, prove_handle_domain
 
     radices = HandleRadices(
         researcher_iteration=2,

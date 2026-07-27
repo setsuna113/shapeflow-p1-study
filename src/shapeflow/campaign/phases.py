@@ -1,6 +1,6 @@
 """The campaign's phase state, in the ledger, so a restart resumes rather than repeats.
 
-The pure legality rules already live in :mod:`shapeflow_p1.experiment.state_machine`. What was
+The pure legality rules already live in :mod:`shapeflow.experiment.state_machine`. What was
 missing is durability: a phase machine held in memory forgets everything a crash interrupts, and
 the campaign would either redo a phase that already spent Tavily credits or skip one that never
 finished. So the current phase and the history of transitions are rows.

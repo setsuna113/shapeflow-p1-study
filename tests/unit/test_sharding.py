@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.campaign.schedule import (
+from shapeflow.campaign.schedule import (
     ArmSpec,
     build_blocks,
     cell_key,
     freeze_root_record,
 )
-from shapeflow_p1.campaign.sharding import (
+from shapeflow.campaign.sharding import (
     Lane,
     ShardMergeError,
     assign_tasks_to_lanes,
@@ -24,8 +24,8 @@ from shapeflow_p1.campaign.sharding import (
     merge_shard_freeze_roots,
     verify_shard_manifest,
 )
-from shapeflow_p1.canonical import canonical_json
-from shapeflow_p1.hashing import sha256_hex
+from shapeflow.canonical import canonical_json
+from shapeflow.hashing import sha256_hex
 
 BINDING = "e" * 64
 ARMS = [
@@ -336,7 +336,7 @@ def test_freeze_root_record_still_requires_the_whole_schedule():
 
 
 def _settings(tmp_path, monkeypatch, lane=None):
-    from shapeflow_p1.campaign.settings import Settings
+    from shapeflow.campaign.settings import Settings
 
     if lane is None:
         monkeypatch.delenv("SHAPEFLOW_LANE", raising=False)
@@ -390,7 +390,7 @@ def test_a_lane_outside_the_frozen_count_is_refused(tmp_path, monkeypatch):
 
 def test_a_provider_lane_without_the_budget_refuses_the_paid_routes():
     """Refused at the route, not omitted from a runbook."""
-    from shapeflow_p1.runtime.provider_server import PAID_UPSTREAM_ROUTES
+    from shapeflow.runtime.provider_server import PAID_UPSTREAM_ROUTES
 
     assert PAID_UPSTREAM_ROUTES == {"exa.search", "tavily.search", "deepseek.chat"}
     # chat.completions is local inference and must stay available on every lane, or three of the
@@ -404,7 +404,7 @@ def test_a_lane_runner_executes_and_freezes_only_its_own_blocks():
     The merge catches a lane that ran another lane's block, but catching it here means the GPU
     time is never spent in the first place.
     """
-    from shapeflow_p1.campaign.runner import RunnerConfig
+    from shapeflow.campaign.runner import RunnerConfig
 
     manifest = _manifest()
     body = _shard_manifest(manifest)

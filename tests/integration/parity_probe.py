@@ -268,10 +268,10 @@ async def run(
     captured_checkpoints: list = []
     captured_events: list[dict] = []
     if strategy == "p0":
-        from shapeflow_p1.odr.hooks import StrategyBundle, strategies_bound
-        from shapeflow_p1.odr.vendor_hooks import RunBinding, bind_run
-        from shapeflow_p1.p1.selectors import Candidate  # noqa: F401  (import sanity)
-        from shapeflow_p1.strategies.p0 import VendorCloseStrategy, VendorPageStrategy
+        from shapeflow.odr.hooks import StrategyBundle, strategies_bound
+        from shapeflow.odr.vendor_hooks import RunBinding, bind_run
+        from shapeflow.p1.selectors import Candidate  # noqa: F401  (import sanity)
+        from shapeflow.strategies.p0 import VendorCloseStrategy, VendorPageStrategy
 
         page = VendorPageStrategy({})
         strategy_cm = strategies_bound(
@@ -332,7 +332,7 @@ async def run(
         ),
     }
     if capture_checkpoints:
-        from shapeflow_p1.strategies.visible_view import build_visible_view
+        from shapeflow.strategies.visible_view import build_visible_view
 
         trace["captured_c_checkpoints"] = [
             {

@@ -1,4 +1,4 @@
-"""The `shapeflow-p1` command surface (plan §19).
+"""The `shapeflow` command surface (plan §19).
 
 The commands map one-to-one to campaign phases, and each asserts the identity it must run as:
 the steward acquires and freezes, the runner executes treatments, the evaluator reads truth. A
@@ -24,7 +24,7 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer(add_completion=False, help="ShapeFlow P1 Week-1 study CLI")
+app = typer.Typer(add_completion=False, help="ShapeFlow experiment CLI")
 
 _REPO = Path(__file__).resolve().parents[2]
 _CONFIGS = {
@@ -406,7 +406,7 @@ def invalidate_treatment(
         "sealed_tree": str(root),
         "artifact_counts": inventory,
         "protocol_sha_at_sealing": __import__(
-            "shapeflow_p1.protocol", fromlist=["protocol_sha"]).protocol_sha(_REPO),
+            "shapeflow.protocol", fromlist=["protocol_sha"]).protocol_sha(_REPO),
         "analysis_permitted": False,
     }
     body["content_sha256"] = _content_sha(body)

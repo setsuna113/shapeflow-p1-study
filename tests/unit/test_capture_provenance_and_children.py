@@ -9,24 +9,24 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import ToolMessage
 
-from shapeflow_p1.odr.adapter import (
+from shapeflow.odr.adapter import (
     BatchOutcome,
     DeferredPageBatch,
     PageFailure,
     _resolve_failure,
 )
-from shapeflow_p1.odr.checkpoints import (
+from shapeflow.odr.checkpoints import (
     FrozenMessage,
     HCheckpoint,
     SamplingEnvelope,
     VendorVisibleResult,
 )
-from shapeflow_p1.odr.hooks import (
+from shapeflow.odr.hooks import (
     ResearcherHandoff,
     StrategyBundle,
     strategies_bound,
 )
-from shapeflow_p1.odr.vendor_hooks import (
+from shapeflow.odr.vendor_hooks import (
     RunBinding,
     bind_run,
     current_published_tool_provenance,
@@ -37,11 +37,11 @@ from shapeflow_p1.odr.vendor_hooks import (
     refine_child_research_tasks,
     run_close_strategy,
 )
-from shapeflow_p1.p1 import handle_codec
-from shapeflow_p1.p1.view import compact_publication_handle
-from shapeflow_p1.strategies.p0 import VendorPageStrategy
-from shapeflow_p1.strategies.page_h import PageSelectionStrategy
-from shapeflow_p1.strategies.visible_view import build_visible_view
+from shapeflow.p1 import handle_codec
+from shapeflow.p1.view import compact_publication_handle
+from shapeflow.strategies.p0 import VendorPageStrategy
+from shapeflow.strategies.page_h import PageSelectionStrategy
+from shapeflow.strategies.visible_view import build_visible_view
 
 
 SAMPLING = SamplingEnvelope(
@@ -155,7 +155,7 @@ def test_p1_lineage_contains_only_final_published_spans_and_snippet_passthrough(
 
 @pytest.mark.asyncio
 async def test_atomic_publish_sidecar_enriches_only_the_frozen_c_checkpoint(monkeypatch):
-    import shapeflow_p1.odr.vendor_hooks as vendor_hooks
+    import shapeflow.odr.vendor_hooks as vendor_hooks
 
     captured = []
 
@@ -230,7 +230,7 @@ async def test_atomic_publish_sidecar_enriches_only_the_frozen_c_checkpoint(monk
 
 @pytest.mark.asyncio
 async def test_multi_turn_sidecar_accumulates_and_reused_id_conflict_fails_closed(monkeypatch):
-    import shapeflow_p1.odr.vendor_hooks as vendor_hooks
+    import shapeflow.odr.vendor_hooks as vendor_hooks
 
     outcomes = iter((
         BatchOutcome(

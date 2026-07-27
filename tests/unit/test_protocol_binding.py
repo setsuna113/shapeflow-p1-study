@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from shapeflow_p1.protocol import (
+from shapeflow.protocol import (
     PROTOCOL_DOCUMENT,
     ApprovalError,
     compute_binding,
@@ -81,7 +81,7 @@ def test_an_approval_that_pins_a_stale_variant_registry_is_rejected(tmp_path):
 def test_the_vendor_pin_comes_from_the_gitlink_not_the_submodule_head():
     """The gitlink is what this repository pins; the submodule's HEAD is wherever someone
     left it. Reading the latter makes drift undetectable by construction."""
-    from shapeflow_p1.protocol import read_vendor_pin
+    from shapeflow.protocol import read_vendor_pin
 
     pin = read_vendor_pin(REPO)
     assert len(pin) == 40 and all(c in "0123456789abcdef" for c in pin)
@@ -91,7 +91,7 @@ def test_an_unobservable_vendor_pin_is_fatal_rather_than_empty(tmp_path):
     """An empty string used to be written into the approval and compared against itself."""
     import pytest
 
-    from shapeflow_p1.protocol import VendorCommitUnobservable, read_vendor_pin
+    from shapeflow.protocol import VendorCommitUnobservable, read_vendor_pin
 
     with pytest.raises(VendorCommitUnobservable):
         read_vendor_pin(tmp_path)
@@ -102,7 +102,7 @@ def test_an_approval_that_names_a_different_commit_is_refused(tmp_path):
 
     import pytest
 
-    from shapeflow_p1.protocol import (
+    from shapeflow.protocol import (
         ApprovalError,
         compute_binding,
         read_head_commit,
@@ -128,7 +128,7 @@ def test_an_approval_that_names_a_different_commit_is_refused(tmp_path):
 def test_an_approval_bound_to_the_live_head_verifies(tmp_path):
     import json
 
-    from shapeflow_p1.protocol import compute_binding, read_head_commit, verify_approval_file
+    from shapeflow.protocol import compute_binding, read_head_commit, verify_approval_file
 
     binding = compute_binding(REPO, approved_commit=read_head_commit(REPO))
     approval = tmp_path / "launch_approval.json"
@@ -142,9 +142,9 @@ def test_an_approval_bound_to_the_live_head_verifies(tmp_path):
 
 
 def test_launcher_claim_must_equal_the_independently_verified_binding(tmp_path, monkeypatch):
-    import shapeflow_p1.protocol as protocol_module
+    import shapeflow.protocol as protocol_module
 
-    from shapeflow_p1.protocol import read_head_commit
+    from shapeflow.protocol import read_head_commit
 
     monkeypatch.setattr(protocol_module, "_require_clean_execution_tree", lambda _repo: None)
     binding = compute_binding(REPO, approved_commit=read_head_commit(REPO))
@@ -166,13 +166,13 @@ def test_launcher_claim_must_equal_the_independently_verified_binding(tmp_path, 
 def test_execution_binding_refuses_dirty_source_bytes(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    import shapeflow_p1.protocol as protocol_module
+    import shapeflow.protocol as protocol_module
 
     monkeypatch.setattr(
         protocol_module,
         "_git",
         lambda *_args: SimpleNamespace(
-            returncode=0, stdout=" M src/shapeflow_p1/campaign/runner.py\n", stderr=""),
+            returncode=0, stdout=" M src/shapeflow/campaign/runner.py\n", stderr=""),
     )
     with pytest.raises(ApprovalError, match="execution tree has tracked or untracked changes"):
         protocol_module._require_clean_execution_tree(tmp_path)
@@ -183,8 +183,8 @@ def test_recording_an_approval_appends_rather_than_overwrites(tmp_path, monkeypa
     against then has no artifact behind it."""
     import shutil
 
-    from shapeflow_p1 import protocol
-    from shapeflow_p1.protocol import approval_chain, write_approval_file
+    from shapeflow import protocol
+    from shapeflow.protocol import approval_chain, write_approval_file
 
     repo = tmp_path / "repo"
     (repo / "protocol").mkdir(parents=True)
@@ -221,8 +221,8 @@ def test_external_approval_has_a_non_self_referential_live_path(tmp_path, monkey
     import shutil
     import subprocess
 
-    from shapeflow_p1 import protocol
-    from shapeflow_p1.protocol import verified_execution_binding, write_approval_file
+    from shapeflow import protocol
+    from shapeflow.protocol import verified_execution_binding, write_approval_file
 
     repo = tmp_path / "repo"
     (repo / "protocol").mkdir(parents=True)
@@ -275,7 +275,7 @@ def test_external_approval_has_a_non_self_referential_live_path(tmp_path, monkey
 
 
 def test_approval_artifact_inside_repo_is_refused(tmp_path):
-    from shapeflow_p1.protocol import verify_approval_file
+    from shapeflow.protocol import verify_approval_file
 
     with pytest.raises(ApprovalError, match="self-referential approval"):
         verify_approval_file(REPO, REPO / "protocol" / "launch_approval.json")

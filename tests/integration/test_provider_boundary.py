@@ -2,7 +2,7 @@
 
 The unit tests exercise the service object; this one starts the listener, sends real requests
 through :class:`ProviderClient`, and drives the *existing*
-:class:`~shapeflow_p1.bench.grading.judge_client.DeepSeekJudge` through it unchanged. That is the
+:class:`~shapeflow.bench.grading.judge_client.DeepSeekJudge` through it unchanged. That is the
 point: there is one implementation of "call the judge", and it reaches the network only through
 the boundary.
 
@@ -19,22 +19,22 @@ import json
 
 import pytest
 
-from shapeflow_p1.bench.grading.judge_client import DeepSeekJudge, JudgeUnavailable
-from shapeflow_p1.experiment.budget import Budget
-from shapeflow_p1.experiment.ledger import Ledger
-from shapeflow_p1.object_store import ObjectStore
-from shapeflow_p1.providers.provider_client import (
+from shapeflow.bench.grading.judge_client import DeepSeekJudge, JudgeUnavailable
+from shapeflow.experiment.budget import Budget
+from shapeflow.experiment.ledger import Ledger
+from shapeflow.object_store import ObjectStore
+from shapeflow.providers.provider_client import (
     PROVIDER_KEY_PLACEHOLDER,
     ProviderCallError,
     ProviderClient,
 )
-from shapeflow_p1.runtime.provider_server import (
+from shapeflow.runtime.provider_server import (
     ProviderConfig,
     ProviderService,
     RoleTokens,
     serve_forever,
 )
-from shapeflow_p1.secrets import SecretRedactor
+from shapeflow.secrets import SecretRedactor
 
 FAKE_TAVILY = "tvly-FAKE-INTEGRATION-000000"
 FAKE_DEEPSEEK = "sk-FAKE-INTEGRATION-DEEPSEEK"

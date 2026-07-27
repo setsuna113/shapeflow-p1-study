@@ -6,15 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from shapeflow_p1.campaign.fork import (
+from shapeflow.campaign.fork import (
     ForkOutcome,
     inert_variants,
     plan_forks,
     run_forks,
     write_fork_record,
 )
-from shapeflow_p1.campaign.settings import Settings
-from shapeflow_p1.odr.checkpoints import (
+from shapeflow.campaign.settings import Settings
+from shapeflow.odr.checkpoints import (
     CCheckpoint,
     CheckpointStore,
     EvidenceManifest,

@@ -26,20 +26,20 @@ from pathlib import Path
 
 import pytest
 
-from shapeflow_p1.campaign.runner import available_tasks, questions_for
-from shapeflow_p1.campaign.schedule import ArmSpec, cell_key
-from shapeflow_p1.campaign.settings import Settings
-from shapeflow_p1.experiment.budget import Budget
-from shapeflow_p1.experiment.ledger import TERMINAL_STATES, Ledger
-from shapeflow_p1.object_store import ObjectStore
-from shapeflow_p1.runtime.provider_server import (
+from shapeflow.campaign.runner import available_tasks, questions_for
+from shapeflow.campaign.schedule import ArmSpec, cell_key
+from shapeflow.campaign.settings import Settings
+from shapeflow.experiment.budget import Budget
+from shapeflow.experiment.ledger import TERMINAL_STATES, Ledger
+from shapeflow.object_store import ObjectStore
+from shapeflow.runtime.provider_server import (
     PROVIDER_KEY_PLACEHOLDER as PLACEHOLDER,
     ProviderConfig,
     ProviderError,
     ProviderService,
     RoleTokens,
 )
-from shapeflow_p1.secrets import SecretRedactor
+from shapeflow.secrets import SecretRedactor
 
 from fixtures.fake_engine import FakeEngine
 from fixtures.frozen_world import write_frozen_world
@@ -207,7 +207,7 @@ def _integrity(runner, manifest, *, phase_id, split) -> None:
 
 async def test_a_cell_that_dies_mid_run_does_not_commit(campaign, settings, tmp_path):
     """Point 8: the graph raises during publication. The cell must not be COMMITTED."""
-    import shapeflow_p1.campaign.runner as runner_module
+    import shapeflow.campaign.runner as runner_module
 
     tasks = available_tasks(settings, "FORMATIVE_SCREEN")[:1]
     runner = campaign.runner()

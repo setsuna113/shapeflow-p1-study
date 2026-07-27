@@ -4,29 +4,29 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.evidence.chunkers import WhitespaceTokenizer, paragraph_sentence_v1
-from shapeflow_p1.evidence.identity import CandidateSet, build_evidence_span
-from shapeflow_p1.odr.hooks import TaskContext
-from shapeflow_p1.p1.aggregators import (
+from shapeflow.evidence.chunkers import WhitespaceTokenizer, paragraph_sentence_v1
+from shapeflow.evidence.identity import CandidateSet, build_evidence_span
+from shapeflow.odr.hooks import TaskContext
+from shapeflow.p1.aggregators import (
     AggregatedEvidence,
     AggregatedItem,
     coverage_budget_v1,
     global_rerank_v1,
     stable_union_v1,
 )
-from shapeflow_p1.p1.contracts import (
+from shapeflow.p1.contracts import (
     ParsedBridge,
     ParsedGap,
     SelectionContractError,
     parse_selection,
 )
-from shapeflow_p1.p1.preflight import (
+from shapeflow.p1.preflight import (
     PreflightConfig,
     bridge_novelty_errors,
     preflight,
 )
-from shapeflow_p1.p1.view import CandidateViewRecord
-from shapeflow_p1.p1.selectors import (
+from shapeflow.p1.view import CandidateViewRecord
+from shapeflow.p1.selectors import (
     Candidate,
     CpuLexicalSelector,
     LlmSelector,
@@ -410,7 +410,7 @@ def test_selector_prompt_carries_chunker_metadata():
 
 
 def test_candidate_from_span_picks_up_metadata_in_both_namespaces():
-    from shapeflow_p1.hashing import sha256_hex
+    from shapeflow.hashing import sha256_hex
     snap = {"h" * 64: "Top matter"}
     raw = {"span_id": "a" * 64, "namespace": "RAW_SOURCE",
            "heading_refs": [{"content_hash": "h" * 64, "char_start": 0, "char_end": 3,

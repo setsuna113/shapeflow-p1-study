@@ -8,11 +8,11 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 
-from shapeflow_p1.evidence.model_tokenizer import (
+from shapeflow.evidence.model_tokenizer import (
     FrozenModelTokenizer,
     tokenizer_sha256,
 )
-from shapeflow_p1.hashing import sha256_hex
+from shapeflow.hashing import sha256_hex
 
 
 def _tokenizer_file(tmp_path: Path) -> Path:

@@ -23,7 +23,7 @@ set -euo pipefail
 REPO="${SHAPEFLOW_REPO:-/storage/nvme/shapeflow-p1-study}"
 DATA_ROOT="${SHAPEFLOW_DATA_ROOT:-/storage/nvme/shapeflow-data}"
 CONFIG="${SHAPEFLOW_CONFIG:-$REPO/configs/week1.yaml}"
-SF="$REPO/.venv/bin/shapeflow-p1"
+SF="$REPO/.venv/bin/shapeflow"
 PY="$REPO/.venv/bin/python"
 REPORTS="$REPO/reports"
 CAPACITY_SECONDS="${SHAPEFLOW_CAPACITY_SECONDS:-1800}"
@@ -112,7 +112,7 @@ PYX
 # the exact binding digest -- the guard that enforces that is the same one which stops a resumed
 # run from continuing under a protocol nobody approved.
 BINDING="$("$PY" -c "import sys; sys.path.insert(0,'$REPO/src'); from pathlib import Path; \
-from shapeflow_p1.protocol import verified_execution_binding; \
+from shapeflow.protocol import verified_execution_binding; \
 print(verified_execution_binding(Path('$REPO')).digest)")"
 [ -n "$BINDING" ] || blocked "NO_BINDING" "could not derive the approved execution binding"
 SMOKE_FLAGS=(--config "$CONFIG" --resume --protocol-sha "$BINDING")

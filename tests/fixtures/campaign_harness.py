@@ -8,19 +8,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from shapeflow_p1.campaign.runner import CampaignRunner, RunnerConfig
-from shapeflow_p1.campaign.selector_client import SelectorModelCall
-from shapeflow_p1.experiment.budget import Budget
-from shapeflow_p1.experiment.ledger import Ledger
-from shapeflow_p1.object_store import ObjectStore
-from shapeflow_p1.providers.provider_client import ProviderClient
-from shapeflow_p1.runtime.provider_server import (
+from shapeflow.campaign.runner import CampaignRunner, RunnerConfig
+from shapeflow.campaign.selector_client import SelectorModelCall
+from shapeflow.experiment.budget import Budget
+from shapeflow.experiment.ledger import Ledger
+from shapeflow.object_store import ObjectStore
+from shapeflow.providers.provider_client import ProviderClient
+from shapeflow.runtime.provider_server import (
     ProviderConfig,
     ProviderService,
     RoleTokens,
     serve_forever,
 )
-from shapeflow_p1.secrets import SecretRedactor
+from shapeflow.secrets import SecretRedactor
 
 TEST_EXECUTION_BINDING_SHA256 = "e" * 64
 TEST_PROTOCOL_DOCUMENT_SHA256 = "d" * 64

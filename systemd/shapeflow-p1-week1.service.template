@@ -15,7 +15,7 @@ Type=simple
 User=@RUNNER_USER@
 WorkingDirectory=@REPO@
 # Resume-only once launched; the exact execution-binding digest is pinned so drift cannot run.
-ExecStart=@REPO@/.venv/bin/shapeflow-p1 run-week1 --config configs/week1.yaml --resume --protocol-sha @PROTOCOL_SHA@
+ExecStart=@REPO@/.venv/bin/shapeflow run-week1 --config configs/week1.yaml --resume --protocol-sha @PROTOCOL_SHA@
 ExecStop=@REPO@/scripts/stop_safely.sh
 
 # Restart policy: give up after 3 restarts in 30 min (BLOCKED_REPEATED_CRASH). The

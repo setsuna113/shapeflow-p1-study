@@ -11,8 +11,8 @@ So this writes the two artifacts the runner actually reads, and nothing else:
 ``frozen_corpus_for_runner/tasks/<task>.json``   the treatment-visible record: the question.
 ``frozen_corpus_for_runner/pools/<task>.json``   the vendor-visible occurrences, self-verifying.
 
-Both formats are the ones :mod:`shapeflow_p1.world.pools` and
-:func:`shapeflow_p1.campaign.runner.available_tasks` parse, so a world built here is
+Both formats are the ones :mod:`shapeflow.world.pools` and
+:func:`shapeflow.campaign.runner.available_tasks` parse, so a world built here is
 indistinguishable from an acquired one at the seam that matters. That is deliberate: the same
 shape is what a benchmark corpus adapter has to produce, so this fixture is the contract such an
 adapter is written against rather than a stand-in for one.
@@ -28,10 +28,10 @@ import json
 import os
 from pathlib import Path
 
-from shapeflow_p1.canonical import canonical_json
-from shapeflow_p1.hashing import occurrence_id, sha256_hex
-from shapeflow_p1.object_store import ObjectStore
-from shapeflow_p1.world.snapshot_store import SnapshotStore
+from shapeflow.canonical import canonical_json
+from shapeflow.hashing import occurrence_id, sha256_hex
+from shapeflow.object_store import ObjectStore
+from shapeflow.world.snapshot_store import SnapshotStore
 
 __all__ = ["write_frozen_world"]
 

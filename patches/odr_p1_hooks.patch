@@ -11,7 +11,7 @@
 +    # returns the acquired-but-untransformed results and the closure that would have produced
 +    # vendor's string; the batch is reduced and published once, in researcher_tools.
 +    # With nothing bound, execution falls straight through to vendor's code below, unchanged.
-+    from shapeflow_p1.odr import vendor_hooks as _sf
++    from shapeflow.odr import vendor_hooks as _sf
 +
      configurable = Configuration.from_runnable_config(config)
 -    
@@ -49,7 +49,7 @@
 +            # The vendor comprehension above is the hooks-off fast path, unchanged. A bound
 +            # run replaces those not-yet-awaited coroutines with nested ContextVar-bound
 +            # children whose coordinate includes supervisor iteration, allowed ordinal and id.
-+            from shapeflow_p1.odr import vendor_hooks as _sf
++            from shapeflow.odr import vendor_hooks as _sf
 +
 +            if _sf.child_researcher_binding_active():
 +                research_tasks = _sf.refine_child_research_tasks(
@@ -71,7 +71,7 @@
 +    # published yet. Everything below stays vendor's code, so the single Command that follows
 +    # publishes the entire batch atomically -- there is no path that emits one sibling early.
 +    # With nothing bound, reduce_published_batch returns `observations` unchanged.
-+    from shapeflow_p1.odr import vendor_hooks as _sf
++    from shapeflow.odr import vendor_hooks as _sf
 +
 +    observations = await _sf.reduce_published_batch(
 +        assistant_message=most_recent_message,
@@ -103,7 +103,7 @@
 +    #
 +    # This hook is reached independently of the page path: a researcher can arrive with no
 +    # published batch at all (ResearchComplete on the first turn, or a no-tool exit).
-+    from shapeflow_p1.odr import vendor_hooks as _sf
++    from shapeflow.odr import vendor_hooks as _sf
 +
 +    if _sf.close_hook_active():
 +        _sf_handoff = await _sf.run_close_strategy(
@@ -133,9 +133,9 @@
 +    Part of the checkpoint identity: two forks that started from different conversation state
 +    are not comparable, however similar their batches look.
 +    """
-+    from shapeflow_p1.hashing import sha256_hex
-+    from shapeflow_p1.odr.adapter import freeze_messages
-+    from shapeflow_p1.canonical import canonical_json
++    from shapeflow.hashing import sha256_hex
++    from shapeflow.odr.adapter import freeze_messages
++    from shapeflow.canonical import canonical_json
 +
 +    frozen = freeze_messages(researcher_messages)
 +    return sha256_hex(canonical_json([m.content_dict() for m in frozen]))
@@ -147,7 +147,7 @@
 +    All three exits enter the same treatment policy; the label exists so the analysis can tell
 +    them apart afterwards, not so any of them can be treated differently.
 +    """
-+    from shapeflow_p1.odr.close_reason import classify_close
++    from shapeflow.odr.close_reason import classify_close
 +
 +    messages = state.get("researcher_messages", [])
 +    # On a late exit vendor has already appended ToolMessage results, so messages[-1] is not

@@ -404,7 +404,7 @@ class CheckpointStore:
                 os.fsync(fh.fileno())
             # The runner writes these; the evaluator scores against them and a later fork
             # process loads them. mkstemp's 0600 would zero the inherited ACL mask and make
-            # the checkpoint unreadable to both. See shapeflow_p1.fsmode.
+            # the checkpoint unreadable to both. See shapeflow.fsmode.
             chmod_shared(tmp)
             os.replace(tmp, path)
         except BaseException:

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/evidence_span.schema.json",
+  "$id": "https://shapeflow/schemas/evidence_span.schema.json",
   "title": "Span (two disjoint namespaces)",
   "description": "An addressable, exactly-reconstructible region of frozen text. The two namespaces are kept apart by a discriminator AND by different ID field names, so mixing them is a schema violation rather than a silent methodological error. EvidenceSpan addresses raw source bytes and is visible to WEBPAGE_P1 and C_REGISTRY only. VisibleMessageSpan addresses the exact researcher_messages bytes that vendor compress_research saw, and is the only namespace C_VISIBLE may select from -- reverse-mapping a model-written page summary back to raw page text would smuggle evidence P0's compressor never had, which is the difference between the compressor-only experiment and the registry-assisted one.",
   "oneOf": [

@@ -46,7 +46,7 @@ LANE="${SHAPEFLOW_LANE:-0}"
 # No default device. A hard-coded UUID meant the campaign could only ever run on one card and
 # refused to start whenever that card was busy -- including when it was busy with our own
 # previous engine. The caller resolves a free device from the hash-locked pool
-# (shapeflow_p1.ops.gpu_pool) and passes it in.
+# (shapeflow.ops.gpu_pool) and passes it in.
 GPU_UUID="${SHAPEFLOW_GPU_UUID:?SHAPEFLOW_GPU_UUID is required; select one from host.gpu_uuid_pool}"
 PORT="${SHAPEFLOW_VLLM_PORT:-$((8000 + LANE))}"
 UNIT_NAME="vllm-${LAYER//_/-}-lane${LANE}"

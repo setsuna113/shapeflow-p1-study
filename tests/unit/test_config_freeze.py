@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from shapeflow_p1.config import ConfigBundle, ConfigError, config_sha, load_config, require
-from shapeflow_p1.experiment.freeze import (
+from shapeflow.config import ConfigBundle, ConfigError, config_sha, load_config, require
+from shapeflow.experiment.freeze import (
     APPROVAL_MODE_AUTO,
     ApprovalMismatch,
     FreezeRecord,

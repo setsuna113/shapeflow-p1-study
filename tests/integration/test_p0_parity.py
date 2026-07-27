@@ -124,7 +124,7 @@ def test_patched_hooks_off_matches_explicit_p0_strategy(scenario):
 
 def test_the_two_trees_are_actually_different():
     """Guard against the gate passing because the patch was never applied."""
-    from shapeflow_p1.treehash import tree_sha256
+    from shapeflow.treehash import tree_sha256
 
     a = tree_sha256(PRISTINE / "open_deep_research")
     b = tree_sha256(PATCHED / "open_deep_research")
@@ -138,7 +138,7 @@ def test_the_installed_package_is_the_patched_tree():
     is impossible. Comparing tree hashes is both possible and stronger: it proves the running
     bytes are the patched bytes rather than that some path resolves somewhere.
     """
-    from shapeflow_p1.treehash import tree_sha256
+    from shapeflow.treehash import tree_sha256
 
     site = Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" \
         / "site-packages" / "open_deep_research"

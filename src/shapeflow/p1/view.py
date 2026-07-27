@@ -80,7 +80,7 @@ def compact_publication_handle(
     -> evidence ordinal in that atomic publication batch.  The exact tool-call id remains in
     HCheckpoint.researcher_coordinate and detects structural-slot reuse.
 
-    The encoding itself lives in :mod:`shapeflow_p1.p1.handle_codec`, which producer, validator,
+    The encoding itself lives in :mod:`shapeflow.p1.handle_codec`, which producer, validator,
     preflight and evaluator all share.  This wrapper only folds the optional researcher
     coordinate into the codec's four-coordinate form.
     """

@@ -9,7 +9,7 @@ property of the deployment, not a rule someone has to remember.
 Four things this module is built around.
 
 **Admission before dispatch.** Nothing is sent until a worst-case reservation has been won
-inside a SQLite transaction (:mod:`shapeflow_p1.experiment.budget`). After the response we
+inside a SQLite transaction (:mod:`shapeflow.experiment.budget`). After the response we
 settle at the reported usage and the surplus is released. A timeout *after* send keeps its
 worst-case charge and ends ``FAILED_UNKNOWN`` -- "we lost contact" is never recorded as "no
 call happened", because a call we cannot account for is the one most likely to have been billed.
@@ -29,7 +29,7 @@ that the provider rewrites to the one served model, so P0 and P1 issue byte-iden
 requests while remaining separable in the work ledger.
 
 **Redaction happens before storage, not after.** The request bytes are the ones carrying the
-credential, so :class:`~shapeflow_p1.providers.external_call_ledger.ExternalCallLedger` stores
+credential, so :class:`~shapeflow.providers.external_call_ledger.ExternalCallLedger` stores
 their redacted form and the raw bytes never reach the object store or a log handler.
 """
 

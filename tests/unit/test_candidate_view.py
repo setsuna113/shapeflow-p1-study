@@ -20,13 +20,13 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.evidence.chunkers import WhitespaceTokenizer, paragraph_sentence_v1
-from shapeflow_p1.evidence.identity import build_evidence_span, build_visible_message_span
-from shapeflow_p1.hashing import sha256_hex
-from shapeflow_p1.p1.aggregators import AggregatedEvidence, AggregatedItem, stable_union_v1
-from shapeflow_p1.p1.contracts import OVERALL_FACET, SelectionContractError, parse_selection
-from shapeflow_p1.p1.preflight import PreflightConfig, preflight
-from shapeflow_p1.p1.view import CandidateViewRecord, ViewConstructionError
+from shapeflow.evidence.chunkers import WhitespaceTokenizer, paragraph_sentence_v1
+from shapeflow.evidence.identity import build_evidence_span, build_visible_message_span
+from shapeflow.hashing import sha256_hex
+from shapeflow.p1.aggregators import AggregatedEvidence, AggregatedItem, stable_union_v1
+from shapeflow.p1.contracts import OVERALL_FACET, SelectionContractError, parse_selection
+from shapeflow.p1.preflight import PreflightConfig, preflight
+from shapeflow.p1.view import CandidateViewRecord, ViewConstructionError
 
 TOK = WhitespaceTokenizer()
 SOURCE = "Cats are feline animals here. Dogs are canine animals here. Birds can surely fly here."
@@ -454,7 +454,7 @@ def test_cancellation_is_never_swallowed():
     torn down, and converting it into "P1 failed, use P0" would fabricate a result."""
     import asyncio
 
-    from shapeflow_p1.p1.view import guard_publication
+    from shapeflow.p1.view import guard_publication
 
     def boom():
         raise asyncio.CancelledError()

@@ -100,7 +100,7 @@ while true; do
       echo "\`$NAME\` restarted $live times within ${INTERVAL}s and the supervisor stopped."
       echo "Finished work is kept; the ledger holds every attempt. Inspect before restarting:"
       echo
-      echo '    shapeflow-p1 status'
+      echo '    shapeflow status'
       echo "    tail -100 $LOG"
     } > "$REPO/reports/BLOCKED_REPEATED_CRASH.md"
     exit 1

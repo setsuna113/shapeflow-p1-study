@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/run_result.schema.json",
+  "$id": "https://shapeflow/schemas/run_result.schema.json",
   "title": "RunResult",
   "description": "The per-task-arm outcome record: the quality scores, the isolated work, and the failure/fallback accounting, all under one frozen TruthPacket version. It records fallbacks and retries so a P1 that fell back to P0 still carries the cost it spent -- the all-offered total, never a free retry.",
   "type": "object",

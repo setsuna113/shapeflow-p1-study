@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.experiment.ledger import IllegalTransition, Ledger
+from shapeflow.experiment.ledger import IllegalTransition, Ledger
 
 
 class FakeClock:

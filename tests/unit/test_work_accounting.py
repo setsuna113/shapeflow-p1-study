@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.runtime.request_tags import OpClass, is_treatment_work
-from shapeflow_p1.runtime.work_accounting import (
+from shapeflow.runtime.request_tags import OpClass, is_treatment_work
+from shapeflow.runtime.work_accounting import (
     OverlapError,
     RequestEvent,
     assert_non_overlapping,
@@ -114,7 +114,7 @@ def test_every_dispatchable_alias_names_an_op_class_the_ledger_knows():
 
     import yaml
 
-    from shapeflow_p1.campaign.selector_client import ALIAS_BY_OP
+    from shapeflow.campaign.selector_client import ALIAS_BY_OP
 
     known = {o.value for o in OpClass}
     assert set(ALIAS_BY_OP) <= known, set(ALIAS_BY_OP) - known
@@ -153,7 +153,7 @@ def test_interval_union_counts_concurrent_time_once():
     summarises a result set with ``asyncio.gather``. Three requests spanning the same two
     seconds are two seconds of engine time, not six.
     """
-    from shapeflow_p1.runtime.work_accounting import interval_union_seconds
+    from shapeflow.runtime.work_accounting import interval_union_seconds
 
     events = [
         _ev(OpClass.PAGE_P0_SUMMARY, 0.0, 2.0),
@@ -168,7 +168,7 @@ def test_interval_union_counts_concurrent_time_once():
 
 def test_interval_union_equals_the_sum_when_nothing_overlaps():
     """The two agree exactly in the serialized layer, so the mechanism arm stays comparable."""
-    from shapeflow_p1.runtime.work_accounting import interval_union_seconds
+    from shapeflow.runtime.work_accounting import interval_union_seconds
 
     events = [
         _ev(OpClass.RESEARCHER_REACT, 0.0, 1.0),
@@ -181,7 +181,7 @@ def test_interval_union_equals_the_sum_when_nothing_overlaps():
 
 def test_interval_union_excludes_idle_gaps_that_latency_would_include():
     """Union is engine-busy time, not wall clock: a form is not charged for time it did not use."""
-    from shapeflow_p1.runtime.work_accounting import interval_union_seconds
+    from shapeflow.runtime.work_accounting import interval_union_seconds
 
     events = [
         _ev(OpClass.RESEARCHER_REACT, 0.0, 1.0),
@@ -192,7 +192,7 @@ def test_interval_union_excludes_idle_gaps_that_latency_would_include():
 
 def test_interval_union_ignores_judge_work():
     """Judge cost is API cost, not treatment work, in every metric."""
-    from shapeflow_p1.runtime.work_accounting import interval_union_seconds
+    from shapeflow.runtime.work_accounting import interval_union_seconds
 
     judge_op = next(op for op in OpClass if not is_treatment_work(op))
     assert interval_union_seconds([_ev(judge_op, 0.0, 5.0)]) == pytest.approx(0.0)
@@ -204,7 +204,7 @@ def test_peak_concurrency_distinguishes_the_two_regimes():
     Without this the two regimes are indistinguishable in the artifacts, and "we ran natively
     concurrent" would be a claim about configuration rather than an observation.
     """
-    from shapeflow_p1.runtime.work_accounting import max_concurrent_treatment_requests
+    from shapeflow.runtime.work_accounting import max_concurrent_treatment_requests
 
     serial = [
         _ev(OpClass.PAGE_P0_SUMMARY, 0.0, 1.0),
@@ -223,7 +223,7 @@ def test_peak_concurrency_distinguishes_the_two_regimes():
 
 def test_summary_reports_the_union_even_when_the_summed_metric_is_void():
     """Overlap voids the sum. It must not void everything else measured about the cell."""
-    from shapeflow_p1.runtime.work_accounting import (
+    from shapeflow.runtime.work_accounting import (
         WorkExtraction,
         summarize_work_extraction,
     )

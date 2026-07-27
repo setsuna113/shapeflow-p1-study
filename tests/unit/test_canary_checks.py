@@ -13,9 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from shapeflow_p1.campaign.canary import CANARY_CHECKS, _p1_differs_from_p0, _verify
-from shapeflow_p1.campaign.schedule import ArmSpec, build_blocks, cell_key
-from shapeflow_p1.campaign.settings import Settings
+from shapeflow.campaign.canary import CANARY_CHECKS, _p1_differs_from_p0, _verify
+from shapeflow.campaign.schedule import ArmSpec, build_blocks, cell_key
+from shapeflow.campaign.settings import Settings
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -171,8 +171,8 @@ def _provider_ledger(
     """
     import json
 
-    from shapeflow_p1.experiment.ledger import Ledger
-    from shapeflow_p1.object_store import ObjectStore
+    from shapeflow.experiment.ledger import Ledger
+    from shapeflow.object_store import ObjectStore
 
     path = settings.data_root / str(settings.get("week1", "paths", "provider_ledger"))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -195,7 +195,7 @@ def _provider_ledger(
 
 
 def _run(settings, monkeypatch, inference):
-    import shapeflow_p1.campaign.canary as canary
+    import shapeflow.campaign.canary as canary
 
     manifest = _manifest()
     _provider_ledger(settings)
@@ -613,7 +613,7 @@ def test_canary_rejects_h_trace_without_raw_occurrence_denominator(
 async def test_run_canary_wires_seed_layer_and_provider_work_summary(
     settings, monkeypatch
 ):
-    import shapeflow_p1.campaign.canary as canary
+    import shapeflow.campaign.canary as canary
 
     captured = {}
 
@@ -1003,12 +1003,12 @@ def test_the_generation_cap_check_reads_requests_not_config(settings, monkeypatc
     # Re-write the recorded request without a cap.
     import json
 
-    from shapeflow_p1.object_store import ObjectStore
+    from shapeflow.object_store import ObjectStore
 
     store = ObjectStore(settings.data_root
                         / str(settings.get("week1", "paths", "provider_root")) / "objects")
     ref = store.put_bytes(json.dumps({"model": "m"}).encode())
-    from shapeflow_p1.experiment.ledger import Ledger
+    from shapeflow.experiment.ledger import Ledger
 
     ledger = Ledger(str(settings.data_root
                         / str(settings.get("week1", "paths", "provider_ledger"))))
@@ -1023,7 +1023,7 @@ def test_the_generation_cap_check_reads_requests_not_config(settings, monkeypatc
 
 def test_a_large_research_request_does_not_violate_the_selector_cap(settings):
     """The selector cap is not the research/final-answer cap."""
-    import shapeflow_p1.campaign.canary as canary
+    import shapeflow.campaign.canary as canary
 
     cap = int(settings.get("week1", "measurement", "selector_max_completion_tokens"))
     _provider_ledger(
@@ -1043,7 +1043,7 @@ def test_a_large_research_request_does_not_violate_the_selector_cap(settings):
 
 
 def test_historical_requests_cannot_supply_current_selector_decode(settings):
-    import shapeflow_p1.campaign.canary as canary
+    import shapeflow.campaign.canary as canary
 
     _provider_ledger(
         settings, work_key="WK-OLD-RUN", call_id="old", attempt_id="old-a")
@@ -1052,7 +1052,7 @@ def test_historical_requests_cannot_supply_current_selector_decode(settings):
 
 
 def test_historical_open_request_does_not_poison_current_canary(settings):
-    import shapeflow_p1.campaign.canary as canary
+    import shapeflow.campaign.canary as canary
 
     _provider_ledger(
         settings, work_key="WK-OLD-RUN", call_id="old-open", attempt_id="old-open-a",
@@ -1177,7 +1177,7 @@ def test_an_arm_that_reduced_nothing_fails_even_beside_one_that_did(settings, mo
 
 
 def test_an_unreadable_ledger_is_a_failure_not_a_zero(settings, monkeypatch, proved_repo):
-    import shapeflow_p1.campaign.canary as canary_module
+    import shapeflow.campaign.canary as canary_module
 
     manifest, canary = _run(settings, monkeypatch, _good_inference())
     monkeypatch.setattr(canary_module, "_inference_events",

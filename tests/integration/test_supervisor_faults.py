@@ -166,7 +166,7 @@ def test_a_restart_never_lets_the_ledger_accept_the_same_work_twice(tmp_path):
     guarantee is that the second run resumes rather than re-commits, and the partial unique
     index is what makes a double commit a database error instead of a silent overwrite.
     """
-    from shapeflow_p1.experiment.ledger import IllegalTransition, Ledger
+    from shapeflow.experiment.ledger import IllegalTransition, Ledger
 
     path = str(tmp_path / "ledger.sqlite")
 

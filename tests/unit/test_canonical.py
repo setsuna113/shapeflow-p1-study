@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from shapeflow_p1.canonical import CanonicalizationError, canonical_json
+from shapeflow.canonical import CanonicalizationError, canonical_json
 
 
 def test_key_order_does_not_change_bytes():

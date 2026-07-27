@@ -34,7 +34,7 @@ PY="${PYTHON:-}"
 ACTUAL="$("$PY" -c "
 from pathlib import Path; import sys
 sys.path.insert(0, 'src')
-from shapeflow_p1.treehash import tree_sha256
+from shapeflow.treehash import tree_sha256
 print(tree_sha256(Path('.build/open_deep_research-patched/src/open_deep_research')))
 ")"
 EXPECTED="$(tr -d ' \n' < patches/patched_tree.sha256)"

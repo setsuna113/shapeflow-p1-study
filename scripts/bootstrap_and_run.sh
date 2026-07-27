@@ -43,7 +43,7 @@ blocked() {  # blocked <slug> <message...>
     else
       echo
       echo "A paid step had already run. Consult the ledger for what was actually spent:"
-      echo '    shapeflow-p1 status'
+      echo '    shapeflow status'
     fi
   } > "$REPORTS/BLOCKED_${slug}.md"
   echo "BLOCKED[$slug]: $*" >&2
@@ -73,7 +73,7 @@ as() { local role="$1"; shift; runuser -u "$role" -- env USER="$role" LOGNAME="$
         ${SHAPEFLOW_ENGINE_LOG:+SHAPEFLOW_ENGINE_LOG="$SHAPEFLOW_ENGINE_LOG"} \
         SHAPEFLOW_ENGINE_EPOCH_FILE="$ENGINE_EPOCH_FILE" \
         "$@"; }
-SF="$REPO/.venv/bin/shapeflow-p1"
+SF="$REPO/.venv/bin/shapeflow"
 
 # The causal engine runs under sfsupervise; find the api_server pid that is genuinely a
 # descendant of OUR supervisor (its pid is in the run file), so doctor's flags check reads this
@@ -169,7 +169,7 @@ step "the installed ODR is the patched tree"
 "$REPO/.venv/bin/python" - <<'PY' || blocked "IMPORT_ORIGIN" "the installed ODR is not the patched tree"
 import sys, pathlib
 sys.path.insert(0, "src")
-from shapeflow_p1.treehash import tree_sha256
+from shapeflow.treehash import tree_sha256
 import open_deep_research
 live = tree_sha256(pathlib.Path(open_deep_research.__path__[0]))
 want = tree_sha256(pathlib.Path(".build/open_deep_research-patched/src/open_deep_research"))
@@ -281,10 +281,10 @@ as sfsteward "$SF" freeze-analysis-design --config "$CONFIG" --rebind-stale-conf
 step "preflight against the approved protocol SHA"
 APPROVED_PROTOCOL_SHA="$("$REPO/.venv/bin/python" -c \
   "import sys; sys.path.insert(0,'src'); from pathlib import Path; \
-from shapeflow_p1.protocol import protocol_sha; print(protocol_sha(Path('.')))")"
+from shapeflow.protocol import protocol_sha; print(protocol_sha(Path('.')))")"
 APPROVED_BINDING_SHA="$("$REPO/.venv/bin/python" -c \
   "import sys; sys.path.insert(0,'src'); from pathlib import Path; \
-from shapeflow_p1.protocol import verified_execution_binding; \
+from shapeflow.protocol import verified_execution_binding; \
 print(verified_execution_binding(Path('.')).digest)")"
 as sfrunner "$SF" preflight --config "$CONFIG" \
   --approved-protocol-sha "$APPROVED_PROTOCOL_SHA" \

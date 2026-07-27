@@ -15,9 +15,9 @@ from fixtures.campaign_harness import Harness
 from fixtures.fake_engine import FakeEngine
 from fixtures.frozen_world import write_frozen_world
 
-from shapeflow_p1.campaign.runner import available_tasks, questions_for, write_status
-from shapeflow_p1.campaign.schedule import ArmSpec, cell_key
-from shapeflow_p1.campaign.settings import Settings
+from shapeflow.campaign.runner import available_tasks, questions_for, write_status
+from shapeflow.campaign.schedule import ArmSpec, cell_key
+from shapeflow.campaign.settings import Settings
 
 REPO = Path(__file__).resolve().parents[2]
 PATCHED = REPO / ".build" / "open_deep_research-patched" / "src"
@@ -120,7 +120,7 @@ async def test_an_anchor_cell_captures_the_continuation_a_c_fork_needs(
     produced -- are only visible at the node update that emitted them. This asserts both
     survive a real run, because the fork is unbuildable without them.
     """
-    from shapeflow_p1.odr.continuation import ContinuationStore, child_slot_key
+    from shapeflow.odr.continuation import ContinuationStore, child_slot_key
 
     tasks = available_tasks(settings, "FORMATIVE_SCREEN")[:1]
     runner = harness.runner()
@@ -402,7 +402,7 @@ async def test_a_block_that_spans_two_engine_epochs_is_frozen_but_invalid(harnes
 
 def test_logical_cell_key_does_not_change_when_vllm_restarts():
     """Boot identity is execution provenance, not a license to duplicate an assignment."""
-    from shapeflow_p1.experiment.ledger import Ledger
+    from shapeflow.experiment.ledger import Ledger
 
     coordinates = {
         "protocol_sha": "p" * 64,

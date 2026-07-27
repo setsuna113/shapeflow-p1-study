@@ -69,7 +69,7 @@ class BudgetCapRaised(RuntimeError):
             f"cap for {resource!r} may not be raised from {current} to {requested}: a wider "
             "budget needs a new protocol version and a new approval, not an overwrite. "
             "Apply it deliberately first -- freeze an approval over the new config, then run "
-            "`shapeflow-p1 authorize-budget-raise --reason ...` as the provider identity, "
+            "`shapeflow authorize-budget-raise --reason ...` as the provider identity, "
             "which records the old and new ceilings against that approval. The ledger and the "
             "config must agree before the provider can start."
         )

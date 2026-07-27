@@ -8,7 +8,7 @@ import logging
 
 import pytest
 
-from shapeflow_p1.secrets import RedactingFormatter, SecretRedactor
+from shapeflow.secrets import RedactingFormatter, SecretRedactor
 
 FAKE_TAVILY = "tvly-FAKEFAKEFAKEFAKEFAKE"
 FAKE_DEEPSEEK = "sk-FAKEFAKEFAKEFAKEFAKE"

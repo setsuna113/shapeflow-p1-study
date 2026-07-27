@@ -10,14 +10,14 @@ from __future__ import annotations
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from shapeflow_p1.evidence.chunkers import (
+from shapeflow.evidence.chunkers import (
     WhitespaceTokenizer,
     fixed_token_v1,
     markdown_structure_v1,
     paragraph_sentence_v1,
 )
-from shapeflow_p1.evidence.identity import build_evidence_span
-from shapeflow_p1.evidence.lineage import reconstruction_errors
+from shapeflow.evidence.identity import build_evidence_span
+from shapeflow.evidence.lineage import reconstruction_errors
 
 TOK = WhitespaceTokenizer()
 

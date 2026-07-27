@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from shapeflow_p1.config import load_config
+from shapeflow.config import load_config
 
 CONFIGS = Path(__file__).resolve().parents[2] / "configs"
 

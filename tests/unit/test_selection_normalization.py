@@ -14,16 +14,16 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.evidence.chunkers import WhitespaceTokenizer, paragraph_sentence_v1
-from shapeflow_p1.evidence.identity import CandidateSet, build_evidence_span
-from shapeflow_p1.p1.aggregators import AggregatedEvidence, AggregatedItem, stable_union_v1
-from shapeflow_p1.p1.contracts import (
+from shapeflow.evidence.chunkers import WhitespaceTokenizer, paragraph_sentence_v1
+from shapeflow.evidence.identity import CandidateSet, build_evidence_span
+from shapeflow.p1.aggregators import AggregatedEvidence, AggregatedItem, stable_union_v1
+from shapeflow.p1.contracts import (
     SelectionContractError,
     canonical_normalization_document,
     parse_selection,
 )
-from shapeflow_p1.p1.preflight import PreflightConfig, preflight
-from shapeflow_p1.p1.view import CandidateViewRecord, ViewConstructionError
+from shapeflow.p1.preflight import PreflightConfig, preflight
+from shapeflow.p1.view import CandidateViewRecord, ViewConstructionError
 
 TOK = WhitespaceTokenizer()
 SOURCE = "Cats are feline animals here. Dogs are canine animals here. Birds can surely fly here."
@@ -219,7 +219,7 @@ def test_render_keeps_role_and_facet_attached_to_their_own_span():
 
 
 def test_render_keeps_each_spans_own_breadcrumb():
-    from shapeflow_p1.hashing import sha256_hex
+    from shapeflow.hashing import sha256_hex
 
     spans = _spans()
     # Breadcrumbs are addressed ranges into the span's own source, so each resolves to real
@@ -262,7 +262,7 @@ def test_injected_unhashed_context_is_rejected():
 
 
 def test_faithful_context_ref_reconstructs_and_renders():
-    from shapeflow_p1.hashing import sha256_hex
+    from shapeflow.hashing import sha256_hex
 
     spans = _spans()
     spans[0]["context_refs"] = [{
