@@ -739,6 +739,32 @@ def test_a_selector_that_never_decoded_fails(settings, monkeypatch, proved_repo)
     assert _status(checks, "selector_decode") == "FAIL"
 
 
+def test_prose_controls_are_not_asked_for_spans_they_never_publish(
+    settings, monkeypatch, proved_repo
+):
+    """A SHORT_PROSE control publishes prose, not spans.
+
+    ProsePageStrategy emits a PROSE_CONTROL_OUTPUT event and returns before any per-stage
+    selection outcome exists, so it has no published span ids to count. Requiring one would fail
+    a working control every time -- and a gate that goes red when nothing is wrong is a gate that
+    gets deleted rather than fixed. Its non-inertness is checked by short_prose_same_budget,
+    which requires every prose cell to have produced rendered output.
+    """
+    manifest, canary = _run(settings, monkeypatch, _good_inference())
+    outputs = _outputs(manifest)
+    # The prose arm has no direct-node records at all, which is what production produces.
+    for record in outputs.values():
+        if record["cell"]["arm"]["arm_id"] == "SHORT_PROSE":
+            record["direct_node_records"] = []
+    checks = canary._verify(settings, manifest, _states(manifest), outputs, repo=proved_repo)
+    assert _status(checks, "p1_published_output") == "PASS"
+    by_arm = next(
+        c for c in checks if c["name"] == "p1_published_output")["data"]["by_arm"]
+    assert "SHORT_PROSE" not in by_arm
+    # The structured arms are still held to it, including the CPU control.
+    assert {"H_ID", "CPU_LEXICAL"} <= set(by_arm)
+
+
 def test_an_arm_that_reduced_every_batch_but_published_nothing_fails(
     settings, monkeypatch, proved_repo
 ):

@@ -80,6 +80,16 @@ PYX
 [ "${#GPUS[@]}" -ge "$LANE_COUNT" ] || blocked "GPU_POOL" \
   "${#GPUS[@]} GPUs in the frozen pool, $LANE_COUNT lanes required"
 
+# The approved execution binding. bootstrap_and_run.sh writes LAUNCH_GATE_PASSED.json before
+# handing over, so every mutating command from here on is a post-launch resume and has to carry
+# the exact binding digest -- the guard that enforces that is the same one which stops a resumed
+# run from continuing under a protocol nobody approved.
+BINDING="$("$PY" -c "import sys; sys.path.insert(0,'$REPO/src'); from pathlib import Path; \
+from shapeflow_p1.protocol import verified_execution_binding; \
+print(verified_execution_binding(Path('$REPO')).digest)")"
+[ -n "$BINDING" ] || blocked "NO_BINDING" "could not derive the approved execution binding"
+SMOKE_FLAGS=(--config "$CONFIG" --resume --protocol-sha "$BINDING")
+
 start_lane() {
   local lane="$1"
   SHAPEFLOW_LANE="$lane" SHAPEFLOW_GPU_UUID="${GPUS[$lane]}" \
@@ -116,10 +126,12 @@ gpu_health() {
 # ---------------------------------------------------------------------------------------
 echo "== gate 1/5: P1 actually publishes, on one lane =="
 start_lane 0
-as_lane 0 sfrunner "$SF" smoke --config "$CONFIG" \
-  || blocked "P1_INERT" \
-     "the single-lane canary failed. If p1_published_output is the failing check, P1 produced no
-output at all and four GPUs would only produce none faster."
+as_lane 0 sfrunner "$SF" smoke "${SMOKE_FLAGS[@]}" \
+  || blocked "LANE0_CANARY" \
+     "the single-lane canary failed. Read the canary summary before concluding anything about
+P1: the p1_published_output check names each arm and its top failure reason, and a canary can
+also fail for reasons that have nothing to do with whether P1 published -- a refused flag, a
+missing world, an unreachable provider. Do not report a cause this gate did not establish."
 
 # ---------------------------------------------------------------------------------------
 echo "== gate 2/5: four engines under real load, no OOM / Xid / sustained throttle =="
@@ -132,7 +144,7 @@ XID_BEFORE="$(dmesg 2>/dev/null | grep -c 'NVRM: Xid' || true)"
 
 declare -A CANARY_PID=()
 for lane in $(seq 0 $((LANE_COUNT - 1))); do
-  as_lane "$lane" sfrunner "$SF" smoke --config "$CONFIG" \
+  as_lane "$lane" sfrunner "$SF" smoke "${SMOKE_FLAGS[@]}" \
     >> "$REPO/logs/canary-lane${lane}.log" 2>&1 &
   CANARY_PID[$lane]=$!
 done
@@ -302,9 +314,6 @@ JSON
 
 echo
 echo "All five lane gates passed. Starting the screen on $LANE_COUNT lanes."
-BINDING="$("$PY" -c "import sys; sys.path.insert(0,'$REPO/src'); from pathlib import Path; \
-from shapeflow_p1.protocol import verified_execution_binding; \
-print(verified_execution_binding(Path('$REPO')).digest)")"
 for lane in $(seq 0 $((LANE_COUNT - 1))); do
   SHAPEFLOW_LANE="$lane" setsid /usr/local/bin/sfsupervise \
     "week1-lane${lane}" sfrunner "$REPO" "$DATA_ROOT" -- \

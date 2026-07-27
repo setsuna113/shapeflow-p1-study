@@ -363,7 +363,7 @@ def _verify(
     #     The P0 fallback is a legitimate part of the ITT design, which is exactly why total
     #     inertness must be a gate: "P1 tried and fell back" and "P1 was never reachable" produce
     #     the same artifacts, and only the second is a defect.
-    publication = _p1_publication_by_arm(p1_cells)
+    publication = _p1_publication_by_arm(p1_cells, settings=settings, manifest=manifest)
     silent = sorted(
         arm_id for arm_id, stats in publication.items() if stats["published_spans"] == 0
     )
@@ -1211,7 +1211,33 @@ def _expected_selector_ops_by_arm(settings: Settings, manifest) -> dict[str, tup
     return expected
 
 
-def _p1_publication_by_arm(p1_cells: dict) -> dict[str, dict]:
+def _arms_that_publish_spans(settings, manifest) -> set[str]:
+    """Arms whose treatment publishes structured spans at all.
+
+    The SHORT_PROSE controls do not: their publication path is DIRECT_PROSE, they emit a
+    PROSE_CONTROL_OUTPUT event instead of a per-stage selection outcome, and they therefore have
+    no published span ids to count. Asking them for one would fail a working control every time,
+    and a gate that fails when nothing is wrong gets removed rather than fixed.
+
+    Their non-inertness is checked, by `short_prose_same_budget`, which requires every prose cell
+    to have produced rendered output within the same budget the structured arms are held to.
+    """
+    from ..strategies.factory import load_registry
+
+    # From the manifest's own arms, not from a config block: the manifest describes what
+    # actually ran, and reading the config instead would silently classify nothing whenever the
+    # two disagree -- which is how a gate ends up applying to no arm at all.
+    registry = load_registry(settings.repo / "configs")
+    publishing: set[str] = set()
+    for arm in manifest.arms:
+        for variant_id in (str(arm.page_variant), str(arm.close_variant)):
+            spec = registry.get(variant_id)
+            if spec is not None and spec.publication_path == "STRUCTURED_SELECTION":
+                publishing.add(str(arm.arm_id))
+    return publishing
+
+
+def _p1_publication_by_arm(p1_cells: dict, *, settings=None, manifest=None) -> dict[str, dict]:
     """Per-arm evidence that P1 output actually reached the graph, plus why it did not.
 
     Read from the direct-node records rather than the cell counters, because the counters
@@ -1220,8 +1246,14 @@ def _p1_publication_by_arm(p1_cells: dict) -> dict[str, dict]:
     diagnostics travel with the verdict so a failure is legible from the canary summary instead
     of requiring the object store to be read afterwards.
     """
+    publishing = (
+        _arms_that_publish_spans(settings, manifest)
+        if settings is not None and manifest is not None else None
+    )
     summary: dict[str, dict] = {}
     for arm_id, records in _by_arm(p1_cells).items():
+        if publishing is not None and arm_id not in publishing:
+            continue
         stats = summary.setdefault(arm_id, {
             "cells": 0,
             "published_spans": 0,
