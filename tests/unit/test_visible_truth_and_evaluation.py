@@ -641,7 +641,7 @@ def test_judge_policy_digest_binds_prompt_sampling_retry_and_failure_policy():
 
 def test_an_unavailable_judgment_is_never_imputed():
     """A missing score stays missing, and the sample is not dropped either."""
-    from shapeflow_p1.evaluation.judge_client import JudgeUnavailable
+    from shapeflow_p1.bench.grading.judge_client import JudgeUnavailable
 
     def refuses(claim: str, atom: str) -> str:
         raise JudgeUnavailable("provider down")

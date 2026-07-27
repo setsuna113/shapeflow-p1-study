@@ -860,7 +860,7 @@ def prepare(config: Path = _CFG,
             resume: bool = typer.Option(False, "--resume")) -> None:
     """Steward-only: author, audit, split and seal the task registry."""
     from .campaign.prepare import prepare_corpus
-    from .evaluation.judge_client import DeepSeekJudge
+    from .bench.grading.judge_client import DeepSeekJudge
     from .providers.provider_client import PROVIDER_KEY_PLACEHOLDER
 
     _assert_post_launch_flags(protocol_sha, resume)
@@ -918,7 +918,7 @@ def build_truth(config: Path = _CFG) -> None:
     """
     from .campaign.acquire import acquired_task_ids
     from .campaign.truth import build_truth_for_task
-    from .evaluation.judge_client import DeepSeekJudge
+    from .bench.grading.judge_client import DeepSeekJudge
     from .providers.provider_client import PROVIDER_KEY_PLACEHOLDER
 
     _require_role("steward")

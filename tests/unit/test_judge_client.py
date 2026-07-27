@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.evaluation.judge_client import (
+from shapeflow_p1.bench.grading.judge_client import (
     DeepSeekJudge,
     JudgeTruncated,
     JudgeUnavailable,

@@ -35,7 +35,7 @@ from ..hashing import sha256_hex
 from ..p1.contracts import P1_CONTRACTS, canonical_normalization_document
 from .atomizer import atomize_report
 from .citation_eval import AtomCandidate, HumanQueueItem, build_assessment
-from .judge_client import JudgeUnavailable
+from ..bench.grading.judge_client import JudgeUnavailable
 from .quality_metrics import ContradictionPair, TruthAtom, TruthPacket, score_report
 
 __all__ = [

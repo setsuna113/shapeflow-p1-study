@@ -588,7 +588,7 @@ class _ScriptedJudge:
         self.calls = 0
 
     async def judge(self, system, user, *, validate=None):
-        from shapeflow_p1.evaluation.judge_client import JudgeResponse
+        from shapeflow_p1.bench.grading.judge_client import JudgeResponse
 
         self.calls += 1
         relation = "entail" if "41" in user else "unrelated"

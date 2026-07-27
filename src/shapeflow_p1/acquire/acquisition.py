@@ -24,8 +24,8 @@ from ..providers.external_call_ledger import (
     CallNotReplayable,
     ExternalCallLedger,
 )
-from .snapshot_store import SnapshotStore
-from .source_pool import QueryResponse, SourcePool, build_source_pool
+from ..world.snapshot_store import SnapshotStore
+from ..world.source_pool import QueryResponse, SourcePool, build_source_pool
 from .exa_client import ExaCaptureClient, ExaHTTPError
 
 __all__ = ["AcquisitionResult", "acquire_task"]

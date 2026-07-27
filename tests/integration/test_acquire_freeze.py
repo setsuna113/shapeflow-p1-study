@@ -24,7 +24,7 @@ from shapeflow_p1.campaign.acquire import (
 )
 from shapeflow_p1.campaign.prepare import load_sealed_registry, prepare_corpus
 from shapeflow_p1.campaign.settings import Settings
-from shapeflow_p1.evaluation.judge_client import DeepSeekJudge
+from shapeflow_p1.bench.grading.judge_client import DeepSeekJudge
 
 from fixtures.fake_exa import FakeExa
 from fixtures.scripted_author import ScriptedAuthor

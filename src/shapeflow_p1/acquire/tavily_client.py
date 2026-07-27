@@ -22,7 +22,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from ..hashing import query_snapshot_id, sha256_hex
 from ..secrets import SecretRedactor
-from .source_pool import QueryResponse, RawResult
+from ..world.source_pool import QueryResponse, RawResult
 
 __all__ = ["TavilyParams", "TavilyCaptureClient", "load_tavily_key"]
 

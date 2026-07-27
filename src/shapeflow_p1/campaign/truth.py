@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..canonical import canonical_json
-from ..evaluation.judge_client import DeepSeekJudge, JudgeTruncated, JudgeUnavailable
+from ..bench.grading.judge_client import DeepSeekJudge, JudgeTruncated, JudgeUnavailable
 from ..evaluation.truth_builder import CandidateAtom, assemble_truth_packet
 from ..evidence.chunkers import (
     fixed_token_v1,

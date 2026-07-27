@@ -50,7 +50,7 @@ from shapeflow_p1.campaign.truth import (  # noqa: E402
     _TRUTH_PROMPT,
     _TRUTH_SYSTEM,
 )
-from shapeflow_p1.evaluation.judge_client import (  # noqa: E402
+from shapeflow_p1.bench.grading.judge_client import (  # noqa: E402
     DeepSeekJudge,
     JudgeTruncated,
     JudgeUnavailable,

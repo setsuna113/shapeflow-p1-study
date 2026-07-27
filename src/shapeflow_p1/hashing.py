@@ -27,7 +27,7 @@ set; this module only provides the digests.
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+from typing import Any, Sequence
 
 from .canonical import canonical_json
 
@@ -38,6 +38,7 @@ __all__ = [
     "content_id",
     "query_snapshot_id",
     "occurrence_id",
+    "merkle_root",
 ]
 
 #: Bump only with a protocol version bump: changing it changes every derived ID.
@@ -52,6 +53,25 @@ def sha256_hex(data: bytes) -> str:
     if not isinstance(data, (bytes, bytearray)):
         raise TypeError(f"sha256_hex expects bytes, got {type(data).__name__}")
     return hashlib.sha256(data).hexdigest()
+
+
+def merkle_root(leaves: Sequence[str]) -> str:
+    """A binary Merkle root over sorted leaf digests.
+
+    A single hash over a concatenation would also detect change; a Merkle root additionally lets
+    one leaf's membership be proved without republishing the whole set.
+    """
+    if not leaves:
+        return sha256_hex(b"")
+    level = [bytes.fromhex(h) for h in sorted(leaves)]
+    while len(level) > 1:
+        nxt = []
+        for i in range(0, len(level), 2):
+            left = level[i]
+            right = level[i + 1] if i + 1 < len(level) else left
+            nxt.append(bytes.fromhex(sha256_hex(left + right)))
+        level = nxt
+    return level[0].hex()
 
 
 def _preimage(domain: str, payload: bytes) -> bytes:

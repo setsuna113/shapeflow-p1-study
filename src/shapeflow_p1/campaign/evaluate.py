@@ -16,7 +16,7 @@ from pathlib import Path
 
 from ..canonical import canonical_json
 from ..evaluation.citation_support import parse_citation_map
-from ..evaluation.judge_client import DeepSeekJudge
+from ..bench.grading.judge_client import DeepSeekJudge
 from ..evaluation.runner import (
     ArmOutput,
     EvaluationError,
@@ -2320,7 +2320,7 @@ def _add_direct_checkpoint_metrics(
                         relation_prompt_sha256() if visibility_decider is not None else ""),
                 )
             except Exception as e:
-                from ..evaluation.judge_client import JudgeUnavailable
+                from ..bench.grading.judge_client import JudgeUnavailable
 
                 if not isinstance(e, JudgeUnavailable):
                     raise

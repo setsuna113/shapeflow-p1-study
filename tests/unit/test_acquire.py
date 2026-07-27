@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.acquire.frozen_search import (
+from shapeflow_p1.world.search_backend import (
     Bm25Index,
     ExactSnapshotReplayBackend,
     FrozenTaskCorpusBackend,
     ReplayMiss,
     SearchRecord,
 )
-from shapeflow_p1.acquire.snapshot_store import SnapshotStore, normalize_v1
-from shapeflow_p1.acquire.source_pool import QueryResponse, RawResult, build_source_pool
+from shapeflow_p1.world.snapshot_store import SnapshotStore, normalize_v1
+from shapeflow_p1.world.source_pool import QueryResponse, RawResult, build_source_pool
 from shapeflow_p1.acquire.tavily_client import TavilyCaptureClient, TavilyParams
 from shapeflow_p1.object_store import ObjectStore
 from shapeflow_p1.providers.retry import RetryDecision, capped_backoff, classify_status

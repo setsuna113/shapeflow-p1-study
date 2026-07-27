@@ -223,7 +223,7 @@ def test_the_coordinator_receives_the_leased_device():
     """The coordinator takes an flock on this UUID; without it the lease never engages.
 
     Nothing passed SHAPEFLOW_GPU_UUID through -- not this unit, not sfsupervise, not the
-    bootstrap privilege-drop helper -- so `_gpu_lease` returned None in production and the
+    bootstrap privilege-drop helper -- so `gpu_lease` returned None in production and the
     mutual exclusion that stops two workers sharing a card was silently absent.
     """
     assert "SHAPEFLOW_GPU_UUID=" in _environment(

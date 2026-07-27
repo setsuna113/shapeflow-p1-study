@@ -22,7 +22,7 @@ from shapeflow_p1.campaign.prepare import prepare_corpus
 from shapeflow_p1.campaign.runner import available_tasks, questions_for, write_status
 from shapeflow_p1.campaign.schedule import ArmSpec, cell_key
 from shapeflow_p1.campaign.settings import Settings
-from shapeflow_p1.evaluation.judge_client import DeepSeekJudge
+from shapeflow_p1.bench.grading.judge_client import DeepSeekJudge
 
 REPO = Path(__file__).resolve().parents[2]
 PATCHED = REPO / ".build" / "open_deep_research-patched" / "src"

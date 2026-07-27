@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from shapeflow_p1.acquire.acquisition import acquire_task
-from shapeflow_p1.acquire.snapshot_store import SnapshotStore
+from shapeflow_p1.world.snapshot_store import SnapshotStore
 from shapeflow_p1.acquire.exa_client import ExaCaptureClient, ExaParams
 from shapeflow_p1.experiment.budget import Budget
 from shapeflow_p1.experiment.ledger import Ledger

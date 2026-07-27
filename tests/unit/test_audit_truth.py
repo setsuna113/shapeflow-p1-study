@@ -276,7 +276,7 @@ async def test_truth_artifact_records_extraction_exact_and_cross_chunker_judgmen
 ):
     import shapeflow_p1.campaign.truth as truth_module
     from shapeflow_p1.canonical import canonical_json
-    from shapeflow_p1.evaluation.judge_client import JudgeAttempt, JudgeResponse
+    from shapeflow_p1.bench.grading.judge_client import JudgeAttempt, JudgeResponse
     from shapeflow_p1.hashing import sha256_hex
 
     span_id = "a" * 64
@@ -454,7 +454,7 @@ async def test_a_batch_whose_answer_overflows_the_cap_is_split_not_abandoned(
     import json
 
     from shapeflow_p1.canonical import canonical_json
-    from shapeflow_p1.evaluation.judge_client import (
+    from shapeflow_p1.bench.grading.judge_client import (
         JudgeAttempt,
         JudgeResponse,
         JudgeTruncated,
@@ -595,7 +595,7 @@ def test_build_truth_skips_a_task_whose_packet_is_already_frozen(tmp_path, monke
         lambda _s: ["T-done", "T-todo"])
     monkeypatch.setattr("shapeflow_p1.campaign.truth.build_truth_for_task", fake_build)
     monkeypatch.setattr(
-        "shapeflow_p1.evaluation.judge_client.DeepSeekJudge",
+        "shapeflow_p1.bench.grading.judge_client.DeepSeekJudge",
         lambda *_a, **_k: object())
 
     cli_module.build_truth(config=None)
@@ -627,7 +627,7 @@ async def test_a_contradiction_pass_that_overflows_is_reblocked_without_losing_c
 
     import shapeflow_p1.campaign.truth as truth_module
     from shapeflow_p1.canonical import canonical_json
-    from shapeflow_p1.evaluation.judge_client import (
+    from shapeflow_p1.bench.grading.judge_client import (
         JudgeAttempt,
         JudgeResponse,
         JudgeTruncated,

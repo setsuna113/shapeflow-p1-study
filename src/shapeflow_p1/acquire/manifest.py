@@ -24,7 +24,7 @@ from typing import Optional, Sequence
 
 from ..canonical import canonical_json
 from ..hashing import sha256_hex
-from .source_pool import SourcePool
+from ..world.source_pool import SourcePool
 from .task_registry import merkle_root
 
 __all__ = [

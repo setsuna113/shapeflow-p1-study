@@ -3,7 +3,7 @@
 Steward, runner and evaluator processes get their outbound access from here. The methods
 return transports shaped exactly like the ones
 :class:`~shapeflow_p1.acquire.tavily_client.TavilyCaptureClient` and
-:class:`~shapeflow_p1.evaluation.judge_client.DeepSeekJudge` already accept, so those clients
+:class:`~shapeflow_p1.bench.grading.judge_client.DeepSeekJudge` already accept, so those clients
 are reused unchanged rather than reimplemented against a second code path -- two
 implementations of "call Tavily" would eventually disagree about what was frozen.
 

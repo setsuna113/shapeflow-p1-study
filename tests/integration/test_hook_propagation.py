@@ -151,8 +151,8 @@ async def test_the_close_hook_fires_in_the_full_graph(monkeypatch):
         selector=EchoSelector(), tokenizer=WhitespaceTokenizer())
     bundle = StrategyBundle(variant_id="P0+C01", page=VendorPageStrategy({}), close=close)
 
-    from shapeflow_p1.acquire.snapshot_store import SnapshotStore
-    from shapeflow_p1.acquire.source_pool import QueryResponse, RawResult, build_source_pool
+    from shapeflow_p1.world.snapshot_store import SnapshotStore
+    from shapeflow_p1.world.source_pool import QueryResponse, RawResult, build_source_pool
     from shapeflow_p1.object_store import ObjectStore
 
     store = SnapshotStore(ObjectStore(Path("/tmp/hook-probe-obj")))

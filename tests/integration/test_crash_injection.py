@@ -32,7 +32,7 @@ from shapeflow_p1.campaign.prepare import prepare_corpus
 from shapeflow_p1.campaign.runner import available_tasks, questions_for
 from shapeflow_p1.campaign.schedule import ArmSpec, cell_key
 from shapeflow_p1.campaign.settings import Settings
-from shapeflow_p1.evaluation.judge_client import DeepSeekJudge
+from shapeflow_p1.bench.grading.judge_client import DeepSeekJudge
 from shapeflow_p1.experiment.budget import Budget
 from shapeflow_p1.experiment.ledger import TERMINAL_STATES, Ledger
 from shapeflow_p1.object_store import ObjectStore

@@ -29,10 +29,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional
 
 from ..canonical import canonical_json
-from ..hashing import derive_id, sha256_hex
+from ..hashing import derive_id, merkle_root, sha256_hex
 
 __all__ = [
     "CORPUS_TIER",
@@ -149,25 +149,6 @@ class TaskSpec:
             "conflict_probe": self.conflict_probe,
             "negative_probe": self.negative_probe,
         }))
-
-
-def merkle_root(leaves: Sequence[str]) -> str:
-    """A binary Merkle root over sorted leaf digests.
-
-    A single hash over a concatenation would also detect change; a Merkle root additionally lets
-    one task's membership be proved without republishing the whole registry.
-    """
-    if not leaves:
-        return sha256_hex(b"")
-    level = [bytes.fromhex(h) for h in sorted(leaves)]
-    while len(level) > 1:
-        nxt = []
-        for i in range(0, len(level), 2):
-            left = level[i]
-            right = level[i + 1] if i + 1 < len(level) else left
-            nxt.append(bytes.fromhex(sha256_hex(left + right)))
-        level = nxt
-    return level[0].hex()
 
 
 @dataclass

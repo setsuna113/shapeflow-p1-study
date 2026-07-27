@@ -3,7 +3,7 @@
 The unit tests exercise the service object; this one starts the listener, sends real requests
 through :class:`ProviderClient`, and drives the *existing*
 :class:`~shapeflow_p1.acquire.tavily_client.TavilyCaptureClient` and
-:class:`~shapeflow_p1.evaluation.judge_client.DeepSeekJudge` through it unchanged. That is the
+:class:`~shapeflow_p1.bench.grading.judge_client.DeepSeekJudge` through it unchanged. That is the
 point: there is one implementation of "call Tavily", and it now reaches the network only through
 the boundary.
 
@@ -18,7 +18,7 @@ import json
 import pytest
 
 from shapeflow_p1.acquire.tavily_client import TavilyCaptureClient, TavilyParams
-from shapeflow_p1.evaluation.judge_client import DeepSeekJudge, JudgeUnavailable
+from shapeflow_p1.bench.grading.judge_client import DeepSeekJudge, JudgeUnavailable
 from shapeflow_p1.experiment.budget import Budget
 from shapeflow_p1.experiment.ledger import Ledger
 from shapeflow_p1.object_store import ObjectStore

@@ -26,9 +26,7 @@ from ..canonical import canonical_json
 from ..experiment.ledger import Ledger
 from ..experiment.state_machine import Phase
 from ..hashing import sha256_hex
-from ..object_store import ObjectStore
 from ..protocol import verified_execution_binding
-from ..providers.provider_client import ProviderClient, load_role_token
 from .fork import (
     BoundaryForkBackend,
     ForkCapabilityError,
@@ -37,29 +35,12 @@ from .fork import (
     run_production_forks,
     write_fork_record,
 )
+from .session import gpu_lease, open_run_ledger, provider_client_for
 from .runner import CampaignRunner, RunnerConfig, available_tasks, questions_for, write_status
 from .selector_client import SelectorModelCall
 from .settings import Settings
 
 __all__ = ["run_screening", "open_run_ledger", "provider_client_for"]
-
-
-def open_run_ledger(settings: Settings) -> tuple[Ledger, ObjectStore]:
-    runs = settings.path("runs")
-    runs.mkdir(parents=True, exist_ok=True)
-    ledger = Ledger(str(runs / "ledger.sqlite"))
-    store = ObjectStore(settings.path("object_store"))
-    return ledger, store
-
-
-def provider_client_for(settings: Settings, role: str = "runner") -> ProviderClient:
-    host = settings.get("week1", "provider", "bind_host")
-    # settings.provider_port, not the configured base: a lane that dialled the base port would
-    # send every request to lane 0's provider while believing it was talking to its own.
-    port = settings.provider_port
-    token_dir = str(settings.get("week1", "provider", "token_dir"))
-    return ProviderClient(base_url=f"http://{host}:{port}",
-                          token=load_role_token(token_dir, role))
 
 
 async def run_screening(
@@ -105,7 +86,7 @@ async def run_screening(
         }
     binding = verified_execution_binding(
         repo, expected_digest=execution_binding_sha256)
-    lease = _gpu_lease(settings)
+    lease = gpu_lease(settings)
     with contextlib.ExitStack() as stack:
         stack.enter_context(lease)
         return await _run_screening_leased(
@@ -113,34 +94,6 @@ async def run_screening(
             fork_backend=fork_backend, component_only=component_only,
             execution_binding_sha256=binding.digest,
             protocol_document_sha256=binding.protocol_sha)
-
-
-def _gpu_lease(settings: Settings):
-    """The lease for the device this run will use.
-
-    The UUID comes from the environment the engine was started with (CUDA_VISIBLE_DEVICES is
-    set to a UUID by start_engine.sh, never an index -- plan §5.2 is explicit that an index
-    is not a device identity).
-
-    Returning None when nothing was pinned -- which is what this did -- meant the lease was
-    silently skipped exactly when it mattered: neither ``sfsupervise`` nor ``bootstrap``'s
-    privilege-drop helper passed these variables through, so in production the mutual
-    exclusion never engaged at all. On a host with several cards and more than one worker,
-    that is how two runs end up on one device, and nothing downstream would show it. An
-    unleasable run is refused instead.
-    """
-    from ..ops.gpu_lease import GpuLease
-
-    uuid = (os.environ.get("SHAPEFLOW_GPU_UUID")
-            or os.environ.get("CUDA_VISIBLE_DEVICES") or "").strip()
-    if not uuid.startswith("GPU-"):
-        raise RuntimeError(
-            "no GPU UUID in the environment: set SHAPEFLOW_GPU_UUID (or CUDA_VISIBLE_DEVICES) "
-            "to the leased device UUID. Refusing to run unleased, because the GPU lease is "
-            f"what stops a second worker using the same card (saw {uuid!r})"
-        )
-    lock_file = settings.data_root / str(settings.get("week1", "runtime", "gpu_lease_file"))
-    return GpuLease(uuid, lock_dir=lock_file.parent)
 
 
 async def _run_screening_leased(

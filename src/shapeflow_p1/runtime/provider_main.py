@@ -20,7 +20,7 @@ import httpx
 from ..acquire.exa_client import load_exa_key
 from ..acquire.tavily_client import load_tavily_key
 from ..campaign.settings import Settings
-from ..evaluation.judge_client import load_deepseek_key
+from ..bench.grading.judge_client import load_deepseek_key
 from ..experiment.budget import Budget
 from ..experiment.ledger import Ledger
 from ..object_store import ObjectStore

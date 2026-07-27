@@ -22,7 +22,7 @@ from shapeflow_p1.acquire.task_author import (
 )
 from shapeflow_p1.acquire.task_registry import STRATA, AuthoringFingerprint, TaskSpec, build_registry
 from shapeflow_p1.campaign.settings import Settings
-from shapeflow_p1.evaluation.judge_client import DeepSeekJudge
+from shapeflow_p1.bench.grading.judge_client import DeepSeekJudge
 
 from fixtures.scripted_author import ScriptedAuthor
 

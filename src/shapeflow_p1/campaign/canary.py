@@ -28,7 +28,7 @@ from ..providers.provider_client import ProviderCallError
 from ..runtime.request_tags import OpClass
 from .runner import CampaignRunner, RunnerConfig, available_tasks, questions_for
 from .schedule import cell_key
-from .screen import open_run_ledger, provider_client_for
+from .session import open_run_ledger, provider_client_for
 from .selector_client import SHORT_PROSE_OPS, STRUCTURED_SELECTOR_OPS, SelectorModelCall
 from .settings import Settings
 
@@ -87,11 +87,11 @@ async def run_canary(settings: Settings, *, repo: Path,
                      task_limit: int | None = None,
                      execution_binding_sha256: str | None = None) -> dict:
     """Hold the same UUID-scoped GPU lease as the campaign for the canary's lifetime."""
-    from .screen import _gpu_lease
+    from .session import gpu_lease
 
     binding = verified_execution_binding(
         repo, expected_digest=execution_binding_sha256)
-    lease = _gpu_lease(settings)
+    lease = gpu_lease(settings)
     with lease:
         return await _run_canary_leased(
             settings,

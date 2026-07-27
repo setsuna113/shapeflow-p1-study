@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
 from ..canonical import canonical_json
-from ..evaluation.judge_client import DeepSeekJudge, JudgeUnavailable
+from ..bench.grading.judge_client import DeepSeekJudge, JudgeUnavailable
 from ..hashing import derive_id, sha256_hex
 from .task_registry import STRATA, AuthoringFingerprint, TaskSpec
 

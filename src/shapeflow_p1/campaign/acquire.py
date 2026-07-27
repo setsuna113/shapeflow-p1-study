@@ -35,7 +35,7 @@ import os
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional
 
 from ..acquire.manifest import (
     AcquisitionIntegrityError,
@@ -45,13 +45,14 @@ from ..acquire.manifest import (
     load_task_manifest,
     write_task_manifest,
 )
-from ..acquire.snapshot_store import CanonicalSnapshot, SnapshotStore
-from ..acquire.source_pool import QueryResponse, SourceOccurrence, SourcePool, build_source_pool
 from ..acquire.exa_client import ExaHTTPError, ExaParams, ExaPricing
 from ..canonical import canonical_json
 from ..fsmode import chmod_shared
 from ..hashing import sha256_hex
 from ..object_store import ObjectStore
+from ..world.pools import acquired_task_ids, load_frozen_pool, runner_pool_path
+from ..world.snapshot_store import SnapshotStore
+from ..world.source_pool import QueryResponse, SourcePool, build_source_pool
 from .prepare import load_sealed_registry
 from .settings import Settings
 
@@ -61,6 +62,7 @@ __all__ = [
     "exa_params_from",
     "exa_pricing_from",
     "acquire_all",
+    "acquired_task_ids",
     "load_frozen_pool",
     "runner_pool_path",
     "task_world_is_complete",
@@ -134,10 +136,6 @@ def queries_for_task(task: dict, *, max_total: int) -> list[str]:
     return ordered[:max_total]
 
 
-def runner_pool_path(settings: Settings, task_id: str) -> Path:
-    return settings.path("frozen_corpus_for_runner") / "pools" / f"{task_id}.json"
-
-
 def _write_runner_pool(settings: Settings, task_id: str, pool: SourcePool,
                        snapshots: dict) -> None:
     """The runner's view: vendor-visible occurrences only, in vendor's first-occurrence order."""
@@ -180,49 +178,6 @@ def _write_runner_pool(settings: Settings, task_id: str, pool: SourcePool,
     _write_json_atomic(path, body)
     # The runner reads this; it never writes it.
     os.chmod(path, 0o444)
-
-
-def load_frozen_pool(settings: Settings, task_id: str) -> tuple[SourcePool, SnapshotStore]:
-    """Rebuild one task's vendor-visible pool for a treatment run.
-
-    Returns the pool plus the snapshot store its content lives in. Nothing here can reach the
-    audit occurrence graph: the file this reads does not contain it.
-    """
-    path = runner_pool_path(settings, task_id)
-    body = json.loads(path.read_text(encoding="utf-8"))
-    recorded = body.pop("pool_sha256", "")
-    actual = sha256_hex(canonical_json(body))
-    if recorded != actual:
-        raise ValueError(f"{path} has been edited: records {recorded!r}, hashes to {actual!r}")
-
-    pool = SourcePool(task_id=task_id)
-    for record in body["occurrences"]:
-        pool.occurrences.append(SourceOccurrence(
-            occurrence_id=record["occurrence_id"],
-            task_id=task_id,
-            query_snapshot_id="",
-            url=record["url"],
-            title=record.get("title"),
-            rank=0,
-            score=None,
-            published_date=None,
-            content_hash=record.get("content_hash"),
-            snippet_content=record.get("snippet_content"),
-            visibility="VENDOR_VISIBLE",
-            duplicate_of_occurrence_id=None,
-            vendor_visible_order=record["vendor_visible_order"],
-        ))
-    for content_hash, snap in body["snapshots"].items():
-        pool.snapshots[content_hash] = CanonicalSnapshot(
-            content_hash=content_hash,
-            raw_content_format=snap["raw_content_format"],
-            byte_len=snap["byte_len"],
-            object_ref=snap["object_ref"],
-            normalization_version=snap["normalization_version"],
-            fetched_at_utc=snap["fetched_at_utc"],
-        )
-    store = SnapshotStore(ObjectStore(settings.path("frozen_corpus_for_runner") / "objects"))
-    return pool, store
 
 
 async def acquire_all(
@@ -463,9 +418,3 @@ def _write_json_atomic(path: Path, body: dict) -> None:
         raise
 
 
-def acquired_task_ids(settings: Settings) -> Sequence[str]:
-    """Task ids whose world is frozen and readable by the runner."""
-    pools = settings.path("frozen_corpus_for_runner") / "pools"
-    if not pools.exists():
-        return []
-    return sorted(p.stem for p in pools.glob("*.json"))

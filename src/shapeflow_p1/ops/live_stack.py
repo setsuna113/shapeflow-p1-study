@@ -88,7 +88,7 @@ def model_merkle_root(model_dir: Path) -> str:
         leaves.append(sha256_hex(canonical_json({
             "name": str(path.relative_to(model_dir)), "sha256": digest,
         })))
-    from ..acquire.task_registry import merkle_root
+    from ..hashing import merkle_root
 
     return merkle_root(leaves)
 

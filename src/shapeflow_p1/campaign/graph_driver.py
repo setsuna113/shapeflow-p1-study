@@ -35,9 +35,9 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
-from ..acquire.frozen_search import FrozenTaskCorpusBackend
-from ..acquire.snapshot_store import SnapshotStore
-from ..acquire.source_pool import SourcePool
+from ..world.search_backend import FrozenTaskCorpusBackend
+from ..world.snapshot_store import SnapshotStore
+from ..world.source_pool import SourcePool
 from ..canonical import canonical_json
 from ..hashing import sha256_hex
 from ..odr.checkpoints import SamplingEnvelope

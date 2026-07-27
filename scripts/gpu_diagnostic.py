@@ -23,8 +23,8 @@ from pathlib import Path
 REPO = Path(os.environ.get("SHAPEFLOW_REPO", Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(REPO / "src"))
 
-from shapeflow_p1.acquire.snapshot_store import SnapshotStore  # noqa: E402
-from shapeflow_p1.acquire.source_pool import build_source_pool, QueryResponse, RawResult  # noqa: E402
+from shapeflow_p1.world.snapshot_store import SnapshotStore  # noqa: E402
+from shapeflow_p1.world.source_pool import build_source_pool, QueryResponse, RawResult  # noqa: E402
 from shapeflow_p1.campaign.canary import _verify  # noqa: E402
 from shapeflow_p1.campaign.runner import CampaignRunner, RunnerConfig  # noqa: E402
 from shapeflow_p1.campaign.schedule import ArmSpec, cell_key  # noqa: E402

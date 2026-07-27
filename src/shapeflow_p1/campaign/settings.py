@@ -324,7 +324,7 @@ class Settings:
         keys existed in configs/task_source.yaml and none of them was ever read, so the
         corpus fingerprint described a policy that never left the machine.
         """
-        from ..evaluation.judge_client import SamplingEnvelope
+        from ..bench.grading.judge_client import SamplingEnvelope
 
         block = self.get("task_source", "authoring")
         return SamplingEnvelope(
@@ -346,7 +346,7 @@ class Settings:
         request body and therefore could drift without changing the measurement.  Keep the
         actual wire policy behind the same Settings boundary as corpus authoring.
         """
-        from ..evaluation.judge_client import SamplingEnvelope
+        from ..bench.grading.judge_client import SamplingEnvelope
 
         self.validate_judge_policy_versions()
 
