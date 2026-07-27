@@ -35,7 +35,17 @@ engine:
   vllm_venv: /storage/nvme/drbat/.venv
   torch_version: "2.11.0+cu129"
   torch_compiled_cuda: "12.9"    # torch.version.cuda
-  max_model_len: 16384
+  # 32768, not 16384. The engine refuses when prompt + max_tokens exceeds the window, and
+  # odr.max_content_length is a CHARACTER budget: across the frozen corpus the densest pages run
+  # at 1.08 chars per token, so a 50,000-character page can be 46,202 tokens. At 16384 that
+  # refused 3.2% of pages even at a 1024-token completion cap, and 32.8% at vendor's 8192 --
+  # and vendor turns the refusal into "return the raw page", which only P0 can suffer, on the
+  # largest pages, which is exactly the stratum P1 is meant to win. At 32768 the same corpus
+  # refuses 0.3%, and those are handled by a shared token-aware bound instead
+  # (evidence/shared_view.py) so the trimmed tail is invisible to BOTH arms.
+  #
+  # Within the model's own limit: Qwen3-14B declares max_position_embeddings 40960.
+  max_model_len: 32768
   gpu_memory_utilization: 0.90
   attention_backend: "@STEWARD_FREEZES@"
   # NOTE: prefix caching / chunked prefill are NOT global engine settings -- they differ by

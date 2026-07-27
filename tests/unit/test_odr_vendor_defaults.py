@@ -23,7 +23,17 @@ CONFIG = ROOT / "configs" / "week1.yaml"
 VENDOR = ROOT / ".build" / "odr-pristine" / "src" / "open_deep_research" / "configuration.py"
 
 # Knobs we set that are not vendor Configuration fields; they are protocol of our own.
-_NOT_VENDOR_FIELDS = {"search_api", "summarization_timeout_seconds"}
+#
+# summarization_prompt_overhead_tokens has no vendor counterpart because vendor never needed
+# one: its default summariser runs against a model whose context window is large enough that
+# page content plus a completion cap cannot overflow it. On a 32,768-token engine it can, so the
+# share of the window vendor's own prompt scaffolding consumes has to be stated to derive how
+# much page content is safe to show.
+_NOT_VENDOR_FIELDS = {
+    "search_api",
+    "summarization_timeout_seconds",
+    "summarization_prompt_overhead_tokens",
+}
 
 
 def _vendor_defaults() -> dict[str, object]:

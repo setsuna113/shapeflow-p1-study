@@ -119,16 +119,45 @@ class Bm25Index:
 class FrozenTaskCorpusBackend:
     """Deterministic retrieval over one task's frozen, vendor-visible source pool."""
 
-    def __init__(self, pool: SourcePool, snapshot_store: SnapshotStore) -> None:
+    def __init__(
+        self,
+        pool: SourcePool,
+        snapshot_store: SnapshotStore,
+        *,
+        content_budget=None,
+        tokenizer=None,
+    ) -> None:
+        """Serve the frozen world, bounded once for both arms.
+
+        ``content_budget`` bounds a page in characters *and* tokens before it leaves here, so
+        vendor's own character slice downstream is a no-op and P0 and P1 read the same bytes.
+        Bounding it in two places instead -- our runner for P1, vendor's utils for P0 -- agreed
+        only because both sliced the same string by the same integer, and could not express a
+        token bound at all.
+        """
+        from ..evidence.shared_view import apply_shared_budget
+
         self._pool = pool
         self._store = snapshot_store
         self._by_occurrence = {o.occurrence_id: o for o in pool.vendor_visible}
+        self._content_budget = content_budget
+        #: Pages whose tail was removed to fit the engine's window, for the write-up.
+        self.overflow_truncations: dict[str, dict] = {}
         documents = []
         self._doc_text: dict[str, str] = {}
         for occ in pool.vendor_visible:
             raw = ""
             if occ.content_hash and occ.content_hash in pool.snapshots:
                 raw = snapshot_store.read_text(pool.snapshots[occ.content_hash])
+                if content_budget is not None:
+                    bounded = apply_shared_budget(raw, content_budget, tokenizer)
+                    if bounded.reason:
+                        self.overflow_truncations[occ.occurrence_id] = {
+                            "reason": bounded.reason,
+                            "original_tokens": bounded.original_tokens,
+                            "kept_tokens": bounded.kept_tokens,
+                        }
+                    raw = bounded.text
             # Index title + snippet + full text; snippet ensures no-raw-content pages rank.
             doc = "\n".join(filter(None, [occ.title or "", occ.snippet_content or "", raw]))
             self._doc_text[occ.occurrence_id] = raw

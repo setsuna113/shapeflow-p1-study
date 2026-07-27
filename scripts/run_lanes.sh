@@ -150,8 +150,20 @@ gpu_health() {
 }
 
 # ---------------------------------------------------------------------------------------
-echo "== gate 1/5: P1 actually publishes, on one lane =="
+echo "== gate 0/5: the engine serves the workload the graph will send it =="
 start_lane 0
+# Before any cell is spent: does the real length distribution fit the window, at the real
+# concurrency? vLLM refuses when prompt + max_tokens exceeds the window and vendor turns that
+# refusal into "return the raw page" -- which only P0 can suffer, on the largest pages, the
+# stratum P1 is meant to win. The bar is zero refusals, not few.
+"$PY" "$REPO/scripts/capacity_smoke.py" --repo "$REPO" --data-root "$DATA_ROOT" --port 8000 \
+  || blocked "ENGINE_CAPACITY" \
+     "the engine refused or dropped requests the graph will send. A single context rejection is
+a page where P0 silently publishes raw text and P1 does not, and by construction it lands on the
+largest pages. Check max_model_len against the shared content budget before running any cell."
+
+# ---------------------------------------------------------------------------------------
+echo "== gate 1/5: P1 actually publishes, on one lane =="
 as_lane 0 sfrunner "$SF" smoke "${SMOKE_FLAGS[@]}" \
   || blocked "LANE0_CANARY" \
      "the single-lane canary failed. Read the canary summary before concluding anything about

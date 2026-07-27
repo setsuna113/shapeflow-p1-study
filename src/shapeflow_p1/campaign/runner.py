@@ -35,6 +35,7 @@ from typing import Callable, Optional, Sequence
 
 from ..canonical import canonical_json
 from ..evidence.model_tokenizer import load_frozen_tokenizer
+from ..evidence.shared_view import apply_shared_budget
 from ..experiment.ledger import TERMINAL_STATES, Ledger
 from ..experiment.state_machine import Phase
 from ..hashing import sha256_hex
@@ -380,6 +381,24 @@ class CampaignRunner:
 
     # --- execution ---------------------------------------------------------------------
 
+    def shared_content_budget(self):
+        """How much of a page either arm may see, derived from the frozen engine window.
+
+        Derived rather than configured: the bound only stays correct if it moves when the
+        window or the completion cap moves. A separately-chosen number is how a legal character
+        count became an illegal token count and vLLM refused the request outright.
+        """
+        from ..evidence.shared_view import SharedContentBudget
+
+        return SharedContentBudget.derive(
+            max_chars=int(self.settings.get("week1", "odr", "max_content_length")),
+            max_model_len=int(self.settings.get("stack", "engine", "max_model_len")),
+            completion_cap=int(
+                self.settings.get("week1", "odr", "summarization_model_max_tokens")),
+            prompt_overhead_tokens=int(
+                self.settings.get("week1", "odr", "summarization_prompt_overhead_tokens")),
+        )
+
     def _page_bytes(self, pool, snapshots) -> tuple[dict, dict]:
         """Resolve the exact bytes vendor would have summarised, keyed as the checkpoint keys them.
 
@@ -390,7 +409,7 @@ class CampaignRunner:
         P0 read a prefix would be measuring page length rather than selection, and AGENTS.md
         bars it from the primary contrast.
         """
-        limit = int(self.settings.get("week1", "odr", "max_content_length"))
+        budget = self.shared_content_budget()
         text_by_id: dict[str, str] = {}
         occurrence_by_id: dict[str, str] = {}
         for occurrence in pool.vendor_visible:
@@ -399,7 +418,8 @@ class CampaignRunner:
             snapshot = pool.snapshots.get(occurrence.content_hash)
             if snapshot is None:
                 continue
-            truncated = snapshots.read_text(snapshot)[:limit]
+            truncated = apply_shared_budget(
+                snapshots.read_text(snapshot), budget, self.tokenizer).text
             key = sha256_hex(truncated.encode("utf-8"))
             text_by_id.setdefault(key, truncated)
             occurrence_by_id.setdefault(key, occurrence.occurrence_id)
@@ -547,6 +567,8 @@ class CampaignRunner:
                 store_checkpoint=self._store_checkpoint,
                 store_continuation=self._store_continuation,
                 graph=self._graph,
+                content_budget=self.shared_content_budget(),
+                tokenizer=self.tokenizer,
             )
         except Exception as e:  # noqa: BLE001 - a cell that died may have already spent tokens
             e2e_latency_seconds = max(0.0, time.monotonic() - cell_started)

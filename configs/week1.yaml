@@ -143,6 +143,13 @@ odr:
   # is supposed to win. P1 never touches this path. An asymmetric truncation on the baseline is
   # not a shared knob, so it goes back to vendor's own value.
   summarization_model_max_tokens: 8192
+  # What vendor's prompt wraps around the page content: system message, instructions, the
+  # JSON-shaped output contract and the chat template. Subtracted from the engine window along
+  # with the completion cap to derive how much page content either arm may see, so the bound
+  # moves when the window or the cap moves instead of drifting out of agreement with them.
+  # Sized generously; it costs a little visible content on the very largest pages and nothing
+  # anywhere else, whereas an underestimate is a refused request.
+  summarization_prompt_overhead_tokens: 1024
   compression_model_max_tokens: 4096
   final_report_model_max_tokens: 8192
   max_researcher_iterations: 3

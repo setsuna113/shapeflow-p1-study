@@ -56,13 +56,17 @@ case "$LANE" in ''|*[!0-9]*) echo "SHAPEFLOW_LANE must be a non-negative integer
 
 [ "$(id -u)" -eq 0 ] || { echo "start_engine.sh switches identity and must run as root" >&2; exit 1; }
 
-# The frozen flags for this layer, emitted by the same config loader everything else reads.
-read -r MAX_NUM_SEQS PREFIX_CACHING CHUNKED_PREFILL <<EOF
+# The frozen flags for this layer AND the engine block, emitted by the same config loader
+# everything else reads. max-model-len was hard-coded here while stack.yaml declared its own
+# value -- two copies of a number that must agree, which is the drift shape that has already
+# cost this study three separate launches.
+read -r MAX_NUM_SEQS PREFIX_CACHING CHUNKED_PREFILL MAX_MODEL_LEN GPU_MEM_UTIL <<EOF
 $("${SHAPEFLOW_PYTHON:-$REPO/.venv/bin/python}" - "$REPO" "$LAYER" <<'PY'
 import sys, yaml
 repo, layer = sys.argv[1], sys.argv[2]
 with open(f"{repo}/configs/stack.yaml", encoding="utf-8") as handle:
-    isolation = yaml.safe_load(handle)["isolation"]
+    stack = yaml.safe_load(handle)
+isolation = stack["isolation"]
 if layer not in isolation:
     raise SystemExit(f"configs/stack.yaml declares no isolation layer {layer!r}")
 block = isolation[layer]
@@ -70,11 +74,14 @@ print(
     int(block["max_num_seqs"]),
     "on" if block["enable_prefix_caching"] else "off",
     "on" if block["enable_chunked_prefill"] else "off",
+    int(stack["engine"]["max_model_len"]),
+    stack["engine"]["gpu_memory_utilization"],
 )
 PY
 )
 EOF
-[ -n "${MAX_NUM_SEQS:-}" ] || { echo "could not read isolation.$LAYER from configs/stack.yaml" >&2; exit 1; }
+[ -n "${MAX_NUM_SEQS:-}" ] && [ -n "${MAX_MODEL_LEN:-}" ] \
+  || { echo "could not read engine/isolation.$LAYER from configs/stack.yaml" >&2; exit 1; }
 
 APC_FLAG="--no-enable-prefix-caching"
 [ "$PREFIX_CACHING" = "on" ] && APC_FLAG="--enable-prefix-caching"
@@ -108,7 +115,7 @@ exec setsid /usr/local/bin/sfsupervise "$UNIT_NAME" sfinfer "$REPO" "$DATA_ROOT"
   "$VLLM_VENV/bin/python" -m vllm.entrypoints.openai.api_server \
       --model "$MODEL_PATH" --served-model-name Qwen3-14B-AWQ \
       --host 127.0.0.1 --port "$PORT" \
-      --max-model-len 16384 --gpu-memory-utilization 0.90 \
+      --max-model-len "$MAX_MODEL_LEN" --gpu-memory-utilization "$GPU_MEM_UTIL" \
       --max-num-seqs "$MAX_NUM_SEQS" \
       "$APC_FLAG" \
       "$PREFILL_FLAG" \

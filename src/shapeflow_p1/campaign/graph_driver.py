@@ -701,6 +701,8 @@ def install_frozen_search(
     *,
     max_results: int,
     on_query: Optional[Callable[[dict], None]] = None,
+    content_budget=None,
+    tokenizer=None,
 ):
     """Rebind vendor's search for the duration of one cell, and put it back afterwards.
 
@@ -710,7 +712,8 @@ def install_frozen_search(
     """
     import open_deep_research.utils as vendor_utils
 
-    backend = FrozenTaskCorpusBackend(pool, snapshots)
+    backend = FrozenTaskCorpusBackend(
+        pool, snapshots, content_budget=content_budget, tokenizer=tokenizer)
     original = vendor_utils.tavily_search_async
     vendor_utils.tavily_search_async = frozen_search_async(
         backend, max_results_default=max_results, on_query=on_query)
@@ -954,11 +957,18 @@ async def run_cell(
     store_checkpoint: Optional[Callable[[Any], str]] = None,
     store_continuation: Optional[Callable[[dict], str]] = None,
     graph: Any = None,
+    content_budget=None,
+    tokenizer=None,
 ) -> CellResult:
     """Run one cell on the real graph and return what it produced.
 
     ``graph`` is injected only so tests can drive a smaller compiled graph; production passes
     None and the module imports vendor's own compiled ``deep_researcher``.
+
+    ``content_budget`` bounds what either arm may see of a page, in characters and in tokens.
+    It is threaded down to the frozen backend so vendor and the P1 hook read the same bytes; a
+    page bounded in one place and not the other is how P0 came to be handed requests the engine
+    refused outright.
     """
     from langchain_core.messages import HumanMessage
 
@@ -1052,7 +1062,8 @@ async def run_cell(
     with _environment(env), _summarize_timeout_applied(summarize_timeout), \
             _odr_seed_applied(cell.seed), install_frozen_search(
             pool, snapshots, max_results=max_results,
-            on_query=lambda payload: recorder.record("SEARCH_QUERY", payload)), \
+            on_query=lambda payload: recorder.record("SEARCH_QUERY", payload),
+            content_budget=content_budget, tokenizer=tokenizer), \
             strategies_bound(bundle), bind_run(binding):
         result.seed_applied = True
         try:
