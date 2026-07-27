@@ -39,6 +39,12 @@ export SHAPEFLOW_REPO="$REPO"
 [ "$(id -u)" -eq 0 ] || { echo "run_lanes.sh switches identity and must run as root" >&2; exit 1; }
 mkdir -p "$REPORTS" "$REPO/logs"
 
+# The layer's unit suffix, matching start_engine.sh's own construction. Written once: the
+# stopper, the epoch path and the log path all have to name the same engine, and three copies of
+# a string is three chances for one of them to name an engine that does not exist.
+LAYER_UNIT="${SHAPEFLOW_LAYER:-causal_native}"
+lane_unit() { echo "${LAYER_UNIT//_/-}-lane${1}"; }
+
 blocked() {
   local reason="$1" detail="$2"
   {
@@ -61,10 +67,24 @@ as() { local role="$1"; shift; runuser -u "$role" -- env \
   SHAPEFLOW_REPO="$REPO" SHAPEFLOW_DATA_ROOT="$DATA_ROOT" HOME=/tmp \
   PYTHONHASHSEED=0 TZ=UTC PYTHONUNBUFFERED=1 "$@"; }
 
+# Every variable the runner path actually reads, enumerated rather than discovered one failure
+# at a time. Three separate launches died on a missing one -- the approval location, then the
+# engine epoch -- each reporting a confusing error about configuration when the real problem was
+# an environment that simply was not passed down.
+#
+# SHAPEFLOW_ENGINE_EPOCH_FILE is per lane and must match what start_engine.sh wrote: a block is
+# paired-valid only under a single engine epoch, so a runner reading another lane's epoch file
+# would attribute its cells to an engine that never served them.
+lane_epoch_file() { echo "/run/shapeflow-vllm-${1}/engine_epoch"; }
+
 as_lane() { local lane="$1" role="$2"; shift 2; runuser -u "$role" -- env \
   SHAPEFLOW_REPO="$REPO" SHAPEFLOW_DATA_ROOT="$DATA_ROOT" HOME=/tmp \
+  SHAPEFLOW_APPROVAL_FILE="$SHAPEFLOW_APPROVAL_FILE" \
   PYTHONHASHSEED=0 TZ=UTC PYTHONUNBUFFERED=1 \
-  SHAPEFLOW_LANE="$lane" SHAPEFLOW_GPU_UUID="${GPUS[$lane]}" "$@"; }
+  SHAPEFLOW_LANE="$lane" SHAPEFLOW_GPU_UUID="${GPUS[$lane]}" \
+  SHAPEFLOW_ENGINE_EPOCH_FILE="$(lane_epoch_file "$(lane_unit "$lane")")" \
+  SHAPEFLOW_ENGINE_LOG="$REPO/logs/$(lane_unit "$lane").log" \
+  "$@"; }
 
 read -r LANE_COUNT PAID_LANE <<EOF
 $("$PY" - "$REPO" <<'PYX'
@@ -117,8 +137,7 @@ start_lane() {
 
 stop_lane_engine() {
   local lane="$1"
-  local unit="vllm-causal-native-lane${lane}"
-  local pidfile="/run/shapeflow/${unit}.pid"
+  local pidfile="/run/shapeflow/vllm-$(lane_unit "$lane").pid"
   [ -f "$pidfile" ] && kill -TERM "$(cat "$pidfile")" 2>/dev/null || true
 }
 
