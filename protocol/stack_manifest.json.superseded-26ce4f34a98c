@@ -1,12 +1,12 @@
 {
-  "declared_sha256": "93c4d140f54d21f79b3716fdc38440cbab3f06e182ce2d6de1589b0da77bbea5",
-  "frozen_at_utc": "2026-07-27T17:03:03Z",
-  "manifest_sha256": "1b4a4e3a6fe8fa4509372cef4e5aa46c6d52b2d94d6f63c318a40412169d5d51",
+  "declared_sha256": "3662fe30e5e561a427141e1e86c841aba0f055302be24f47ce765505eed462e0",
+  "frozen_at_utc": "2026-07-26T10:45:26Z",
+  "manifest_sha256": "26ce4f34a98c5ea70604cd78ebec40abfc8e83dc30fc39edbcb4629df62d82f3",
   "observed": {
     "atomize_prompt_sha256": "791f91beca9ddb74ad949cb7b033f0611e7447c19719e1b35da7a4e52569ff01",
     "attention_backend": "FLASH_ATTN",
     "driver_version": "550.163.01",
-    "engine_flags": "/storage/nvme/drbat/.venv/bin/python -m vllm.entrypoints.openai.api_server --model /storage/nvme/reme/models/Qwen3-14B-AWQ --served-model-name Qwen3-14B-AWQ --host 127.0.0.1 --port 8000 --max-model-len 16384 --gpu-memory-utilization 0.90 --max-num-seqs 16 --no-enable-prefix-caching --no-enable-chunked-prefill --enable-auto-tool-choice --tool-call-parser hermes",
+    "engine_flags": "/storage/nvme/drbat/.venv/bin/python -m vllm.entrypoints.openai.api_server --model /storage/nvme/reme/models/Qwen3-14B-AWQ --served-model-name Qwen3-14B-AWQ --host 127.0.0.1 --port 8000 --max-model-len 16384 --gpu-memory-utilization 0.90 --max-num-seqs 1 --no-enable-prefix-caching --no-enable-chunked-prefill --enable-auto-tool-choice --tool-call-parser hermes",
     "gpu_count": "4",
     "gpu_name": "NVIDIA GeForce RTX 4090",
     "gpu_uuid": "GPU-ef013951-e496-78da-da70-a5a289dcc634",
