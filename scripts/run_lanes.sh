@@ -28,6 +28,13 @@ PY="$REPO/.venv/bin/python"
 REPORTS="$REPO/reports"
 CAPACITY_SECONDS="${SHAPEFLOW_CAPACITY_SECONDS:-1800}"
 MIN_FREE_BYTES="${SHAPEFLOW_MIN_FREE_BYTES:-12884901888}"   # 12 GiB
+# Exported, not merely assigned. This script is reached two ways -- handed over from
+# bootstrap_and_run.sh, which exports these, and run directly to re-enter the lane gates after a
+# fix. Relying on the caller's environment made the second path fail on the first line that
+# needed an approval, with an error about configuration rather than about what was wrong.
+export SHAPEFLOW_DATA_ROOT="$DATA_ROOT"
+export SHAPEFLOW_APPROVAL_FILE="${SHAPEFLOW_APPROVAL_FILE:-$DATA_ROOT/approvals/launch_approval.json}"
+export SHAPEFLOW_REPO="$REPO"
 
 [ "$(id -u)" -eq 0 ] || { echo "run_lanes.sh switches identity and must run as root" >&2; exit 1; }
 mkdir -p "$REPORTS" "$REPO/logs"
