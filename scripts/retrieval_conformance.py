@@ -56,11 +56,17 @@ def main() -> int:
     ap.add_argument("--revision", default="")
     ap.add_argument("--docs", type=int, default=200)
     ap.add_argument("--threads", type=int, default=16)
+    ap.add_argument("--dtype", default="float32",
+                    help="serve dtype. Must be the dtype the encoder will actually run in: "
+                         "conformance in fp32 says nothing about a service running bf16.")
     ap.add_argument("--batch-size", type=int, default=4,
                     help="passages pad to the longest in their batch; keep small")
     ap.add_argument("--output", type=pathlib.Path,
-                    default=REPO / "reports" / "RETRIEVAL_CONFORMANCE.json")
+                    default=None)
     args = ap.parse_args()
+    if args.output is None:
+        tag = args.model.rsplit("/", 1)[-1].replace(".", "_")
+        args.output = REPO / "reports" / f"RETRIEVAL_CONFORMANCE_{tag}_{args.dtype}.json"
 
     print(f"loading index from {args.index_dir} ...", flush=True)
     started = time.time()
@@ -77,9 +83,10 @@ def main() -> int:
         print("FAILED: could not resolve enough document text from the corpus", file=sys.stderr)
         return 1
 
-    print(f"loading encoder {args.model} on CPU ({args.threads} threads) ...", flush=True)
+    print(f"loading encoder {args.model} on CPU, {args.dtype}, {args.threads} threads ...", flush=True)
     encoder = QueryEncoder(
-        EncoderSpec(model=args.model, revision=args.revision), threads=args.threads)
+        EncoderSpec(model=args.model, revision=args.revision, dtype=args.dtype),
+        threads=args.threads)
 
     started = time.time()
     def _tick(done, total, min_cos):
@@ -95,6 +102,7 @@ def main() -> int:
     body["index_dir"] = str(args.index_dir)
     body["encode_seconds"] = round(elapsed, 2)
     body["batch_size"] = args.batch_size
+    body["dtype"] = args.dtype
     body["diagnosis"] = result.diagnosis()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
