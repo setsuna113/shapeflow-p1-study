@@ -129,9 +129,16 @@ class QueryEncoder:
                 hidden = self._model(**batch).last_hidden_state
             # Left padding puts the final real token last, for every sequence in the batch.
             pooled = hidden[:, -1, :]
+            # Cast to fp32 *before* normalising, not after. Normalising in bf16 leaves a vector
+            # whose norm is only unit to about 3 decimal places -- 8 mantissa bits are not enough
+            # to land on 1.0 -- and the index's search guard rightly rejects that. Scaling a query
+            # vector cannot change an inner-product ranking, so the error was harmless to results
+            # and fatal to the check; doing the arithmetic in fp32 removes it rather than
+            # loosening the guard that found it.
+            pooled = pooled.to(torch.float32)
             if self.spec.normalize:
                 pooled = torch.nn.functional.normalize(pooled, p=2, dim=-1)
-            out.append(pooled.to(torch.float32).cpu().numpy().astype(np.float32))
+            out.append(pooled.cpu().numpy().astype(np.float32))
         return np.vstack(out) if out else np.zeros((0, 0), dtype=np.float32)
 
     def encode_query(self, text: str):
