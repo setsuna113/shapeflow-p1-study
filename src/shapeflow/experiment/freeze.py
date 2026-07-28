@@ -6,17 +6,22 @@ that "what was pre-registered" is a hash, not a promise. Any change after freeze
 protocol version rather than overwriting -- so the frozen record and the results computed under
 it can never silently disagree.
 
-The launch approval pins the protocol/budget/threshold hashes and records the approval MODE.
-The protocol of record (`SHAPEFLOW_P1_WEEK1_CODING_PLAN_v0.1_2026-07-24.md` sections 0 and 4.1)
-fixes that mode as ``USER_EXPLICIT_AUTO_LAUNCH``: the user's "build it and start running"
-instruction of 2026-07-24 *is* the launch authorization, so once every hard gate is green the
-runner starts the campaign without asking again. Auto-launch is not a bypass -- a missing
-secret, stack mismatch, unfrozen data, P0 parity failure, unclosed schema or smoke failure
-still fails closed into ``reports/BLOCKED*.md`` (plan section 0, AGENTS.md section 7).
+The launch approval pins the protocol, budget and pre-registration hashes and records the
+approval MODE. The protocol of record (`SHAPEFLOW_FREEZE_1.md`, with the operator's standing
+run instruction of 2026-07-27) fixes that mode as ``USER_EXPLICIT_AUTO_LAUNCH``: a gate that
+passes advances to the next phase without asking again.
 
-There is deliberately no "gate-green-then-pause" mode. A mode that stops for a human go-ahead
-would be a *different* user decision, and inventing one here would encode a decision the user
-never made.
+Auto-launch is not a bypass, and under Freeze-1 it is explicitly two-sided. A gate that FAILS
+stops the program then and there: no automatic repair iteration and no automatic pivot, because
+an iteration spends the single post-iteration retest allowance and only a person may spend it.
+The failing gate emits its measured values against their thresholds, a diagnosis, and the
+pre-authored options with their costs, and waits. A missing secret, stack mismatch, unfrozen
+data, P0 parity failure, unclosed schema or smoke failure still fails closed into
+``reports/BLOCKED*.md``.
+
+There is deliberately no mode that stops on a *passing* gate. A mode that waited for a human
+go-ahead on success would be a different user decision, and inventing one here would encode a
+decision the operator never made.
 """
 
 from __future__ import annotations
@@ -87,9 +92,9 @@ def build_launch_approval(
     *,
     protocol_sha: str,
     budget_sha: str,
-    decision_thresholds_sha: str,
+    prereg_frozen_sha: str,
     approved_at_utc: str,
-    approval_source_date: str = "2026-07-24",
+    approval_source_date: str = "2026-07-27",
     mode: str = APPROVAL_MODE_AUTO,
 ) -> dict:
     """Materialize the launch_approval content.
@@ -100,33 +105,34 @@ def build_launch_approval(
     """
     if mode not in APPROVAL_MODES:
         raise ApprovalMismatch(
-            f"approval_mode {mode!r} is not authorized by protocol v0.1 "
+            f"approval_mode {mode!r} is not authorized by the frozen protocol "
             f"(authorized: {sorted(APPROVAL_MODES)}); a new mode requires a new protocol SHA"
         )
     return {
         "protocol_sha": protocol_sha,
         "budget_sha": budget_sha,
-        "decision_thresholds_sha": decision_thresholds_sha,
+        "prereg_frozen_sha": prereg_frozen_sha,
         "approval_mode": mode,
         "approval_source_date": approval_source_date,
         "approved_at_utc": approved_at_utc,
         "note": (
-            "Protocol v0.1 auto-launch: the user's 2026-07-24 instruction to build and start "
-            "running is the launch authorization. Once every hard gate is green the runner "
-            "starts the campaign without asking again. Any gate failure still fails closed "
-            "into reports/BLOCKED*.md."
+            "Freeze-1 auto-launch: the operator's 2026-07-27 standing instruction to execute "
+            "the plan in dependency order is the launch authorization. A passing gate advances "
+            "without asking again; a failing gate stops the program and waits for a person, "
+            "with no automatic iteration or pivot. Any gate failure still fails closed into "
+            "reports/BLOCKED*.md."
         ),
     }
 
 
 def verify_launch_approval(approval: dict, *, protocol_sha: str, budget_sha: str,
-                           decision_thresholds_sha: str) -> None:
+                           prereg_frozen_sha: str) -> None:
     """Raise ApprovalMismatch unless the approval's pinned hashes match the live configuration.
     The launch gate calls this so an edited config can never run under a stale approval."""
     expected = {
         "protocol_sha": protocol_sha,
         "budget_sha": budget_sha,
-        "decision_thresholds_sha": decision_thresholds_sha,
+        "prereg_frozen_sha": prereg_frozen_sha,
     }
     for key, want in expected.items():
         got = approval.get(key)
@@ -137,6 +143,6 @@ def verify_launch_approval(approval: dict, *, protocol_sha: str, budget_sha: str
     mode = approval.get("approval_mode")
     if mode not in APPROVAL_MODES:
         raise ApprovalMismatch(
-            f"approval_mode {mode!r} is not authorized by protocol v0.1 "
+            f"approval_mode {mode!r} is not authorized by the frozen protocol "
             f"(authorized: {sorted(APPROVAL_MODES)})"
         )

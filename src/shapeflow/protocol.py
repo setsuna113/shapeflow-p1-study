@@ -38,7 +38,7 @@ __all__ = [
     "write_approval_file",
 ]
 
-PROTOCOL_DOCUMENT = "protocol/SHAPEFLOW_P1_WEEK1_CODING_PLAN_v0.1_2026-07-24.md"
+PROTOCOL_DOCUMENT = "protocol/SHAPEFLOW_FREEZE_1.md"
 
 
 class ApprovalError(RuntimeError):
@@ -67,6 +67,22 @@ class ProtocolBinding:
     """Every input whose change would change what the campaign means."""
 
     protocol_sha: str
+    # Two prereg fields, not one, and deliberately so. Resolving a numeric slot during Phase 0
+    # legitimately changes the document, so a single digest would invalidate the approval on
+    # every fill. The template locks the *structure* and is stable across Phase 0; the frozen
+    # document is empty until Phase 0 exit and immutable after. G0's first criterion is exactly
+    # that the second is non-empty with no PENDING slots left.
+    prereg_template_sha: str
+    prereg_frozen_sha: str
+    # The gate criteria and the contract documents decide what "passed" means and what the
+    # broker is allowed to do. Both are empty until they exist, and binding them from the start
+    # means the approval invalidates the moment they appear -- which is correct, because a
+    # campaign with gates is not the campaign without them.
+    gates_sha: str
+    contracts_sha: str
+    # What every arm retrieves, and the benchmark provenance it retrieves from.
+    retrieval_freeze_sha: str
+    bench_manifest_sha: str
     budget_sha: str
     variants_sha: str
     stack_sha: str
@@ -84,6 +100,12 @@ class ProtocolBinding:
     def content(self) -> dict:
         return {
             "protocol_sha": self.protocol_sha,
+            "prereg_template_sha": self.prereg_template_sha,
+            "prereg_frozen_sha": self.prereg_frozen_sha,
+            "gates_sha": self.gates_sha,
+            "contracts_sha": self.contracts_sha,
+            "retrieval_freeze_sha": self.retrieval_freeze_sha,
+            "bench_manifest_sha": self.bench_manifest_sha,
             "budget_sha": self.budget_sha,
             "variants_sha": self.variants_sha,
             "stack_sha": self.stack_sha,
@@ -105,10 +127,27 @@ def _sha_of(path: Path) -> str:
     return sha256_hex(path.read_bytes()) if path.exists() else ""
 
 
+def _sha_of_tree(directory: Path, pattern: str) -> str:
+    """A digest over every matching file in ``directory``, by relative name and bytes.
+
+    An absent or empty directory hashes to the digest of an empty mapping rather than to the
+    empty string, so "there are no gate files" is a *stated* fact that the approval binds. If it
+    collapsed to "" the first gate file to appear would be indistinguishable from a file that had
+    always been there.
+    """
+    directory = Path(directory)
+    body = {
+        str(path.relative_to(directory)): sha256_hex(path.read_bytes())
+        for path in sorted(directory.rglob(pattern)) if path.is_file()
+    } if directory.exists() else {}
+    return sha256_hex(canonical_json(body))
+
+
 def compute_binding(repo: Path, *, approved_commit: str = "") -> ProtocolBinding:
     """Read the live configuration and produce the binding it implies."""
     repo = Path(repo)
     configs = repo / "configs"
+    _, prereg_template = load_config(configs / "prereg.yaml")
     _, budget = load_config(configs / "budget_v1.yaml")
     _, variants = load_config(configs / "variants.yaml")
     _, stack = load_config(configs / "stack.yaml")
@@ -118,6 +157,12 @@ def compute_binding(repo: Path, *, approved_commit: str = "") -> ProtocolBinding
     manifest = repo / "protocol" / "stack_manifest.json"
     return ProtocolBinding(
         protocol_sha=protocol_sha(repo),
+        prereg_template_sha=prereg_template,
+        prereg_frozen_sha=_sha_of(repo / "protocol" / "prereg.lock.json"),
+        gates_sha=_sha_of_tree(configs / "gates", "*.yaml"),
+        contracts_sha=_sha_of_tree(repo / "src" / "shapeflow" / "contracts" / "docs", "*.md"),
+        retrieval_freeze_sha=_sha_of(repo / "protocol" / "retrieval_freeze.json"),
+        bench_manifest_sha=_sha_of(repo / "protocol" / "bench_manifest.json"),
         budget_sha=budget,
         variants_sha=variants,
         stack_sha=stack,

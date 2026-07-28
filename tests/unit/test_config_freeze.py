@@ -74,7 +74,7 @@ def test_freeze_record_digest_is_deterministic_and_content_addressed():
 
 def test_launch_approval_is_auto_launch_per_protocol_v01():
     approval = build_launch_approval(
-        protocol_sha="p", budget_sha="b", decision_thresholds_sha="d",
+        protocol_sha="p", budget_sha="b", prereg_frozen_sha="d",
         approved_at_utc="2026-07-24T18:00:00Z",
     )
     # Protocol v0.1 sections 0 and 4.1: the user's 2026-07-24 "build it and start running"
@@ -93,7 +93,7 @@ def test_launch_approval_refuses_an_unauthorized_mode():
     """
     with pytest.raises(ApprovalMismatch, match="not authorized"):
         build_launch_approval(
-            protocol_sha="p", budget_sha="b", decision_thresholds_sha="d",
+            protocol_sha="p", budget_sha="b", prereg_frozen_sha="d",
             approved_at_utc="2026-07-24T18:00:00Z",
             mode="USER_EXPLICIT_GATE_GREEN_THEN_PAUSE",
         )
@@ -102,22 +102,22 @@ def test_launch_approval_refuses_an_unauthorized_mode():
 def test_verify_launch_approval_rejects_a_forged_mode_on_disk():
     """An approval file edited to a different mode must not verify."""
     approval = build_launch_approval(
-        protocol_sha="p", budget_sha="b", decision_thresholds_sha="d",
+        protocol_sha="p", budget_sha="b", prereg_frozen_sha="d",
         approved_at_utc="2026-07-24T18:00:00Z",
     )
     approval["approval_mode"] = "USER_EXPLICIT_GATE_GREEN_THEN_PAUSE"
     with pytest.raises(ApprovalMismatch, match="not authorized"):
         verify_launch_approval(approval, protocol_sha="p", budget_sha="b",
-                               decision_thresholds_sha="d")
+                               prereg_frozen_sha="d")
 
 
 def test_verify_launch_approval_detects_drift():
     approval = build_launch_approval(
-        protocol_sha="p", budget_sha="b", decision_thresholds_sha="d",
+        protocol_sha="p", budget_sha="b", prereg_frozen_sha="d",
         approved_at_utc="2026-07-24T18:00:00Z",
     )
-    verify_launch_approval(approval, protocol_sha="p", budget_sha="b", decision_thresholds_sha="d")
+    verify_launch_approval(approval, protocol_sha="p", budget_sha="b", prereg_frozen_sha="d")
     # A changed threshold config invalidates the approval.
-    with pytest.raises(ApprovalMismatch, match="decision_thresholds_sha"):
+    with pytest.raises(ApprovalMismatch, match="prereg_frozen_sha"):
         verify_launch_approval(approval, protocol_sha="p", budget_sha="b",
-                               decision_thresholds_sha="CHANGED")
+                               prereg_frozen_sha="CHANGED")
