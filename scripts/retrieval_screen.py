@@ -69,6 +69,9 @@ def main() -> int:
     ap.add_argument("--qrel-golds", required=True, type=pathlib.Path)
     ap.add_argument("--qrel-evidence", required=True, type=pathlib.Path)
     ap.add_argument("--threads", type=int, default=16)
+    ap.add_argument("--dtype", default="float32",
+                    help="must be the dtype the service will run in: latency measured in one "
+                         "dtype says nothing about a service running another")
     ap.add_argument("--outdir", type=pathlib.Path, default=REPO / "reports" / "retrieval_screen")
     args = ap.parse_args()
 
@@ -92,8 +95,9 @@ def main() -> int:
     index = load_index(args.index_dir)
     print(f"[{args.tag}] index {index.num_docs} docs, dim {index.dim}", flush=True)
 
-    encoder = QueryEncoder(EncoderSpec(model=args.model, revision=args.revision),
-                           threads=args.threads)
+    encoder = QueryEncoder(
+        EncoderSpec(model=args.model, revision=args.revision, dtype=args.dtype),
+        threads=args.threads)
     latencies: list[float] = []
     per_query: dict[str, list[str]] = {}
     started = time.time()
@@ -119,6 +123,7 @@ def main() -> int:
         "split": str(args.split),
         "num_queries": len(split_ids),
         "threads": args.threads,
+        "dtype": args.dtype,
         "encode_latency_ms": {
             "p50": round(latencies[len(latencies) // 2] * 1000, 2),
             "p95": round(latencies[int(0.95 * len(latencies)) - 1] * 1000, 2),
