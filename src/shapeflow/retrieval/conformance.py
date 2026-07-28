@@ -103,7 +103,9 @@ class ConformanceResult:
 
 
 def check_encoder_matches_index(encoder, index, docs: Mapping[str, str], *,
-                                tolerance: float = DEFAULT_TOLERANCE) -> ConformanceResult:
+                                tolerance: float = DEFAULT_TOLERANCE,
+                                batch_size: int = 8,
+                                progress=None) -> ConformanceResult:
     """Re-encode ``docs`` (docid -> text) and compare against the index.
 
     ``docs`` must be documents the index already contains, so the comparison is against a stored
@@ -118,13 +120,16 @@ def check_encoder_matches_index(encoder, index, docs: Mapping[str, str], *,
     if not docids:
         raise ValueError("no documents to check; a conformance run over nothing passes vacuously")
 
-    vectors = encoder.encode([docs[d] for d in docids], is_query=False)
-    for docid, vector in zip(docids, vectors):
+    vectors = encoder.encode([docs[d] for d in docids], is_query=False,
+                             batch_size=batch_size)
+    for done, (docid, vector) in enumerate(zip(docids, vectors), start=1):
         stored = index.vector_for(docid)
         cosine = float(np.dot(vector, stored) /
                        (np.linalg.norm(vector) * np.linalg.norm(stored)))
         hits = index.search(vector, top_k=1)
         rank = hits[0].rank if hits and hits[0].docid == docid else None
         result.docs.append(DocCheck(docid=docid, cosine=cosine, self_retrieved_rank=rank))
+        if progress and done % 25 == 0:
+            progress(done, len(docids), min(d.cosine for d in result.docs))
     result.checked = len(result.docs)
     return result

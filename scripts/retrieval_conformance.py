@@ -56,6 +56,8 @@ def main() -> int:
     ap.add_argument("--revision", default="")
     ap.add_argument("--docs", type=int, default=200)
     ap.add_argument("--threads", type=int, default=16)
+    ap.add_argument("--batch-size", type=int, default=4,
+                    help="passages pad to the longest in their batch; keep small")
     ap.add_argument("--output", type=pathlib.Path,
                     default=REPO / "reports" / "RETRIEVAL_CONFORMANCE.json")
     args = ap.parse_args()
@@ -80,13 +82,19 @@ def main() -> int:
         EncoderSpec(model=args.model, revision=args.revision), threads=args.threads)
 
     started = time.time()
-    result = check_encoder_matches_index(encoder, index, docs)
+    def _tick(done, total, min_cos):
+        print(f"  {done}/{total} checked, min cosine so far {min_cos:.5f} "
+              f"({time.time() - started:.0f}s)", flush=True)
+
+    result = check_encoder_matches_index(encoder, index, docs,
+                                         batch_size=args.batch_size, progress=_tick)
     elapsed = time.time() - started
 
     body = result.content()
     body["model"] = args.model
     body["index_dir"] = str(args.index_dir)
     body["encode_seconds"] = round(elapsed, 2)
+    body["batch_size"] = args.batch_size
     body["diagnosis"] = result.diagnosis()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")

@@ -101,28 +101,38 @@ class QueryEncoder:
             self.spec.model, torch_dtype=getattr(torch, self.spec.dtype), **kwargs)
         self._model.eval().to(self.device)
 
-    def encode(self, texts: Sequence[str], *, is_query: bool):
-        """Embed ``texts``. Returns a float32 array, one L2-normalised row per input."""
+    def encode(self, texts: Sequence[str], *, is_query: bool, batch_size: int = 8):
+        """Embed ``texts``. Returns a float32 array, one L2-normalised row per input.
+
+        Batched, and the default is small on purpose. Padding is per batch, so one long document
+        among many short ones pads the whole batch up to its length: at ``passage_max_len`` 4096
+        a single 200-item batch materialises a 200x4096xhidden activation tensor, which on CPU is
+        both gigabytes of RAM and minutes of avoidable arithmetic. Queries are ~50 tokens and do
+        not care; passages are the reason this parameter exists.
+        """
         import numpy as np
         import torch
 
+        if self.spec.pooling != "eos":
+            raise ValueError(f"unsupported pooling {self.spec.pooling!r}; the index is eos-pooled")
         self._load()
         prefix = QUERY_PREFIX if is_query else PASSAGE_PREFIX
         max_len = self.spec.query_max_len if is_query else self.spec.passage_max_len
-        batch = self._tokenizer(
-            [prefix + t for t in texts],
-            padding=True, truncation=True, max_length=max_len, return_tensors="pt",
-        ).to(self.device)
 
-        with torch.no_grad():
-            hidden = self._model(**batch).last_hidden_state
-        if self.spec.pooling != "eos":
-            raise ValueError(f"unsupported pooling {self.spec.pooling!r}; the index is eos-pooled")
-        # Left padding puts the final real token last, for every sequence in the batch.
-        pooled = hidden[:, -1, :]
-        if self.spec.normalize:
-            pooled = torch.nn.functional.normalize(pooled, p=2, dim=-1)
-        return pooled.to(torch.float32).cpu().numpy().astype(np.float32)
+        out: list = []
+        for start in range(0, len(texts), max(1, batch_size)):
+            chunk = [prefix + t for t in texts[start:start + max(1, batch_size)]]
+            batch = self._tokenizer(
+                chunk, padding=True, truncation=True, max_length=max_len, return_tensors="pt",
+            ).to(self.device)
+            with torch.no_grad():
+                hidden = self._model(**batch).last_hidden_state
+            # Left padding puts the final real token last, for every sequence in the batch.
+            pooled = hidden[:, -1, :]
+            if self.spec.normalize:
+                pooled = torch.nn.functional.normalize(pooled, p=2, dim=-1)
+            out.append(pooled.to(torch.float32).cpu().numpy().astype(np.float32))
+        return np.vstack(out) if out else np.zeros((0, 0), dtype=np.float32)
 
     def encode_query(self, text: str):
         return self.encode([text], is_query=True)[0]

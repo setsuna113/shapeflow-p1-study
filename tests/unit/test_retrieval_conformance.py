@@ -35,7 +35,7 @@ class FakeEncoder:
                                                               ).standard_normal(self.dim)
         return (v / np.linalg.norm(v)).astype(np.float32)
 
-    def encode(self, texts, *, is_query: bool):
+    def encode(self, texts, *, is_query: bool, batch_size: int = 8):
         return np.vstack([self._embed(t) for t in texts])
 
 
