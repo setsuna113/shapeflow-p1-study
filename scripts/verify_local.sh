@@ -64,6 +64,9 @@ echo "== lint (defect rules) =="
 "$PY" -m ruff check . --select E9,F63,F7,F82,F811,F841,B006,B023,S102,S307,S608 \
   || { echo "LINT FAILED"; exit 1; }
 
+echo "== observability contract (no unregistered feature may enter a decision) =="
+"$PY" tools/ci/check_observability.py || { echo "OBSERVABILITY CHECK FAILED"; exit 1; }
+
 echo "== unit + property tests =="
 "$PY" -m pytest tests -q -p no:cacheprovider
 

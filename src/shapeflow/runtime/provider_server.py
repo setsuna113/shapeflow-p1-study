@@ -253,6 +253,20 @@ class ProviderConfig:
     deepseek_usd_worst_case: float = 0.128
     gpu_seconds_worst_case: float = 900.0
 
+    # --- prefix-cache isolation (Freeze-1 §5.2.7) --------------------------------------------
+    # Reuse within an arm is wanted; reuse across arms is a measurement error. The researcher's
+    # early ReAct turns are byte-identical across arms up to the point P1 first intervenes, so
+    # without isolation whichever arm runs second gets a warm prefix cache and looks faster for
+    # reasons that have nothing to do with its compression form.
+    #
+    # This does not weaken the rule that P0 and P1 issue indistinguishable upstream requests.
+    # That rule exists so the engine cannot *schedule* them differently; the salt only
+    # participates in prefix-block hashing, and it partitions by arm rather than by form.
+    cache_isolation_enabled: bool = False
+    #: Engine epoch. A restart must invalidate reuse, because the blocks are gone anyway and a
+    #: salt that survived the restart would claim a hit rate the new process cannot deliver.
+    cache_namespace: str = ""
+
     # Pricing snapshot (source + retrieval date live in configs/judge.yaml and are hashed
     # into the protocol SHA). USD is derived here so the ledger holds money, not just tokens.
     #
@@ -1333,6 +1347,24 @@ class ProviderService:
 
     # --- local inference ---------------------------------------------------------------
 
+    def cache_salt_for(self, arm_id: Optional[str]) -> str:
+        """The prefix-cache namespace for one arm within one engine epoch.
+
+        Returns "" when isolation is off, so the causal layer -- which runs with prefix caching
+        disabled entirely -- sends the same bytes it always did.
+
+        Derived rather than configured, so two arms cannot be given the same salt by an editing
+        mistake, and so the salt changes on restart without anyone remembering to change it. An
+        unattributed request (no cell) gets no salt: it is not part of any arm, so it has no arm
+        to be isolated from.
+        """
+        if not self._cfg.cache_isolation_enabled or not arm_id:
+            return ""
+        return derive_id("cache_salt", {
+            "namespace": self._cfg.cache_namespace,
+            "arm_id": arm_id,
+        })[:32]
+
     def chat_completions(self, body: dict, *, cell_token: Optional[str]) -> tuple[int, dict]:
         """Proxy one completion to the local vLLM, tagged, timed and accounted.
 
@@ -1386,6 +1418,9 @@ class ProviderService:
             kwargs = dict(outbound.get("chat_template_kwargs") or {})
             kwargs.setdefault("enable_thinking", False)
             outbound["chat_template_kwargs"] = kwargs
+        salt = self.cache_salt_for(cell.arm_id if cell else None)
+        if salt:
+            outbound["cache_salt"] = salt
         prompt_sha = sha256_hex(json.dumps(outbound.get("messages", []), sort_keys=True)
                                 .encode("utf-8"))
         url = self._cfg.vllm_base_url.rstrip("/") + "/chat/completions"

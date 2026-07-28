@@ -45,10 +45,22 @@ endpoints:
       always_reported_in_full: true
       fill: PLAN
     - name: drgym_report_metrics
-      status: BLOCKED
-      blocker: "DeepResearchGym FineWeb API returns 401; free key requested from deepresearchgym@cmu.edu"
-      fallback_declared: "Freeze-1 §3.2: C-boundary profiling falls back to BC+; the report construct is covered by G-A only"
-      fallback_deadline_utc: {value: PENDING, fill: HUMAN}
+      status: WAIVED
+      waived_utc: "2026-07-28"
+      # Freeze-1 §3.2 pre-declares this fallback, so invoking it is not an amendment and the
+      # plan text is unchanged. What makes it clean is the timing: it was invoked before any
+      # treatment output existed, so it cannot have been chosen because BC+-only results looked
+      # better. That is the entire risk this slot was guarding, and at zero data it is absent
+      # rather than mitigated -- which is why the deadline that used to sit here is gone. A
+      # deadline exists to stop a fallback becoming a post-hoc choice; a fallback taken before
+      # the first datum has nothing to be post hoc about.
+      reason: "DeepResearchGym FineWeb API returns 401 and requires a key by request; waived rather than waited on."
+      fallback_active: true
+      fallback: "Freeze-1 §3.2: C-boundary profiling runs on BC+ only, using the answer-derivability probe; the report construct is covered by G-A alone."
+      # Priced when the fallback was written, not now: C1's C-boundary evidence narrows to the
+      # answer-derivability construct and the paper says so plainly. The H boundary -- where most
+      # broker decisions are -- is unaffected.
+      cost: "C1 C-boundary construct narrows to answer-derivability; H boundary unaffected"
       fill: PLAN
   primary_work: W
 
