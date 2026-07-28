@@ -53,9 +53,14 @@ for entry in "${SIZES[@]}"; do
   fi
 
   echo "--- $tag: ensuring $repo is cached $(date -u +%FT%TZ)"
-  if ! "$HF" download "$repo" >/dev/null 2>&1; then
-    echo "    download FAILED for $repo; skipping this size" >&2
-    echo "{\"tag\":\"$tag\",\"error\":\"download failed\"}" > "$OUTDIR/$tag.error.json"
+  # Output is kept. Suppressing it once cost a whole screen pass: the size was skipped with
+  # "download failed" and no cause, and the repo turned out to be perfectly reachable.
+  dl_log="logs/download_$tag.log"
+  if ! "$HF" download "$repo" > "$dl_log" 2>&1; then
+    echo "    download FAILED for $repo -- last lines of $dl_log:" >&2
+    tail -5 "$dl_log" >&2
+    printf '{"tag":"%s","error":"download failed","log":"%s"}\n' "$tag" "$dl_log" \
+      > "$OUTDIR/$tag.error.json"
     continue
   fi
 
