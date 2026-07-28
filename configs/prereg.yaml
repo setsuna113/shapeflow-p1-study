@@ -84,10 +84,15 @@ work_scope:
 # --- (4) qualification ---------------------------------------------------------------------
 qualification:
   rule: "qualified = evidence_loss <= tau_e AND interference_risk <= tau_i AND mechanical_checks_pass"
-  # No P0-only data can set these: they are thresholds on P1's risk relative to P0, and the plan
-  # states that they are frozen without stating their values.
-  tau_e: {value: PENDING, fill: HUMAN}
-  tau_i: {value: PENDING, fill: HUMAN}
+  # Set strict-binary on 2026-07-28, following the fail-closed philosophy: a decision qualifies
+  # for P1 only if it loses no gold answer point and introduces no misleading assertion. If G1
+  # shows the qualified share is too small to be useful, relaxing these goes through a numbered
+  # amendment -- which, being after the data was seen, downgrades the affected conclusions to
+  # exploratory. That cost is the point: it is what stops the threshold from drifting toward
+  # whatever makes the result look good.
+  tau_e: 0        # gold answer points lost, per decision
+  tau_i: 0        # misleading assertions introduced, per decision
+  units: count_per_decision
   # Shipped by the benchmark: ~76 hard negatives per query, 63,316 in total. The interference
   # label does not have to be constructed, and a negative's identity is not automatically harm --
   # the probe has to measure it.
@@ -96,12 +101,19 @@ qualification:
 
 # --- (5) safety ----------------------------------------------------------------------------
 safety:
-  delta_task_incident_ceiling: {value: PENDING, fill: HUMAN}
+  # delta is an EXCESS over P0-only, not an absolute rate: the gated policy's task-level
+  # incident rate may exceed the P0-only arm's by at most 3 percentage points, judged by the
+  # one-sided CI rather than the point estimate. 3pt is the smallest magnitude n=300 can
+  # actually resolve; a tighter bound would be claiming to measure something this design cannot.
+  delta_task_incident_excess:
+    over: P0_only
+    max_pp: 3
+    decided_by: one_sided_CI
   delta_gate:
     statistic: "one_sided_UCB(P(unsafe | broker chose P1))"
     method: clopper_pearson
-    level: {value: PENDING, fill: HUMAN}
-    ceiling: {value: PENDING, fill: HUMAN}
+    level: 0.95
+    ceiling: 0.05   # realistic at a calibration set capped at 800 labels
 
 # --- (6) epsilon ---------------------------------------------------------------------------
 epsilon:
@@ -120,17 +132,31 @@ utility:
 
 # --- (8) S1 numbers ------------------------------------------------------------------------
 s1:
-  latency_slo_ms:              {value: PENDING, fill: HUMAN}
-  deadline_ms:                 {value: PENDING, fill: HUMAN}
-  completion_fraction_floor:   {value: PENDING, fill: HUMAN}
-  backlog_slope_tolerance:     {value: PENDING, fill: HUMAN}
-  instability_rule:            {value: PENDING, fill: HUMAN}
-  warmup_s:                    {value: PENDING, fill: HUMAN}
-  measurement_s:               {value: PENDING, fill: HUMAN}
-  drain_s:                     {value: PENDING, fill: HUMAN}
-  lambda_grid:                 {value: PENDING, fill: HUMAN}
+  # Anchored to the P0-only pilot by formula rather than by judgement. The RULE is the
+  # pre-registration and is fixed here; the VALUE resolves from P0-only measurements, so these
+  # slots are PILOT rather than HUMAN and nobody has to guess a millisecond figure in advance.
+  latency_slo_p95:
+    rule: "3 x p0_idle_median_latency"
+    value: {value: PENDING, fill: PILOT, procedure: s1_slo_from_pilot@v1}
+  completion_fraction_floor: 0.95
+  backlog_slope_max: 0
+  instability_rule: "backlog slope > 0 across the measurement window"
+  warmup_s:
+    rule: ">= 2 x p0_median_latency"
+    value: {value: PENDING, fill: PILOT, procedure: s1_windows_from_pilot@v1}
+  measurement_s:
+    rule: ">= 10 x p0_median_latency"
+    value: {value: PENDING, fill: PILOT, procedure: s1_windows_from_pilot@v1}
+  lambda_grid:
+    rule: "p0_pilot_lambda_star x {0.6, 0.8, 1.0, 1.2}"
+    multipliers: [0.6, 0.8, 1.0, 1.2]
+    value: {value: PENDING, fill: PILOT, procedure: s1_lambda_grid_from_pilot@v1}
   lambda_procedure: bracket_then_concentrate@v1
   traceblock_count:            {value: PENDING, fill: PILOT, procedure: s1_blocks_from_power_pilot@v1}
+  # Still unset: the 2026-07-28 decision covered the SLO, the two windows, the completion floor,
+  # the instability rule and the lambda grid, but not these. Left PENDING rather than inferred.
+  deadline_ms:                 {value: PENDING, fill: HUMAN}
+  drain_s:                     {value: PENDING, fill: HUMAN}
   block_arrivals: {min: 30, max: 50}      # Freeze-1 §7
   blocks_per_key_cell: {min: 6, max: 8}   # Freeze-1 §7
   # A proxy-level broker whose snapshot is stale enough to be uncorrelated with engine state
@@ -162,9 +188,16 @@ iteration:
 
 # --- design (Freeze-1 §3.1, §6 B2) ---------------------------------------------------------
 design:
-  # Assignment probabilities per qualified decision point. Realized rates are recorded per task.
-  p_H: {value: PENDING, fill: HUMAN}
-  p_C: {value: PENDING, fill: HUMAN}
+  # Not scalars. B2 sweeps the frozen 3x3 grid from Freeze-1 §6, so p_H and p_C are cell
+  # coordinates rather than one chosen pair; the template asked for scalars and that was wrong.
+  # Confirmed unchanged on 2026-07-28: no new data, so the plan's grid stands.
+  policy_grid:
+    p_H: [0.0, 0.5, 1.0]
+    p_C: [0.0, 0.5, 1.0]
+    cells: 9
+    # Only if the H three-point curve is non-monotone or threshold-shaped, and marked
+    # exploratory when used.
+    conditional_extension: {p_H: [0.25, 0.75], p_C: 0.0}
   assignment:
     # Not independent Bernoulli: that hits the target only in expectation, leaving power and the
     # GPU budget unknowable until after the corpus is frozen. A phase drawn from the frozen
@@ -186,10 +219,12 @@ pilots:
   competence:
     tasks: 100
     split: ITD
-    # The floors that decide whether the frozen retriever is usable at all. If P0 cannot answer,
-    # epsilon non-inferiority is meaningless and the predictor has nothing to learn.
-    accuracy_floor:        {value: PENDING, fill: HUMAN}
-    evidence_recall_floor: {value: PENDING, fill: HUMAN}
+    # The floors that decide whether the frozen retriever is usable at all. Set against the
+    # published reference points for this benchmark -- dense retrieval at Recall@100 = 55.8%,
+    # a strong agent at 79% end-to-end. Below these, epsilon non-inferiority is measuring noise
+    # and the predictor has nothing to learn from.
+    accuracy_floor: 0.10          # P0 end-to-end accuracy
+    evidence_recall_floor: 0.40   # agent-level gold evidence recall, not single-query Recall@k
   power:
     tasks: 150
     seeds_min: 3
@@ -198,5 +233,8 @@ pilots:
     # Equivalence, not failure-to-reject: an underpowered test that fails to find a lane effect
     # is not evidence the lanes are interchangeable.
     method: TOST
-    alpha:  {value: PENDING, fill: HUMAN}
-    margin: {value: PENDING, fill: HUMAN}
+    alpha: 0.05   # conventional; the +-5% bounds below are what was actually specified
+    margin:
+      makespan_relative: 0.05
+      quality_relative: 0.05
+      unit: block
