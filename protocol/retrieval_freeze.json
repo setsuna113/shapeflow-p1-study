@@ -1,0 +1,53 @@
+{
+  "digest": "6c248f9dc25f7777fb980f4dbc0cb1302ebdd7658133a5882f2af6a3913fe51a",
+  "effective_after": "",
+  "encoder": {
+    "dtype": "bfloat16",
+    "normalize": true,
+    "passage_max_len": 4096,
+    "passage_prefix_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "pooling": "eos",
+    "query_max_len": 512,
+    "query_prefix_sha256": "9fab7feb99edb69f560d85cf1bb849dd556c37f383d0336574f78f1303e90740",
+    "repo": "Qwen/Qwen3-Embedding-8B",
+    "revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
+  },
+  "index": {
+    "dim": 4096,
+    "num_docs": 100195,
+    "shard_sha256": [
+      "4bfad4863cc4f38d2a6bef1ee54f81b8021a0cad985abd153b91fc0e29f22c7e",
+      "0285996dd37e58f5ad21ea4ed12d61d933c7e223c885955174e71ee30002dbd8",
+      "0701099f6c806c086b0a1eda1b3dc6f76449236f0339bc5cc153c79eb56140ae",
+      "b117e2d9f08c2dcf6f50229f34e1302f10a3b6960ef5dfa7f3719c21aaf0024a"
+    ],
+    "subset": "qwen3-embedding-8b"
+  },
+  "notes": {
+    "dev_evidence_recall_at_100": 0.4831,
+    "dev_gold_recall_at_100": 0.5654,
+    "encode_p50_ms": 913.96,
+    "encode_p95_ms": 1048.8,
+    "latency_ceiling_original_ms": 100,
+    "latency_ceiling_relaxed_to_measured_p95": 1048.8,
+    "selection_rule": "smallest size with dev gold Recall@100 >= 0.90 x max, subject to a p95 encode-latency ceiling",
+    "serving": "CPU only, pinned cpuset, one encoder instance per lane"
+  },
+  "provenance": {
+    "bench_repo_commit": "",
+    "conformance_sha256": "d46df4dfdc4c4632e3b5ff695b036c9555e7999892185ce0c50a01e22f8fefe5",
+    "corpus_shard_sha256": [
+      "7c07f9e23b1ca548110fd831714cadc67d44db5223bace6e45fcaa795d3153d0",
+      "e92d8202e0f656a85b262153dbcd22ecf80ea2d0c96d9884f9c8e25480b869ab",
+      "0e4113a4503342527258d8f2c49877747435f3e65bfe1f7306b4f488c8d225fe",
+      "0ceea5e703332a2e3ce700f641273400d84583fad84b659d3248ed06d3a9fef3",
+      "15b62914ddc3de6946893c770f07d5d84d29646e833ca1447955668f2b57940c",
+      "a9a75708ad37c522e93a774e5a968a3129e12b0559971c8f950a5628e0201df0",
+      "290062b60c1a6ebba7d5469a37a431f0a2596e68788295284b1b2d35db07b62c"
+    ]
+  },
+  "results": {
+    "full_document": true,
+    "top_k": 5
+  }
+}
