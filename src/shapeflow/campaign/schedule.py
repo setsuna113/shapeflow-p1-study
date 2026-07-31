@@ -256,6 +256,24 @@ def _balanced_williams_assignments(
     AB/BA correspondence promised by the protocol; drawing an unrelated second row and swapping
     only its first two arms is not a paired order reversal.
     """
+    if arm_count == 1:
+        # A single-arm campaign -- the P0 competence pilot -- has no order to counterbalance.
+        # There is exactly one arm sequence, every block gets it, and carryover balance is
+        # vacuously satisfied rather than unachieved. Williams squares are undefined below two
+        # treatments, so this is stated here instead of arriving as "need at least 2 treatments"
+        # from three frames down, which is the shape of an unimplemented case rather than a
+        # designed one.
+        assignments = {
+            (task_id, replicate): (0,)
+            for task_id in task_ids
+            for replicate in ((0, 1) if task_id in second_seed_tasks else (0,))
+        }
+        return assignments, {
+            "randomization": "single_arm_no_ordering",
+            "carryover_balance": "VACUOUS_SINGLE_ARM",
+            "williams_rows": 1,
+        }
+
     rows = [tuple(row) for row in williams_square(arm_count)]
     row_index = {row: index for index, row in enumerate(rows)}
     if len(row_index) != len(rows):
