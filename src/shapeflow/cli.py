@@ -955,7 +955,15 @@ def grade_bcplus(
 
     grading = {"graded": 0, "errors": [], "ungraded": 0, "skipped": True}
     if not skip_grading:
-        grader, judge_meta = _bcplus_grader(settings)
+        # The judge must be reached through the *paid* lane's provider. Only one lane may reach
+        # an upstream that costs money -- four providers each admitting against the full DeepSeek
+        # cap would be a four-fold budget -- and the others refuse `deepseek.chat` outright. The
+        # lane loop above left SHAPEFLOW_LANE on whichever lane it read last, so the settings the
+        # grader is built from are resolved here rather than inherited from it.
+        os.environ.pop("SHAPEFLOW_LANE", None)
+        paid_lane = _settings().get("week1", "measurement", "shards", "paid_upstream_lane")
+        os.environ["SHAPEFLOW_LANE"] = str(paid_lane)
+        grader, judge_meta = _bcplus_grader(_settings())
         grading = attach_grades(records, queries, grader,
                                 on_progress=lambda i, n: typer.echo(f"  graded {i}/{n}", err=True))
         grading["judge"] = judge_meta
