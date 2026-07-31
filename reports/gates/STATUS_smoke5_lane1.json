@@ -1,0 +1,140 @@
+{
+  "arms": [
+    "P0",
+    "H_MARKDOWN_ID",
+    "C_ID",
+    "H_PLUS_C",
+    "H_PROSE_CONTROL"
+  ],
+  "arms_block": "bcplus_arms",
+  "benchdata_root": "/storage/sata/shapeflow/benchdata",
+  "blocks_complete": 2,
+  "blocks_complete_success": 2,
+  "blocks_frozen": 2,
+  "blocks_terminal": 2,
+  "blocks_total": 4,
+  "blocks_valid_for_paired_estimate": 2,
+  "carve_dev_sha256": "95ec20e23977ff6d4f0e392a550cbd7a6ec53ed832058f3cca8f9b6db27352b8",
+  "carve_test_sha256": "0f3def76863cd2c6a2a3b4a1662a31dbc1184c1567490f647cbffaaa0c129f3a",
+  "cell_states": {
+    "COMMITTED": 10,
+    "PENDING": 10
+  },
+  "cells_committed": 10,
+  "cells_terminal": 10,
+  "cells_total": 20,
+  "claim_scope": "FORMATIVE_ONLY",
+  "corpus_tier": "FORMATIVE_MACHINE_AUTHORED",
+  "dev_file_sha256": "3ee68bef54a6bc02611d27dfe37fe715f7130d34d2c3b5d322d4e3431d930db5",
+  "execution_binding_sha256": "f02f7f22a3d1529906f210002e36b6727ed15631d74671fcedef6b026611eaea",
+  "layer": "pilot_competence",
+  "layer_size": 100,
+  "ok": false,
+  "owned_blocks": 2,
+  "phase": "NEW",
+  "protocol_document_sha256": "6c86121661e51b343619a393771a6cfa8525c2b37d2799ba9bd369cc281b8209",
+  "queries_path": "/storage/sata/shapeflow/benchdata/browsecomp-plus/repo/topics-qrels/queries.tsv",
+  "questions_sha256": "5e03886e545140367aff49626244062f5599ca3d9c42031390e5cf2134a061fb",
+  "retrieval_cache": {
+    "capacity": 4096,
+    "encodes": 18,
+    "errors": 0,
+    "hit_rate": 0.5714,
+    "hits": 24,
+    "searches": 42,
+    "size": 18
+  },
+  "retriever_id": "a289e6f65eb18633a0613843952c5f47924fce2505ef5fe71aa971a366242fc8",
+  "run_id": "smoke5",
+  "schedule_sha256": "40fa88d21c70ac466ae80d16e2bcf88f7988670a704d115a944cf55d4a621a67",
+  "shard": 1,
+  "shards": 2,
+  "split_files_match_prereg": true,
+  "split_plan_digest": "721fab9c0ea6c8dcef17c407def741ea88f9c5f60cd863a70d68fdfdc8864d60",
+  "split_plan_seed": 20260727,
+  "tasks": 4,
+  "test_file_sha256": "918890f6f4da1b5996875d31f6f2e2bcb95ef4ba795dedc12c718d0501636bd7",
+  "treatment_live": {
+    "by_arm": {
+      "C_ID": {
+        "cells": 2,
+        "close_failures": 2,
+        "page_fallbacks": 0,
+        "pages_registered": 24,
+        "published": 6,
+        "status": "PASS"
+      },
+      "H_MARKDOWN_ID": {
+        "cells": 2,
+        "close_failures": 0,
+        "page_fallbacks": 6,
+        "pages_registered": 24,
+        "published": 0,
+        "status": "FAIL"
+      },
+      "H_PLUS_C": {
+        "cells": 2,
+        "close_failures": 2,
+        "page_fallbacks": 5,
+        "pages_registered": 26,
+        "published": 0,
+        "status": "FAIL"
+      },
+      "H_PROSE_CONTROL": {
+        "cells": 2,
+        "close_failures": 0,
+        "page_fallbacks": 0,
+        "pages_registered": 37,
+        "published": 6,
+        "status": "PASS"
+      }
+    },
+    "detail": "['H_MARKDOWN_ID', 'H_PLUS_C'] committed cells but published nothing as P1",
+    "inert_arms": [
+      "H_MARKDOWN_ID",
+      "H_PLUS_C"
+    ],
+    "status": "FAIL",
+    "treatment_arms": [
+      "H_MARKDOWN_ID",
+      "C_ID",
+      "H_PLUS_C",
+      "H_PROSE_CONTROL"
+    ]
+  },
+  "unassigned_dev_ids": [
+    "10",
+    "1089",
+    "1099",
+    "1106",
+    "1201",
+    "1212",
+    "190",
+    "3",
+    "390",
+    "436",
+    "524",
+    "551",
+    "638",
+    "730",
+    "861",
+    "882",
+    "89",
+    "906",
+    "963",
+    "991"
+  ],
+  "work_items": {
+    "COMMITTED": 10,
+    "PENDING": 10
+  },
+  "world_searched": {
+    "cells_with_no_search": 0,
+    "committed": 10,
+    "detail": "0/10 committed cells issued no search query",
+    "examples": [],
+    "fraction": 0.0,
+    "max_fraction": 0.2,
+    "status": "PASS"
+  }
+}

@@ -387,6 +387,22 @@ screen_arms:
 #
 # H_MARKDOWN_ID (H02) is the H champion, C_ID (C01) the C champion; H_PLUS_C is the two halves
 # composed, named as such rather than treated as a third mechanism.
+#
+# The two CPU controls were added after the liveness smoke, and the reason they are admissible
+# is that they are controls. The smoke found every LLM-selected P1 batch failing preflight --
+# 116/116 at H, 7/7 at C -- with "rendered N tokens exceeds selected_token_budget 512". A
+# hundred-percent fallback has two readings that no amount of P0-vs-P1 data separates: the
+# publication path cannot emit a P1 span on this corpus at all, or the LLM selector will not
+# keep to a budget it is told but cannot measure. C00-CPU and its H twin settle it, because
+# their selector is a greedy loop that charges the exact shared renderer and stops at the same
+# budget (strategies/selectors_async.py) -- they take the identical chunker, aggregator,
+# preflight and renderer, and therefore publish or fail for structural reasons only.
+#
+# Adding a control can only weaken a P1 claim, never manufacture one, and both arms were already
+# pre-registered: H_LLM_VS_CPU and C_LLM_VS_CPU are frozen entries in matched_contrasts below,
+# authored before any BrowseComp-Plus data existed. This restores two arms of the frozen design
+# that the first roster left out for budget; it invents nothing and changes no threshold,
+# contract or budget. No treatment parameter was touched in response to the smoke.
 bcplus_arms:
   arms:
     - {arm_id: P0, page_variant: P0, close_variant: P0}
@@ -394,6 +410,8 @@ bcplus_arms:
     - {arm_id: C_ID, page_variant: P0, close_variant: C01}
     - {arm_id: H_PLUS_C, page_variant: H02, close_variant: C01}
     - {arm_id: H_PROSE_CONTROL, page_variant: H00-PROSE, close_variant: P0}
+    - {arm_id: H_CPU_CONTROL, page_variant: H00-CPU, close_variant: P0}
+    - {arm_id: C_CPU_CONTROL, page_variant: P0, close_variant: C00-CPU}
 
 # The competence pilot (protocol section 5.3). P0 only, and that is not a simplification: the
 # pilot decides whether the frozen retriever supports the task at all, and a P1 arm in it would
