@@ -24,7 +24,7 @@ from .config import config_sha, load_config
 
 __all__ = ["CheckResult", "DoctorReport", "check_credential_isolation",
            "check_provider_ready", "check_configs", "check_schemas_closed",
-           "check_identity", "run_pure_checks"]
+           "check_identity", "check_installed_graph", "run_pure_checks"]
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 
@@ -372,6 +372,47 @@ def _engine_log(repo: Path) -> Optional[Path]:
     return candidate if candidate.exists() else None
 
 
+def check_installed_graph(repo: Path) -> CheckResult:
+    """The importable ``open_deep_research`` must hash to the tracked patched-tree digest.
+
+    This check exists because its absence cost a whole campaign's worth of cells. The package
+    installs as a *copy* into site-packages, so re-materializing the patch does nothing until the
+    copy is reinstalled -- and the approval cannot see the difference, because
+    ``patched_tree_sha`` binds the recorded hash *file*, not the running bytes. After the package
+    rename the host went on running a tree whose hooks still did
+    ``from shapeflow_p1.odr import vendor_hooks``, and vendor's supervisor catches every
+    exception from that block (``if is_token_limit_exceeded(...) or True``) and returns an empty
+    note set. So an ImportError presented as "the agent decided not to research": every cell
+    committed, every report was written from nothing, and no gate anywhere said a word.
+
+    Compared against ``patches/patched_tree.sha256`` rather than against ``.build/``, because
+    ``.build/`` is itself a materialization that can be stale. The tracked digest is the one
+    inside the execution binding.
+    """
+    from .treehash import tree_sha256
+
+    expected_path = Path(repo) / "patches" / "patched_tree.sha256"
+    if not expected_path.exists():
+        return CheckResult("installed_graph", FAIL,
+                           f"{expected_path} is missing: nothing pins what the graph should be")
+    expected = expected_path.read_text(encoding="utf-8").strip()
+    try:
+        import open_deep_research
+    except ImportError as e:
+        return CheckResult("installed_graph", SKIP, f"open_deep_research not installed: {e}")
+    try:
+        live = tree_sha256(Path(open_deep_research.__path__[0]))
+    except Exception as e:  # noqa: BLE001 - an unreadable tree is a failed check, not a crash
+        return CheckResult("installed_graph", FAIL, f"{type(e).__name__}: {e}")
+    if live != expected:
+        return CheckResult(
+            "installed_graph", FAIL,
+            f"installed graph hashes to {live[:12]}, the approved patched tree is "
+            f"{expected[:12]}. Run scripts/materialize_vendor.sh and reinstall "
+            "open_deep_research from .build/open_deep_research-patched.")
+    return CheckResult("installed_graph", PASS, f"installed graph is the patched tree {live[:12]}")
+
+
 def run_pure_checks(
     *, repo: Path, configs: dict[str, Path], schema_dir: Path, role: Optional[str] = None
 ) -> DoctorReport:
@@ -380,6 +421,7 @@ def run_pure_checks(
     report.add(check_configs(configs))
     report.add(check_schemas_closed(schema_dir))
     report.add(check_identity(role))
+    report.add(check_installed_graph(repo))
     # Not "can this process read a key" -- that check could only pass for the one identity
     # that holds one, and it proved the opposite of what it claimed by reading it.
     report.add(check_credential_isolation(repo))

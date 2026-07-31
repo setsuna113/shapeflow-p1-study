@@ -448,6 +448,39 @@ def _bootstrap_ci(values: Sequence[float], *, resamples: int,
 # --- the report -------------------------------------------------------------------------
 
 
+#: Below this share of each arm's committed cells surviving into the pair set, the contrast is
+#: computed on a task set that neither arm's failure pattern chose at random.
+MIN_PAIRED_SURVIVAL = 0.95
+
+
+def _pairing_loss(baseline: Sequence[CellRecord], treatment: Sequence[CellRecord]) -> dict:
+    """Which tasks the pairing dropped, and whether that is enough to distort the contrast.
+
+    Pairing on tasks where both arms committed is right, and silent it is dangerous: a treatment
+    arm that fails disproportionately on hard tasks leaves an easier task set behind, and its
+    accuracy rises for a reason that has nothing to do with the treatment. Reported as data, and
+    ``reportable`` says whether the contrast should be believed at all.
+    """
+    b = {r.task_id for r in baseline if r.committed}
+    t = {r.task_id for r in treatment if r.committed}
+    shared = b & t
+    # Against the union, not the smaller arm. Losses here are one-sided almost by definition --
+    # the fragile arm is the one that dropped tasks -- and dividing by the smaller count reports
+    # 1.0 in exactly that case, which is the case the check exists for.
+    survival = len(shared) / (len(b | t) or 1)
+    return {
+        "n_pairs": len(shared),
+        "baseline_committed": len(b),
+        "treatment_committed": len(t),
+        "tasks_either_arm_committed": len(b | t),
+        "survival": survival,
+        "min_survival": MIN_PAIRED_SURVIVAL,
+        "reportable": survival >= MIN_PAIRED_SURVIVAL,
+        "dropped_from_baseline": sorted(b - t)[:25],
+        "dropped_from_treatment": sorted(t - b)[:25],
+    }
+
+
 def build_report(records: Sequence[CellRecord], *, baseline_arm: str = "P0",
                  context: Optional[Mapping] = None,
                  resamples: int = BOOTSTRAP_RESAMPLES) -> dict:
@@ -461,10 +494,13 @@ def build_report(records: Sequence[CellRecord], *, baseline_arm: str = "P0",
             "an arm compared with nothing is not a result")
 
     summaries = {arm: summarize_arm(cells).content() for arm, cells in sorted(by_arm.items())}
-    contrasts = {
-        arm: paired_contrast(by_arm[baseline_arm], cells, resamples=resamples).content()
-        for arm, cells in sorted(by_arm.items()) if arm != baseline_arm
-    }
+    contrasts = {}
+    for arm, cells in sorted(by_arm.items()):
+        if arm == baseline_arm:
+            continue
+        body = paired_contrast(by_arm[baseline_arm], cells, resamples=resamples).content()
+        body["pairing"] = _pairing_loss(by_arm[baseline_arm], cells)
+        contrasts[arm] = body
     body = {
         "schema": "bcplus_analysis_v1",
         "baseline_arm": baseline_arm,

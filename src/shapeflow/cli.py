@@ -836,9 +836,13 @@ def run_bcplus_cmd(
     max_cells: Optional[int] = typer.Option(None, "--max-cells"),
     phase_id: str = typer.Option("bcplus", "--phase-id"),
     run_id: Optional[str] = typer.Option(None, "--run-id"),
-    competence_pilot: bool = typer.Option(
-        False, "--competence-pilot",
-        help="The one caller allowed to run against a freeze that is not yet effective."),
+    shard: int = typer.Option(0, "--shard", help="This lane's index in a task-atomic partition"),
+    shards: int = typer.Option(1, "--shards", help="How many lanes share this layer"),
+    allow_ineffective_freeze: bool = typer.Option(
+        False, "--allow-ineffective-freeze",
+        help="Run against a retrieval freeze the competence pilot has not yet validated. Only "
+             "the pilot itself and the pre-pilot liveness smoke may: every other run refuses, "
+             "which is what stops an unvalidated retriever from quietly serving a campaign."),
     protocol_sha: str = typer.Option(None, "--protocol-sha"),
     resume: bool = typer.Option(False, "--resume"),
 ) -> None:
@@ -860,12 +864,13 @@ def run_bcplus_cmd(
         max_cells=max_cells,
         execution_binding_sha256=binding.digest,
         phase_id=phase_id,
-        # The competence pilot is what *makes* the freeze effective, so it is the one run that
-        # legitimately precedes it. Every other run refuses, which is what stops an unvalidated
-        # retriever from quietly serving a campaign.
-        require_effective_freeze=not competence_pilot,
+        # The competence pilot is what *makes* the freeze effective, so it and the smoke that
+        # proves the apparatus works are the only runs that legitimately precede it.
+        require_effective_freeze=not allow_ineffective_freeze,
         stop_sentinel=stop,
         run_id=run_id,
+        shard=shard,
+        shards=shards,
     ))
     typer.echo(json.dumps(body, indent=2, sort_keys=True))
     if not body.get("ok", False):
@@ -880,6 +885,10 @@ def grade_bcplus(
     phase_id: str = typer.Option("bcplus", "--phase-id"),
     baseline_arm: str = typer.Option("P0", "--baseline-arm"),
     out: Optional[Path] = typer.Option(None, "--out"),
+    lanes: Optional[str] = typer.Option(
+        None, "--lanes",
+        help="Comma-separated lane ids whose ledgers hold this run, e.g. '0,1'. Omit for one "
+             "unsharded lane."),
     skip_grading: bool = typer.Option(
         False, "--skip-grading", help="Recall and work only; no judge calls."),
 ) -> None:
@@ -890,19 +899,15 @@ def grade_bcplus(
     """
     from .bench.bcplus.analysis import attach_grades, attach_recall, build_report, load_cells
     from .bench.bcplus.qrels import load_bcplus_evaluator_queries
+    from .bench.bcplus.render import render_markdown
     from .campaign.bcplus import benchdata_root
     from .campaign.runner import STAGE_VERSION
     from .campaign.session import open_run_ledger
 
     _require_role("evaluator")
     binding = _require_approval()
-    settings = _settings()
-    ledger, store = open_run_ledger(settings)
-    schedule_path = settings.path("runs") / "schedules" / run_id / f"{layer}.json"
-    if not schedule_path.exists():
-        _fail(f"no frozen schedule at {schedule_path}")
 
-    def work_key_for(cell: dict) -> str:
+    def work_key_for(ledger, cell: dict) -> str:
         arm = cell["arm"]
         return ledger.work_key(
             protocol_sha=binding.digest, split=layer, phase_id=phase_id,
@@ -911,8 +916,39 @@ def grade_bcplus(
             replicate_id=str(cell["replicate_id"]), checkpoint_hash=str(cell["block_id"]),
             stage_version=STAGE_VERSION)
 
-    records = load_cells(schedule_path=schedule_path, ledger=ledger, store=store,
-                         work_key_for=work_key_for)
+    # Sharded lanes each keep their own ledger and object store, and the analysis needs their
+    # union: a lane holds one half of the task partition, so grading one of them would report
+    # half a campaign as a whole one. Read per lane, concatenate, and record which lanes
+    # contributed.
+    lane_ids = [lane.strip() for lane in (lanes or "").split(",") if lane.strip()] or [None]
+    records, schedules, seen_keys = [], [], set()
+    for lane in lane_ids:
+        if lane is None:
+            os.environ.pop("SHAPEFLOW_LANE", None)
+        else:
+            os.environ["SHAPEFLOW_LANE"] = lane
+        settings = _settings()
+        ledger, store = open_run_ledger(settings)
+        schedule_path = settings.path("runs") / "schedules" / run_id / f"{layer}.json"
+        if not schedule_path.exists():
+            ledger.close()
+            _fail(f"no frozen schedule at {schedule_path}")
+        schedules.append(str(schedule_path))
+        for record in load_cells(schedule_path=schedule_path, ledger=ledger, store=store,
+                                 work_key_for=lambda cell, _l=ledger: work_key_for(_l, cell)):
+            # Every lane's schedule names every block; only its own share ran. Keep the first
+            # terminal record for a cell and drop the other lane's empty view of it, or a cell
+            # another lane committed would be counted here as a missing one.
+            key = (record.task_id, record.arm_id, record.replicate_id)
+            if key in seen_keys and not record.output_ref:
+                continue
+            if key in seen_keys:
+                records = [r for r in records
+                           if (r.task_id, r.arm_id, r.replicate_id) != key]
+            seen_keys.add(key)
+            records.append(record)
+        ledger.close()
+
     queries = load_bcplus_evaluator_queries(
         benchdata_root() / "browsecomp-plus" / "data")
     attach_recall(records, queries)
@@ -927,18 +963,37 @@ def grade_bcplus(
 
     body = build_report(records, baseline_arm=baseline_arm, context={
         "run_id": run_id, "layer": layer, "phase_id": phase_id,
+        "lanes": lane_ids,
+        "schedules": schedules,
         "execution_binding_sha256": binding.digest,
         "protocol_document_sha256": binding.protocol_sha,
-        "schedule_sha256": _content_sha(
-            json.loads(schedule_path.read_text(encoding="utf-8"))),
         "evaluator_source_sha256": queries.source_sha256,
         "grading": grading,
     })
-    ledger.close()
     destination = out or (_REPO / "reports" / f"BCPLUS_{run_id}.json")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    typer.echo(f"wrote {destination}")
+    markdown = destination.with_suffix(".md")
+    markdown.write_text(render_markdown(body), encoding="utf-8")
+    typer.echo(f"wrote {destination} and {markdown}")
+
+    for arm, contrast in sorted(body["contrasts"].items()):
+        pairing = contrast.get("pairing") or {}
+        if not pairing.get("reportable", True):
+            typer.echo(
+                f"  WARN  {arm}: only {pairing['n_pairs']} of "
+                f"{pairing['tasks_either_arm_committed']} tasks paired "
+                f"({pairing['survival']:.0%}); this contrast is survivorship-biased",
+                err=True)
+    # An unavailable grade is not a zero, and a report whose accuracy is mostly missing must not
+    # read as a report whose accuracy is low. Anything past a twentieth and this exits non-zero
+    # rather than being quietly published.
+    graded, ungraded = int(grading.get("graded", 0)), int(grading.get("ungraded", 0))
+    if graded and ungraded > 0.05 * graded:
+        for problem in (grading.get("errors") or [])[:3]:
+            typer.echo(f"  {problem}", err=True)
+        _fail(f"grading: {ungraded}/{graded} tasks have no judgment. Accuracy computed over the "
+              "subset a judge happened to answer is not the accuracy that was pre-registered.")
 
 
 def _bcplus_grader(settings):
@@ -947,25 +1002,35 @@ def _bcplus_grader(settings):
     Through the provider and not directly: the key is readable only by the provider UID, the
     budget cap is enforced there, and every judge call has to land in the same ledger as
     everything else or the cost of scoring is off the books.
+
+    Model, decoding envelope and retry budget all come from ``configs/judge.yaml`` through
+    Settings, never from literals here. ``judge_sha`` is inside the execution binding precisely
+    so the scoring policy is pinned; a second copy of it in this function is a policy that can
+    drift without changing a single recorded digest. It nearly did: this used to stringify the
+    whole ``judge.model`` mapping into the ``model`` field -- which DeepSeek answers with a 400,
+    which is fail-fast, which makes every task ``UNAVAILABLE``, which the report shows as
+    ``accuracy: null``. That reads as "grading has not run yet", not as "grading ran and every
+    call was rejected".
     """
     from .bench.bcplus.grader import Grader, validate_verdict
-    from .bench.grading.judge_client import DeepSeekJudge, SamplingEnvelope
+    from .bench.grading.judge_client import DeepSeekJudge
     from .campaign.session import provider_client_for
+    from .runtime.provider_server import PROVIDER_KEY_PLACEHOLDER
 
     client = provider_client_for(settings, "evaluator")
-    model = str(settings.get("judge", "model") if _has(settings, "judge", "model")
-                else os.environ.get("DEEPSEEK_JUDGE_MODEL", "deepseek-chat"))
-    sampling = SamplingEnvelope(temperature=0.0, top_p=1.0, seed=20260731, max_tokens=1024)
+    model = settings.judge_model()
+    sampling = settings.judge_sampling()
+    retries = settings.judge_max_retries()
     judge = DeepSeekJudge(
         client.deepseek_transport(op_class="JUDGE_REPORT"),
-        model, "@PROVIDER_HELD@", sampling=sampling)
+        model, PROVIDER_KEY_PLACEHOLDER, max_retries=retries, sampling=sampling)
 
     def judge_fn(system: str, user: str):
         response = asyncio.run(judge.judge(system, user, validate=validate_verdict))
         return response.data
 
     return Grader(judge_fn), {"model": model, "op_class": "JUDGE_REPORT",
-                              "sampling": sampling.content()}
+                              "max_retries": retries, "sampling": sampling.content()}
 
 
 @app.command("bcplus-competence")
@@ -984,10 +1049,10 @@ def bcplus_competence(
     of those is a change to the frozen object made after seeing agent data, which is a declared
     deviation and a human's decision. The report says so and exits non-zero.
     """
+    from .config import load_config
     from .retrieval.freeze import load_freeze, write_freeze
 
     _require_role("steward")
-    settings = _settings()
     body = json.loads(Path(report).read_text(encoding="utf-8"))
     arms = body.get("arms") or {}
     if arm not in arms:
@@ -995,16 +1060,24 @@ def bcplus_competence(
     measured = arms[arm]
     accuracy = measured.get("accuracy")
     recall = measured.get("evidence_recall_mean")
-    floors = {
-        "accuracy": float(settings.get("prereg", "pilots", "competence", "accuracy_floor")),
-        "evidence_recall": float(
-            settings.get("prereg", "pilots", "competence", "evidence_recall_floor")),
-    }
+    # Read straight out of prereg.yaml, the way protocol.py hashes it, rather than through
+    # Settings: adding prereg to Settings' config set would change the shas the binding is
+    # computed from and invalidate the approval for a reason that has nothing to do with the
+    # experiment.
+    prereg, prereg_sha = load_config(_REPO / "configs" / "prereg.yaml")
+    competence = prereg["pilots"]["competence"]
     criteria = [
-        {"name": "p0_accuracy", "measured": accuracy, "floor": floors["accuracy"],
-         "n": measured.get("accuracy_n")},
+        {"name": "p0_accuracy", "measured": accuracy,
+         "floor": float(competence["accuracy_floor"]), "n": measured.get("accuracy_n")},
+        # Against ``evidence_docids``, not ``gold_docids``. The prereg says "agent-level gold
+        # evidence recall", which reads both ways; evidence is the larger set and therefore the
+        # stricter floor (the freeze measured 0.4831 evidence vs 0.5654 gold at Recall@100), so
+        # this is the conservative reading. Recorded in the gate file so the choice is on the
+        # record instead of inside a code path.
         {"name": "agent_evidence_recall", "measured": recall,
-         "floor": floors["evidence_recall"], "n": measured.get("recall_n")},
+         "floor": float(competence["evidence_recall_floor"]), "n": measured.get("recall_n"),
+         "floor_applies_to": "evidence_docids",
+         "also_measured_gold_recall": measured.get("gold_recall_mean")},
     ]
     for criterion in criteria:
         value = criterion["measured"]
@@ -1024,6 +1097,7 @@ def bcplus_competence(
         "arm": arm,
         "source_report": str(report),
         "source_sha256": _content_sha(body),
+        "prereg_sha256": prereg_sha,
         "decided_at_utc": _now(),
     }
     out = _REPO / "reports" / "gates" / "RETRIEVAL_COMPETENCE.json"
