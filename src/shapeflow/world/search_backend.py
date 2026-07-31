@@ -142,7 +142,7 @@ class FrozenTaskCorpusBackend:
         self._by_occurrence = {o.occurrence_id: o for o in pool.vendor_visible}
         self._content_budget = content_budget
         #: Pages whose tail was removed to fit the engine's window, for the write-up.
-        self.overflow_truncations: dict[str, dict] = {}
+        self.content_truncations: dict[str, dict] = {}
         documents = []
         self._doc_text: dict[str, str] = {}
         for occ in pool.vendor_visible:
@@ -152,10 +152,15 @@ class FrozenTaskCorpusBackend:
                 if content_budget is not None:
                     bounded = apply_shared_budget(raw, content_budget, tokenizer)
                     if bounded.reason:
-                        self.overflow_truncations[occ.occurrence_id] = {
+                        self.content_truncations[occ.occurrence_id] = {
                             "reason": bounded.reason,
                             "original_tokens": bounded.original_tokens,
                             "kept_tokens": bounded.kept_tokens,
+                            # True when the character bound also bit, in which case
+                            # original_tokens was counted on already-clipped text and understates
+                            # the page. A capacity gate that could not tell those apart would
+                            # report the clipped size as the real one.
+                            "char_truncated": bounded.char_truncated,
                         }
                     raw = bounded.text
             # Index title + snippet + full text; snippet ensures no-raw-content pages rank.

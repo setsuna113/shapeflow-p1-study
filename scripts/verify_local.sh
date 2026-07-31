@@ -67,6 +67,12 @@ echo "== lint (defect rules) =="
 echo "== observability contract (no unregistered feature may enter a decision) =="
 "$PY" tools/ci/check_observability.py || { echo "OBSERVABILITY CHECK FAILED"; exit 1; }
 
+echo "== leakage firewall (no evaluator material may reach the treatment path) =="
+# Regression gate 9. Gold answers, qrels, evidence sets and negatives are evaluator-only; a
+# treatment path that can reach them is scored on its own answer key, and the failure is invisible
+# in the results because a leaked run looks like a very good run.
+"$PY" tools/ci/check_leakage_firewall.py || { echo "LEAKAGE FIREWALL CHECK FAILED"; exit 1; }
+
 echo "== unit + property tests =="
 "$PY" -m pytest tests -q -p no:cacheprovider
 

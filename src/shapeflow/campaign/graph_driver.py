@@ -694,33 +694,252 @@ def frozen_search_async(
     return search
 
 
+class _BudgetedBackend:
+    """Any ``SearchBackend``, with the shared content budget applied on the way out of the seam.
+
+    The budget is enforced *here* rather than trusted to each backend, because "P0 and P1 start
+    from the same bytes" has to hold for every world this seam can serve, not only for the one
+    that happens to bound itself. ``FrozenTaskCorpusBackend`` bounds its pages at construction,
+    so for that world this is a no-op: re-applying a bound to text that already fits returns the
+    same string. A dense-corpus backend returns whole documents and bounds nothing, and installed
+    raw it would hand the graph a FULL_PAGE view -- not a crash, just an arm reading more than P0
+    read, which AGENTS.md §2 bars from the causal comparison and which no downstream check would
+    notice, since the results still look like perfectly ordinary search results.
+
+    Only ``raw_content`` is bounded. That is the page body both arms read -- vendor hashes
+    ``raw_content[:max_content_length]`` into the H checkpoint -- while ``content`` is the
+    provider's own short snippet, which no arm summarises and which the frozen pool has never
+    truncated either. Bounding it here would change the offered view rather than equalise it.
+
+    The frozen top-k is enforced here for the same reason. It is the number the retrieval freeze
+    records, but it is not the number the graph asks with: vendor's tool supplies its own
+    ``max_results`` on every call, so the value ``install_frozen_search`` was given never reaches
+    a query. This is the one place that sees both, so it is the only place that can tell that the
+    world served and the world recorded are the same one.
+
+    Attribute lookups fall through to the wrapped backend, so a caller that reaches for a
+    backend's own ``stats()`` or ``queries_seen`` still finds them on the handle it was yielded.
+    """
+
+    def __init__(self, backend, *, content_budget, tokenizer, top_k) -> None:
+        self._backend = backend
+        self._content_budget = content_budget
+        self._tokenizer = tokenizer
+        self._top_k = top_k
+        # Share the wrapped backend's truncation ledger when it keeps one instead of starting a
+        # second. Two ledgers would each hold part of the truncations while both looked complete,
+        # and the write-up's count of pages that lost their tail would silently be the wrong one.
+        # Every page whose visible content was cut, by either bound. Formerly named for the
+        # token bound alone, which was accurate only while the character bound recorded nothing.
+        existing = getattr(backend, "content_truncations", None)
+        #: Pages whose tail was removed to fit the engine's window, for the write-up.
+        self.content_truncations: dict[str, dict] = (
+            existing if isinstance(existing, dict) else {})
+
+    def search(self, query: str, *, max_results: int):
+        from dataclasses import replace
+
+        from ..evidence.shared_view import apply_shared_budget
+        from ..world.search_backend import SearchRecord
+
+        # The top-k checked at install time is NOT the one the graph asks with. Vendor's
+        # ``tavily_search`` tool passes its own ``max_results`` (an ``InjectedToolArg`` whose
+        # default is 5) on every call to ``tavily_search_async``, so the default that
+        # ``install_frozen_search`` validates is never the number a query is answered with.
+        # Validating only there checks a value no result set was ever produced from; the check
+        # belongs where the number the world is actually asked for arrives, which is here.
+        if isinstance(max_results, bool) or not isinstance(max_results, int) or max_results < 1:
+            raise ValueError(
+                f"top-k must be a positive int, got {max_results!r}; a non-positive top-k "
+                "answers every query with an empty result set, which is indistinguishable in "
+                "the trace from a frozen world that genuinely holds nothing for the query"
+            )
+        # And it must be the top-k this seam was installed with -- the one the retrieval freeze
+        # records. Vendor's hard-coded 5 currently coincides with the configured
+        # ``retrieval.frozen_corpus.top_k``, so the two agree by luck rather than by
+        # construction: move the configured value and every cell would go on retrieving 5 while
+        # the freeze record, the run manifest and the write-up all said otherwise. Stopping is
+        # the only honest outcome, because the alternative is a recorded world the run did not
+        # search (AGENTS.md section 2, "same visible world"; section 9, fail closed).
+        if max_results != self._top_k:
+            raise ValueError(
+                f"the graph asked the frozen world for top-{max_results} but this seam was "
+                f"installed with top-{self._top_k}; the number in the retrieval freeze is the "
+                "installed one, so serving the other would record a world the run never "
+                "searched. Make vendor's tavily_search max_results default and "
+                "retrieval.frozen_corpus.top_k the same number"
+            )
+        records = self._backend.search(query, max_results=max_results)
+        # A backend that returned a generator or a dict would still "work" until something
+        # downstream consumed it twice or asked for its length, by which point the cell is
+        # half-run. Refuse at the seam, where the failure still names the backend.
+        if not isinstance(records, (list, tuple)):
+            raise TypeError(
+                f"{type(self._backend).__name__}.search returned "
+                f"{type(records).__name__}, not a list of SearchRecord"
+            )
+        # Asking for top-k and being handed more is a wider visible world than the freeze
+        # describes, and every result looks perfectly ordinary, so nothing downstream would
+        # object. The seam is the only place that knows both numbers.
+        if len(records) > max_results:
+            raise ValueError(
+                f"{type(self._backend).__name__}.search returned {len(records)} results for "
+                f"top-{max_results}; the extra pages are a world wider than the one recorded"
+            )
+        bounded: list = []
+        for record in records:
+            if not isinstance(record, SearchRecord):
+                raise TypeError(
+                    f"{type(self._backend).__name__}.search returned a "
+                    f"{type(record).__name__}; SearchBackend results must be SearchRecord, "
+                    "otherwise the shared budget cannot be applied to them at all"
+                )
+            # No budget means no engine is involved (the acquisition and offline paths), which is
+            # exactly what ``apply_shared_budget`` refuses to pretend otherwise about.
+            if self._content_budget is None or not record.raw_content:
+                bounded.append(record)
+                continue
+            shared = apply_shared_budget(
+                record.raw_content, self._content_budget, self._tokenizer)
+            if shared.reason:
+                self.content_truncations[record.occurrence_id] = {
+                    "reason": shared.reason,
+                    "original_tokens": shared.original_tokens,
+                    "kept_tokens": shared.kept_tokens,
+                    # True when the character bound also bit, in which case original_tokens was
+                    # counted on already-clipped text and understates the page. On a
+                    # full-document corpus that is the common case, not the exotic one, and a
+                    # capacity gate that could not tell the two apart would report the clipped
+                    # size as though it were the real one.
+                    "char_truncated": shared.char_truncated,
+                }
+            bounded.append(replace(record, raw_content=shared.text))
+        return bounded
+
+    def __getattr__(self, name: str):
+        # Private names are never delegated, so a missing ``_backend`` raises AttributeError
+        # instead of recursing through this method forever.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._backend, name)
+
+
+def _refuse_an_evaluator_only_world(backend) -> None:
+    """Refuse to install a world whose class was defined in evaluator-only code.
+
+    Taking a ready-made backend opens a channel the static firewall
+    (``tools/ci/check_leakage_firewall.py``) cannot see: it walks import edges, and an object
+    handed in at runtime leaves no edge to walk. So a backend built over the decrypted benchmark
+    file -- gold documents, evidence sets, the negatives -- would be installed as the graph's
+    world without a single import for the checker to find, and every arm would then retrieve from
+    the answer key while its results looked exactly like retrieval.
+
+    The class's defining module is already imported by the time an instance exists, so this reads
+    the same ``EVALUATOR_ONLY`` marker the static checker keys on without importing anything. An
+    unresolvable module is refused rather than waved through: this is the last point at which
+    anyone asks what world the cell is about to search.
+    """
+    import sys
+
+    module_name = getattr(type(backend), "__module__", "") or ""
+    module = sys.modules.get(module_name)
+    if module is None:
+        raise ValueError(
+            f"cannot tell which module defines {type(backend).__name__!r} "
+            f"(__module__={module_name!r}), so it cannot be checked against the leakage "
+            "firewall; install a backend defined in an importable module"
+        )
+    for marker in ("EVALUATOR_ONLY", "SHAPEFLOW_EVALUATOR_ONLY"):
+        if getattr(module, marker, False):
+            raise ValueError(
+                f"{module_name} is marked {marker}; a world built from evaluator-only material "
+                "would let every arm retrieve from the answer key, and the results would look "
+                "exactly like retrieval"
+            )
+
+
 @contextlib.contextmanager
 def install_frozen_search(
-    pool: SourcePool,
-    snapshots: SnapshotStore,
+    pool: Optional[SourcePool] = None,
+    snapshots: Optional[SnapshotStore] = None,
     *,
     max_results: int,
     on_query: Optional[Callable[[dict], None]] = None,
     content_budget=None,
     tokenizer=None,
+    backend: Optional[Any] = None,
 ):
     """Rebind vendor's search for the duration of one cell, and put it back afterwards.
 
-    Restoring in ``finally`` matters: a cell that raised while the live function was replaced
-    would leave the next cell searching the previous task's corpus, and the results would look
-    entirely plausible.
+    Supply *either* ``pool``/``snapshots`` -- the Week-1 frozen task corpus, built here -- *or* a
+    ready-made ``backend`` satisfying :class:`~shapeflow.world.search_backend.SearchBackend`.
+    The second form is how the BrowseComp-Plus dense corpus is installed without this module
+    acquiring the torch dependency its encoder needs. Never both: two candidate worlds and no
+    rule for choosing between them is a cell whose corpus cannot be reconstructed afterwards.
+
+    Whichever world is installed, its records leave through the same shared-budget wrapper, so
+    P0 and P1 start from the same bytes regardless of which backend produced them.
+
+    Restoring on the way out matters -- on both the normal and the raising path: a cell that
+    raised while the live function was replaced would leave the next cell searching the previous
+    task's corpus, and the results would look entirely plausible.
     """
     import open_deep_research.utils as vendor_utils
 
-    backend = FrozenTaskCorpusBackend(
-        pool, snapshots, content_budget=content_budget, tokenizer=tokenizer)
+    # Reject a bad top-k at install time so the message names this call rather than surfacing
+    # mid-cell. This check alone is not what protects the run: the number the graph actually
+    # searches with arrives per call, from vendor's tool, and is enforced in
+    # ``_BudgetedBackend.search`` against the value installed here.
+    if isinstance(max_results, bool) or not isinstance(max_results, int) or max_results < 1:
+        raise ValueError(
+            f"max_results must be a positive int, got {max_results!r}; a non-positive top-k "
+            "makes an empty world and an empty query indistinguishable"
+        )
+
+    if backend is not None:
+        if pool is not None or snapshots is not None:
+            raise ValueError(
+                "install_frozen_search takes a pool/snapshots pair or a prebuilt backend, never "
+                "both: whichever world the cell then searched, the record would name two"
+            )
+        if not callable(getattr(backend, "search", None)):
+            raise TypeError(
+                f"{type(backend).__name__} does not implement SearchBackend.search(query, *, "
+                "max_results); installing it would fail in the middle of a cell instead of here"
+            )
+        _refuse_an_evaluator_only_world(backend)
+    else:
+        if pool is None or snapshots is None:
+            raise ValueError(
+                "install_frozen_search needs both a pool and a snapshot store, or a prebuilt "
+                "backend; installing nothing would leave the cell searching whatever world the "
+                "previous cell left behind"
+            )
+        backend = FrozenTaskCorpusBackend(
+            pool, snapshots, content_budget=content_budget, tokenizer=tokenizer)
+
+    handle = _BudgetedBackend(
+        backend, content_budget=content_budget, tokenizer=tokenizer, top_k=max_results)
     original = vendor_utils.tavily_search_async
-    vendor_utils.tavily_search_async = frozen_search_async(
-        backend, max_results_default=max_results, on_query=on_query)
+    installed = frozen_search_async(
+        handle, max_results_default=max_results, on_query=on_query)
+    vendor_utils.tavily_search_async = installed
     try:
-        yield backend
-    finally:
+        yield handle
+    except BaseException:
         vendor_utils.tavily_search_async = original
+        raise
+    live = vendor_utils.tavily_search_async
+    vendor_utils.tavily_search_async = original
+    # Nested installs unwind in reverse order, so on a clean exit the live function is always
+    # the one this call installed. Anything else means someone rebound the world underneath us
+    # and did not put it back -- the true original is restored either way, but the cell that
+    # just finished searched a world nobody recorded, so it must not be reported as clean.
+    if live is not installed:
+        raise RuntimeError(
+            "the search binding changed inside install_frozen_search and was not restored; "
+            "the original has been put back, but this cell searched an unrecorded world"
+        )
 
 
 @contextlib.contextmanager

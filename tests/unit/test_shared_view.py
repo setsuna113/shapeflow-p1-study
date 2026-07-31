@@ -16,6 +16,7 @@ import pytest
 
 from shapeflow.evidence.chunkers import WhitespaceTokenizer
 from shapeflow.evidence.shared_view import (
+    CHAR_BOUND_REASON,
     OVERFLOW_REASON,
     SharedContentBudget,
     apply_shared_budget,
@@ -54,8 +55,14 @@ def test_the_character_bound_still_applies_and_is_vendors_own():
     result = apply_shared_budget("abcdefghijklmnop", budget, WhitespaceTokenizer())
     assert result.text == "abcdefghij"
     assert result.truncated is True
-    # A plain character clip is not an overflow: it is the rule vendor already applied.
-    assert result.reason == ""
+    # A character clip is vendor's own rule rather than our overflow guard, so it is named
+    # separately -- but it IS named. It used to carry no reason at all, on the reasoning that
+    # only an overflow deserved one; since every caller gates its truncation ledger on the reason
+    # being set, that quietly made character clips unrecorded. Harmless while pages were short
+    # vendor extracts, fatal on a full-document corpus where the character bound is the common
+    # case and the capacity gate would report no long-page truncation while clipping most of it.
+    assert result.reason == CHAR_BOUND_REASON
+    assert result.char_truncated is True
 
 
 def test_token_dense_content_within_the_character_bound_is_still_cut():
@@ -86,7 +93,9 @@ def test_without_a_tokenizer_only_the_character_bound_is_claimed():
     budget = SharedContentBudget(max_chars=5, max_tokens=1)
     result = apply_shared_budget("abcdefgh", budget, None)
     assert result.text == "abcde"
-    assert result.reason == ""
+    # Named, for the reason given above: unnamed meant unrecorded.
+    assert result.reason == CHAR_BOUND_REASON
+    assert result.char_truncated is True
     assert result.kept_tokens == 0
 
 

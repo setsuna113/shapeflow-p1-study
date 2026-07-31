@@ -35,6 +35,7 @@ __all__ = [
     "SharedContentBudget",
     "SharedContent",
     "OVERFLOW_REASON",
+    "CHAR_BOUND_REASON",
     "apply_shared_budget",
 ]
 
@@ -42,6 +43,17 @@ __all__ = [
 #: Named rather than described so it can be counted, and so a reader can tell this apart from a
 #: page that was simply short.
 OVERFLOW_REASON = "SHARED_CONTEXT_OVERFLOW_TRUNCATION"
+
+#: Recorded on a page cut by vendor's *character* bound before tokens were ever counted.
+#:
+#: This carried no reason for a long time, and callers gate their truncation ledger on the reason
+#: being set -- so a page clipped by characters was truncated and recorded nowhere. That was
+#: survivable while pages came from a search vendor that returned short extracts and the character
+#: bound almost never bit. It is not survivable on a full-document corpus, where documents average
+#: thousands of words and the character bound is the *common* case: the capacity gate would report
+#: no long-page truncation while quietly clipping a large share of the corpus, which is precisely
+#: the silent dropping of long pages that gate exists to forbid.
+CHAR_BOUND_REASON = "SHARED_CHAR_BOUND_TRUNCATION"
 
 
 @dataclass(frozen=True)
@@ -83,6 +95,12 @@ class SharedContent:
     reason: str = ""
     original_tokens: int = 0
     kept_tokens: int = 0
+    #: Whether vendor's character bound bit, independently of which bound is named in ``reason``.
+    #: Needed because both bounds can bite the same page: the token bound is then the one that
+    #: decided the final length and is what ``reason`` names, but ``original_tokens`` is counted
+    #: on the already-clipped text and therefore *understates* the page. Without this flag a
+    #: reader cannot tell an understated measurement from an exact one.
+    char_truncated: bool = False
 
 
 def apply_shared_budget(
@@ -101,17 +119,25 @@ def apply_shared_budget(
     then applied, and nothing claims the result fits a window.
     """
     clipped = text[: budget.max_chars]
+    char_bound_hit = len(clipped) < len(text)
     if tokenizer is None:
-        return SharedContent(text=clipped, truncated=len(clipped) < len(text))
+        return SharedContent(
+            text=clipped,
+            truncated=char_bound_hit,
+            reason=CHAR_BOUND_REASON if char_bound_hit else "",
+            char_truncated=char_bound_hit,
+        )
 
     offsets = tokenizer.encode_offsets(clipped)
     original = len(offsets)
     if original <= budget.max_tokens:
         return SharedContent(
             text=clipped,
-            truncated=len(clipped) < len(text),
+            truncated=char_bound_hit,
+            reason=CHAR_BOUND_REASON if char_bound_hit else "",
             original_tokens=original,
             kept_tokens=original,
+            char_truncated=char_bound_hit,
         )
 
     # Cut on the boundary of the last token that fits, so the surviving text is exactly the
@@ -135,6 +161,10 @@ def apply_shared_budget(
                 reason=OVERFLOW_REASON,
                 original_tokens=original,
                 kept_tokens=recount,
+                # Both bounds bit. ``reason`` names the token bound because it decided the final
+                # length, but ``original_tokens`` was counted on text the character bound had
+                # already clipped, so it understates the page. The flag is what says so.
+                char_truncated=char_bound_hit,
             )
         keep -= max(1, recount - budget.max_tokens)
         if keep < 1:
