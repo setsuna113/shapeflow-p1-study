@@ -127,10 +127,17 @@ def resolve_layer_tasks(
     seed = int(pinned["seed"])
     dev_ids, test_ids = read_split_ids(dev_path), read_split_ids(test_path)
     plan = carve(dev_ids, test_ids, seed=seed)
-    for name, measured, expected, path in (
-        ("dev", plan.dev_sha256, str(pinned["dev_sha256"]), dev_path),
-        ("test", plan.test_sha256, str(pinned["test_sha256"]), test_path),
+    # The prereg pins the digest of the split *files as written* -- which is what Phase 0
+    # recorded and what a reader can reproduce with sha256sum. ``SplitPlan.dev_sha256`` is a
+    # different quantity on purpose: it hashes the id sequence in the order carve consumed it,
+    # with no trailing newline, and it identifies the carve rather than the file. Both are kept;
+    # only the first is the pinned one, and confusing them is a check that fails on a correct
+    # file, which is worse than no check because the obvious fix is to delete it.
+    for name, expected, path in (
+        ("dev", str(pinned["dev_sha256"]), dev_path),
+        ("test", str(pinned["test_sha256"]), test_path),
     ):
+        measured = sha256_hex(Path(path).read_bytes())
         if measured != expected:
             raise BCPlusCampaignError(
                 f"{path} hashes to {measured[:12]}, the frozen prereg pins the {name} split at "
@@ -163,9 +170,11 @@ def resolve_layer_tasks(
         "layer": layer,
         "split_plan_digest": written["digest"],
         "split_plan_seed": seed,
-        "dev_sha256": plan.dev_sha256,
-        "test_sha256": plan.test_sha256,
-        "split_digests_match_prereg": True,
+        "dev_file_sha256": sha256_hex(dev_path.read_bytes()),
+        "test_file_sha256": sha256_hex(test_path.read_bytes()),
+        "carve_dev_sha256": plan.dev_sha256,
+        "carve_test_sha256": plan.test_sha256,
+        "split_files_match_prereg": True,
         "unassigned_dev_ids": unassigned,
         "layer_size": len(task_ids),
         "questions_sha256": questions_digest(questions, task_ids),
