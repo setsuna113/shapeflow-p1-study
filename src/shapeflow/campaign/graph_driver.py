@@ -721,11 +721,15 @@ class _BudgetedBackend:
     backend's own ``stats()`` or ``queries_seen`` still finds them on the handle it was yielded.
     """
 
-    def __init__(self, backend, *, content_budget, tokenizer, top_k) -> None:
+    def __init__(self, backend, *, content_budget, tokenizer, top_k, pages=None) -> None:
         self._backend = backend
         self._content_budget = content_budget
         self._tokenizer = tokenizer
         self._top_k = top_k
+        # Where the page selector will look up the bytes behind a checkpoint's content id. The
+        # seam is the only place that sees them *after* the shared budget and *before* vendor,
+        # which is exactly the form the checkpoint hashes. See ``campaign.pages``.
+        self._pages = pages
         # Share the wrapped backend's truncation ledger when it keeps one instead of starting a
         # second. Two ledgers would each hold part of the truncations while both looked complete,
         # and the write-up's count of pages that lost their tail would silently be the wrong one.
@@ -798,6 +802,9 @@ class _BudgetedBackend:
             # exactly what ``apply_shared_budget`` refuses to pretend otherwise about.
             if self._content_budget is None or not record.raw_content:
                 bounded.append(record)
+                if self._pages is not None and record.raw_content:
+                    self._pages.record(
+                        record.raw_content, occurrence_id=record.occurrence_id)
                 continue
             shared = apply_shared_budget(
                 record.raw_content, self._content_budget, self._tokenizer)
@@ -813,6 +820,8 @@ class _BudgetedBackend:
                     # size as though it were the real one.
                     "char_truncated": shared.char_truncated,
                 }
+            if self._pages is not None:
+                self._pages.record(shared.text, occurrence_id=record.occurrence_id)
             bounded.append(replace(record, raw_content=shared.text))
         return bounded
 
@@ -868,6 +877,7 @@ def install_frozen_search(
     content_budget=None,
     tokenizer=None,
     backend: Optional[Any] = None,
+    pages=None,
 ):
     """Rebind vendor's search for the duration of one cell, and put it back afterwards.
 
@@ -919,7 +929,8 @@ def install_frozen_search(
             pool, snapshots, content_budget=content_budget, tokenizer=tokenizer)
 
     handle = _BudgetedBackend(
-        backend, content_budget=content_budget, tokenizer=tokenizer, top_k=max_results)
+        backend, content_budget=content_budget, tokenizer=tokenizer, top_k=max_results,
+        pages=pages)
     original = vendor_utils.tavily_search_async
     installed = frozen_search_async(
         handle, max_results_default=max_results, on_query=on_query)
@@ -1168,8 +1179,10 @@ async def run_cell(
     settings: Settings,
     cell: CellSpec,
     *,
-    pool: SourcePool,
-    snapshots: SnapshotStore,
+    pool: Optional[SourcePool] = None,
+    snapshots: Optional[SnapshotStore] = None,
+    backend: Optional[Any] = None,
+    pages=None,
     bundle: StrategyBundle,
     provider_base_url: str,
     runner_token: str,
@@ -1181,6 +1194,12 @@ async def run_cell(
 ) -> CellResult:
     """Run one cell on the real graph and return what it produced.
 
+    The world arrives one of two ways and never both: ``pool``/``snapshots`` is the Week-1
+    task-local frozen corpus, ``backend`` is any prebuilt :class:`SearchBackend` -- which is how
+    the BrowseComp-Plus dense retriever is reached, since it lives behind a socket in another
+    process. ``install_frozen_search`` refuses both at once, so a cell can never have searched a
+    world its record does not name.
+
     ``graph`` is injected only so tests can drive a smaller compiled graph; production passes
     None and the module imports vendor's own compiled ``deep_researcher``.
 
@@ -1188,6 +1207,10 @@ async def run_cell(
     It is threaded down to the frozen backend so vendor and the P1 hook read the same bytes; a
     page bounded in one place and not the other is how P0 came to be handed requests the engine
     refused outright.
+
+    ``pages`` is the registry the seam fills with the bytes it served, so a P1 selector can
+    resolve the content ids its checkpoint carries. Worlds with an enumerable page set can
+    prefill it instead; worlds reached by query cannot, which is why it is filled at the seam.
     """
     from langchain_core.messages import HumanMessage
 
@@ -1280,9 +1303,9 @@ async def run_cell(
     }
     with _environment(env), _summarize_timeout_applied(summarize_timeout), \
             _odr_seed_applied(cell.seed), install_frozen_search(
-            pool, snapshots, max_results=max_results,
+            pool, snapshots, backend=backend, max_results=max_results,
             on_query=lambda payload: recorder.record("SEARCH_QUERY", payload),
-            content_budget=content_budget, tokenizer=tokenizer), \
+            content_budget=content_budget, tokenizer=tokenizer, pages=pages), \
             strategies_bound(bundle), bind_run(binding):
         result.seed_applied = True
         try:

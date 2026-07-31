@@ -190,6 +190,7 @@ class CampaignRunner:
         fetch_work_summary: Optional[Callable] = None,
         graph: object = None,
         engine_epoch: Optional[str] = None,
+        world_backend: object = None,
     ) -> None:
         self.settings = settings
         self.ledger = ledger
@@ -214,6 +215,12 @@ class CampaignRunner:
         self._register_cell = register_cell
         self._fetch_work_summary = fetch_work_summary
         self._graph = graph
+        # One world for the whole lane, or None for the Week-1 per-task frozen pool. A
+        # 100k-document dense corpus is not task-local and cannot be: it is loaded once, behind a
+        # socket, and every cell searches the same one. Which of the two is in force is decided
+        # here, once, rather than per cell -- a runner that could take either world per cell is a
+        # runner whose corpus is not a property of the run.
+        self._world_backend = world_backend
         # Tests/in-process harnesses may inject an explicit epoch. Production always reads the
         # engine unit's per-boot file, and re-reads it around every cell.
         self._engine_epoch_override = engine_epoch
@@ -442,7 +449,7 @@ class CampaignRunner:
         return self._model_call_factory(cell_token)
 
     def _bundle_for(self, arm: ArmSpec, cell_token: str, *, seed: int,
-                    pool=None, snapshots=None):
+                    pool=None, snapshots=None, pages=None):
         """Build the arm's strategies, with a selector bound to *this* cell.
 
         The model call has to be per-cell: a selector wired to a shared, untagged endpoint would
@@ -458,9 +465,16 @@ class CampaignRunner:
         if self._model_call_factory is None:
             raise ValueError(
                 f"arm {arm.arm_id} needs a selector but no model call factory was provided")
-        text_by_id, occurrence_by_id = ({}, {})
+        if pages is None:
+            from .pages import PageRegistry
+
+            pages = PageRegistry()
         if pool is not None and snapshots is not None:
-            text_by_id, occurrence_by_id = self._page_bytes(pool, snapshots)
+            # An enumerable world can be resolved before the cell starts, and is: the pool holds
+            # every page the task could ever see. A query-reached world cannot be, so its pages
+            # arrive through the seam as they are served. Both land in the same registry, so the
+            # selector's lookup does not know which world it is reading.
+            pages.prefill(*self._page_bytes(pool, snapshots))
         factory = StrategyFactory(
             registry=self.registry,
             model_call=self._model_call_for(cell_token, seed),
@@ -470,8 +484,8 @@ class CampaignRunner:
             # Without these the page selector is offered no candidates at all: it would publish
             # empty content, spend nothing, and look like a working P1 arm that happens to save
             # everything. That is exactly the inert-P1 failure the canary exists to catch.
-            raw_text_for=lambda content_id: text_by_id.get(content_id, ""),
-            occurrence_for=lambda content_id: occurrence_by_id.get(content_id, content_id),
+            raw_text_for=pages.text_for,
+            occurrence_for=pages.occurrence_for,
         )
         page = factory.build(arm.page_variant).page if arm.page_variant != "P0" \
             else VendorPageStrategy({})
@@ -554,14 +568,29 @@ class CampaignRunner:
             protocol_document_sha256=self.protocol_document_sha256,
         )
 
+        # Where this cell's retrieval starts in the world's own trace. Evidence recall is a
+        # docid-set intersection, and a docid is exactly what the treatment-facing SearchRecord
+        # deliberately does not carry -- it is shaped like a vendor search result and those have
+        # none. So the docids are read off the world, not off the arm's view of it, and sliced by
+        # position: cells run one at a time in a lane, so the slice is the cell's own retrieval
+        # and nothing else's.
+        trace = getattr(self._world_backend, "trace", None)
+        trace_start = len(trace) if isinstance(trace, list) else 0
+        from .pages import PageRegistry
+
+        pages = PageRegistry()
+
         try:
             if self._register_cell is not None:
                 await self._register_cell(spec)
-            pool, snapshots = load_frozen_pool(self.settings, cell.task_id)
+            pool, snapshots = (None, None)
+            if self._world_backend is None:
+                pool, snapshots = load_frozen_pool(self.settings, cell.task_id)
             result = await run_cell(
                 self.settings, spec, pool=pool, snapshots=snapshots,
+                backend=self._world_backend, pages=pages,
                 bundle=self._bundle_for(cell.arm, token, seed=cell.seed, pool=pool,
-                                        snapshots=snapshots),
+                                        snapshots=snapshots, pages=pages),
                 provider_base_url=self.config.provider_base_url,
                 runner_token=self.config.runner_token,
                 store_checkpoint=self._store_checkpoint,
@@ -595,6 +624,9 @@ class CampaignRunner:
                 "engine_epoch_stable": epoch_stable,
                 "terminal_state": "FAILED_UNKNOWN",
                 "claim_scope": self.settings.claim_scope,
+                "retrieval_trace": (
+                    list(trace[trace_start:]) if isinstance(trace, list) else []),
+                "pages_registered": len(pages),
             })
             failure_ref = self.store.put_bytes(failure_payload)
             self.ledger.register_artifact(
@@ -649,6 +681,8 @@ class CampaignRunner:
             "counts": counts,
             "error": result.error,
             "claim_scope": self.settings.claim_scope,
+            "retrieval_trace": list(trace[trace_start:]) if isinstance(trace, list) else [],
+            "pages_registered": len(pages),
         }
         raw = canonical_json(payload)
         ref = self.store.put_bytes(raw)

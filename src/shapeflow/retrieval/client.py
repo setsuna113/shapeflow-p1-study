@@ -177,6 +177,18 @@ class RetrievalClient:
         self._lock = threading.Lock()
         self._verified: Optional[dict] = None
         self._retriever_id = ""
+        #: Every query this client answered, in order, with the docids it returned.
+        #:
+        #: Evidence recall is a docid-set intersection against the benchmark's own
+        #: ``evidence_docs``, and the treatment-facing :class:`SearchRecord` deliberately has no
+        #: docid field -- it is shaped like a vendor search result, and those have none. Without
+        #: this the docids exist only inside the service's response and are gone by the time the
+        #: cell is written, leaving recall computable only by re-running every query afterwards
+        #: against an index that may by then be a different vintage.
+        #:
+        #: Appended by the client rather than by the arm, so what is recorded is what the world
+        #: served, not what an arm reports having read.
+        self.trace: list[dict] = []
 
     # --- transport ----------------------------------------------------------------------
 
@@ -305,7 +317,15 @@ class RetrievalClient:
                 400, f"max_results must be a positive integer, got {max_results!r}")
         self.verify()
         payload = self._request("/v1/search", {"query": query, "top_k": max_results})
-        return self._validate_response(payload, query=query, max_results=max_results)
+        rows = self._validate_response(payload, query=query, max_results=max_results)
+        self.trace.append({
+            "query": query,
+            "top_k": int(max_results),
+            "docids": [row["docid"] for row in rows],
+            "scores": [row["score"] for row in rows],
+            "occurrence_ids": [row["occurrence_id"] for row in rows],
+        })
+        return rows
 
     def search(self, query: str, *, max_results: int) -> list[SearchRecord]:
         """The :class:`SearchBackend` seam. Ranked, whole documents, or an exception."""

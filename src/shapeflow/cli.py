@@ -823,6 +823,246 @@ def release_holdout(config: Path = _CFG) -> None:
     _fail("holdout release is not authorized under this approval")
 
 
+# --- BrowseComp-Plus (Freeze-1) ---------------------------------------------------------------
+
+
+@app.command("run-bcplus")
+def run_bcplus_cmd(
+    config: Path = _CFG,
+    layer: str = typer.Option(..., "--layer", help="Design layer, e.g. b1_select"),
+    arms_block: str = typer.Option(..., "--arms", help="Arm block in configs/week1.yaml"),
+    retrieval_url: str = typer.Option("http://127.0.0.1:8710", "--retrieval-url"),
+    tasks: Optional[int] = typer.Option(None, "--tasks", help="Prefix of the layer to run"),
+    max_cells: Optional[int] = typer.Option(None, "--max-cells"),
+    phase_id: str = typer.Option("bcplus", "--phase-id"),
+    run_id: Optional[str] = typer.Option(None, "--run-id"),
+    competence_pilot: bool = typer.Option(
+        False, "--competence-pilot",
+        help="The one caller allowed to run against a freeze that is not yet effective."),
+    protocol_sha: str = typer.Option(None, "--protocol-sha"),
+    resume: bool = typer.Option(False, "--resume"),
+) -> None:
+    """Runner-only: one design layer of the BrowseComp-Plus campaign. Idempotent under --resume."""
+    from .campaign.bcplus import run_bcplus
+
+    _assert_post_launch_flags(protocol_sha, resume)
+    _require_role("runner")
+    binding = _require_approval()
+    settings = _settings()
+    stop = settings.data_root / str(settings.get("week1", "runtime", "stop_sentinel"))
+    body = asyncio.run(run_bcplus(
+        settings,
+        repo=_REPO,
+        layer=layer,
+        arms_block=arms_block,
+        retrieval_base_url=retrieval_url,
+        task_limit=tasks,
+        max_cells=max_cells,
+        execution_binding_sha256=binding.digest,
+        phase_id=phase_id,
+        # The competence pilot is what *makes* the freeze effective, so it is the one run that
+        # legitimately precedes it. Every other run refuses, which is what stops an unvalidated
+        # retriever from quietly serving a campaign.
+        require_effective_freeze=not competence_pilot,
+        stop_sentinel=stop,
+        run_id=run_id,
+    ))
+    typer.echo(json.dumps(body, indent=2, sort_keys=True))
+    if not body.get("ok", False):
+        raise typer.Exit(code=1)
+
+
+@app.command("grade-bcplus")
+def grade_bcplus(
+    config: Path = _CFG,
+    run_id: str = typer.Option(..., "--run-id"),
+    layer: str = typer.Option(..., "--layer"),
+    phase_id: str = typer.Option("bcplus", "--phase-id"),
+    baseline_arm: str = typer.Option("P0", "--baseline-arm"),
+    out: Optional[Path] = typer.Option(None, "--out"),
+    skip_grading: bool = typer.Option(
+        False, "--skip-grading", help="Recall and work only; no judge calls."),
+) -> None:
+    """Evaluator-only: grade a finished BC+ run and emit the paired analysis.
+
+    Reads the answer key. Runs as the evaluator identity, whose import of the qrels module is
+    exactly what the treatment identities are refused.
+    """
+    from .bench.bcplus.analysis import attach_grades, attach_recall, build_report, load_cells
+    from .bench.bcplus.qrels import load_bcplus_evaluator_queries
+    from .campaign.bcplus import benchdata_root
+    from .campaign.runner import STAGE_VERSION
+    from .campaign.session import open_run_ledger
+
+    _require_role("evaluator")
+    binding = _require_approval()
+    settings = _settings()
+    ledger, store = open_run_ledger(settings)
+    schedule_path = settings.path("runs") / "schedules" / run_id / f"{layer}.json"
+    if not schedule_path.exists():
+        _fail(f"no frozen schedule at {schedule_path}")
+
+    def work_key_for(cell: dict) -> str:
+        arm = cell["arm"]
+        return ledger.work_key(
+            protocol_sha=binding.digest, split=layer, phase_id=phase_id,
+            task_id=str(cell["task_id"]), arm_id=str(arm["arm_id"]),
+            variant_id=f"{arm['page_variant']}+{arm['close_variant']}",
+            replicate_id=str(cell["replicate_id"]), checkpoint_hash=str(cell["block_id"]),
+            stage_version=STAGE_VERSION)
+
+    records = load_cells(schedule_path=schedule_path, ledger=ledger, store=store,
+                         work_key_for=work_key_for)
+    queries = load_bcplus_evaluator_queries(
+        benchdata_root() / "browsecomp-plus" / "data")
+    attach_recall(records, queries)
+
+    grading = {"graded": 0, "errors": [], "ungraded": 0, "skipped": True}
+    if not skip_grading:
+        grader, judge_meta = _bcplus_grader(settings)
+        grading = attach_grades(records, queries, grader,
+                                on_progress=lambda i, n: typer.echo(f"  graded {i}/{n}", err=True))
+        grading["judge"] = judge_meta
+        grading["skipped"] = False
+
+    body = build_report(records, baseline_arm=baseline_arm, context={
+        "run_id": run_id, "layer": layer, "phase_id": phase_id,
+        "execution_binding_sha256": binding.digest,
+        "protocol_document_sha256": binding.protocol_sha,
+        "schedule_sha256": _content_sha(
+            json.loads(schedule_path.read_text(encoding="utf-8"))),
+        "evaluator_source_sha256": queries.source_sha256,
+        "grading": grading,
+    })
+    ledger.close()
+    destination = out or (_REPO / "reports" / f"BCPLUS_{run_id}.json")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    typer.echo(f"wrote {destination}")
+
+
+def _bcplus_grader(settings):
+    """The official BC+ grader, judged by DeepSeek through the provider.
+
+    Through the provider and not directly: the key is readable only by the provider UID, the
+    budget cap is enforced there, and every judge call has to land in the same ledger as
+    everything else or the cost of scoring is off the books.
+    """
+    from .bench.bcplus.grader import Grader, validate_verdict
+    from .bench.grading.judge_client import DeepSeekJudge, SamplingEnvelope
+    from .campaign.session import provider_client_for
+
+    client = provider_client_for(settings, "evaluator")
+    model = str(settings.get("judge", "model") if _has(settings, "judge", "model")
+                else os.environ.get("DEEPSEEK_JUDGE_MODEL", "deepseek-chat"))
+    sampling = SamplingEnvelope(temperature=0.0, top_p=1.0, seed=20260731, max_tokens=1024)
+    judge = DeepSeekJudge(
+        client.deepseek_transport(op_class="JUDGE_REPORT"),
+        model, "@PROVIDER_HELD@", sampling=sampling)
+
+    def judge_fn(system: str, user: str):
+        response = asyncio.run(judge.judge(system, user, validate=validate_verdict))
+        return response.data
+
+    return Grader(judge_fn), {"model": model, "op_class": "JUDGE_REPORT",
+                              "sampling": sampling.content()}
+
+
+@app.command("bcplus-competence")
+def bcplus_competence(
+    config: Path = _CFG,
+    report: Path = typer.Option(..., "--report", help="reports/BCPLUS_<pilot run>.json"),
+    arm: str = typer.Option("P0", "--arm"),
+) -> None:
+    """Steward-only: decide protocol §5.3's competence gate and, on PASS, make the freeze effective.
+
+    The gate is read out of the frozen prereg, never restated here: a threshold written in two
+    places is a threshold that will eventually differ in two places, and the whole point of the
+    hash lock is that the number the verdict used is the number that was registered.
+
+    On FAIL this stops. It does not climb encoder sizes, widen top-k, or lower the floor -- each
+    of those is a change to the frozen object made after seeing agent data, which is a declared
+    deviation and a human's decision. The report says so and exits non-zero.
+    """
+    from .retrieval.freeze import load_freeze, write_freeze
+
+    _require_role("steward")
+    settings = _settings()
+    body = json.loads(Path(report).read_text(encoding="utf-8"))
+    arms = body.get("arms") or {}
+    if arm not in arms:
+        _fail(f"{report} has no {arm!r} arm; the competence gate is a P0 measurement")
+    measured = arms[arm]
+    accuracy = measured.get("accuracy")
+    recall = measured.get("evidence_recall_mean")
+    floors = {
+        "accuracy": float(settings.get("prereg", "pilots", "competence", "accuracy_floor")),
+        "evidence_recall": float(
+            settings.get("prereg", "pilots", "competence", "evidence_recall_floor")),
+    }
+    criteria = [
+        {"name": "p0_accuracy", "measured": accuracy, "floor": floors["accuracy"],
+         "n": measured.get("accuracy_n")},
+        {"name": "agent_evidence_recall", "measured": recall,
+         "floor": floors["evidence_recall"], "n": measured.get("recall_n")},
+    ]
+    for criterion in criteria:
+        value = criterion["measured"]
+        criterion["status"] = (
+            "INPUTS_UNAVAILABLE" if value is None
+            else "PASS" if float(value) >= criterion["floor"] else "FAIL")
+        typer.echo(f"  {criterion['status']:18}  {criterion['name']}: "
+                   f"{value} vs floor {criterion['floor']} (n={criterion['n']})")
+
+    verdict = ("FAIL" if any(c["status"] == "FAIL" for c in criteria)
+               else "INPUTS_UNAVAILABLE" if any(c["status"] != "PASS" for c in criteria)
+               else "PASS")
+    gate = {
+        "gate": "RETRIEVAL_COMPETENCE",
+        "verdict": verdict,
+        "criteria": criteria,
+        "arm": arm,
+        "source_report": str(report),
+        "source_sha256": _content_sha(body),
+        "decided_at_utc": _now(),
+    }
+    out = _REPO / "reports" / "gates" / "RETRIEVAL_COMPETENCE.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(gate, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    if verdict != "PASS":
+        _fail(f"competence gate: {verdict} -- see {out}. Stopping. Changing the encoder, the "
+              "top-k or the floor now would be a change to the frozen retriever made after "
+              "seeing agent data; that is a declared deviation and needs a human.", code=1)
+
+    freeze_path = _REPO / "protocol" / "retrieval_freeze.json"
+    current = load_freeze(freeze_path)
+    if current.effective:
+        typer.echo(f"freeze already effective after {current.effective_after[:12]}")
+        return
+    from dataclasses import replace as _replace
+
+    effective = _replace(current, effective_after=gate["source_sha256"])
+    # The freeze is write-once and effective_after is inside its digest, so the validated
+    # retriever is a *different object* from the unvalidated one rather than an annotation on it.
+    # The old file is superseded by rename, which is how every other write-once artifact here
+    # records that it was replaced instead of edited.
+    superseded = freeze_path.parent / f"superseded_retrieval_freeze_{current.digest[:12]}.json"
+    freeze_path.rename(superseded)
+    write_freeze(effective, freeze_path)
+    typer.echo(f"competence gate: PASS -- retrieval freeze is now effective after "
+               f"{gate['source_sha256'][:12]} (was {current.digest[:12]}, kept at {superseded})")
+    typer.echo("the execution binding has changed: re-run freeze-approval before the campaign.")
+
+
+def _has(settings, config: str, *keys: str) -> bool:
+    try:
+        settings.get(config, *keys)
+        return True
+    except Exception:  # noqa: BLE001 - a missing key is the answer, not a failure
+        return False
+
+
 @app.command("serve-provider")
 def serve_provider(config: Path = _CFG) -> None:  # pragma: no cover - process entry point
     """Run the provider. The only process that reads a credential, and never as root."""

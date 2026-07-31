@@ -371,6 +371,38 @@ screen_arms:
     - {arm_id: C_CPU_CONTROL, page_variant: P0, close_variant: C00-CPU}
     - {arm_id: C_PROSE_CONTROL, page_variant: P0, close_variant: C00-PROSE}
 
+# --- Freeze-1 / BrowseComp-Plus -----------------------------------------------------------
+#
+# The Week-1 blocks above screened nineteen arms to find out which mechanisms are even runnable.
+# That question is answered; Freeze-1 does not re-ask it. What runs on BrowseComp-Plus is the
+# core 2x2 -- measurement.mechanism_layer_arms, unchanged -- plus exactly one control, and the
+# control is the point of including it.
+#
+# H_PROSE_CONTROL replaces the ID selector with a SHORT_PROSE reducer under the *same* token
+# budget at the *same* boundary. Without it, "H beat P0" has two explanations that no amount of
+# data separates: the arm selected spans by id, or the arm simply emitted fewer tokens. Those are
+# different claims -- the first is about representation, the second is about a decode cap anyone
+# can apply to P0 in one line -- and only the second one is free. Every H number in the write-up
+# is reported against both P0 and this control for that reason.
+#
+# H_MARKDOWN_ID (H02) is the H champion, C_ID (C01) the C champion; H_PLUS_C is the two halves
+# composed, named as such rather than treated as a third mechanism.
+bcplus_arms:
+  arms:
+    - {arm_id: P0, page_variant: P0, close_variant: P0}
+    - {arm_id: H_MARKDOWN_ID, page_variant: H02, close_variant: P0}
+    - {arm_id: C_ID, page_variant: P0, close_variant: C01}
+    - {arm_id: H_PLUS_C, page_variant: H02, close_variant: C01}
+    - {arm_id: H_PROSE_CONTROL, page_variant: H00-PROSE, close_variant: P0}
+
+# The competence pilot (protocol section 5.3). P0 only, and that is not a simplification: the
+# pilot decides whether the frozen retriever supports the task at all, and a P1 arm in it would
+# make the retriever's admission condition depend on treatment data -- which is precisely the
+# data-dependent design choice the prereg exists to prevent.
+bcplus_pilot_arms:
+  arms:
+    - {arm_id: P0, page_variant: P0, close_variant: P0}
+
 # Pre-declared one-factor contrasts. Each entry names two full E2E arm IDs and every executable
 # variant field that is allowed to differ. Tests resolve the arms through variants.yaml and
 # require the observed difference set to equal factor_fields exactly. Bridge caps belong to the
