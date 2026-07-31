@@ -317,11 +317,41 @@ def test_an_unknown_query_raises_rather_than_defaulting(tmp_path):
         (_record(query_id=""), "query_id is missing or empty"),
         (_record(gold_docs=[{"text": "no docid"}]), "no usable docid"),
         (_record(gold_docs="d1"), "expected a list"),
-        (_record(negative_docs=[{"docid": "d1"}]), "both relevant and hard negatives"),
+        (
+            _record(negative_docs=[{"docid": f"d{i}"} for i in range(1, 7)],
+                    gold_docs=[{"docid": f"d{i}"} for i in range(1, 6)]),
+            "both relevant and hard negatives",
+        ),
     ],
 )
 def test_a_malformed_evaluator_record_stops_the_load(tmp_path, record, match):
     with pytest.raises(QrelsError, match=match):
+        load_evaluator_queries(write_jsonl(tmp_path, [record]))
+
+
+def test_a_stray_relevant_hard_negative_is_demoted_rather_than_fatal(tmp_path):
+    """The frozen BrowseComp-Plus vintage leaks one such docid in three of its 830 records.
+
+    Refusing the load made the whole study ungradable over a label no endpoint here consumes.
+    Relevance wins because it is asserted per query while the negative pool is mined by
+    retrieval, and the demotion is recorded so a reader sees it rather than inferring it.
+    """
+    views = load_evaluator_queries(write_jsonl(tmp_path, [
+        _record(negative_docs=[{"docid": "d2"}, {"docid": "d3"}])]))
+    view = views.get("q1")
+    assert view.negative_docids == {"d3"}, "the contradicting docid must leave the pool"
+    assert view.evidence_docids == {"d2"}, "recall's numerator must be untouched"
+    assert view.demoted_negative_docids == {"d2"}
+    assert "d2" in canonical_json(view.content()).decode("utf-8")
+
+
+def test_wholesale_overlap_is_still_refused(tmp_path):
+    """Five colliding docids is not mining residue; it is two lists about different queries."""
+    record = _record(
+        gold_docs=[{"docid": f"d{i}"} for i in range(1, 6)],
+        negative_docs=[{"docid": f"d{i}"} for i in range(1, 6)],
+    )
+    with pytest.raises(QrelsError, match="both relevant and hard negatives"):
         load_evaluator_queries(write_jsonl(tmp_path, [record]))
 
 

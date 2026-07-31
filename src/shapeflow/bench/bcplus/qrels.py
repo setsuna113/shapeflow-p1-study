@@ -125,6 +125,12 @@ BCPLUS_QUERY_COUNT = 830
 #: frozen query count, exactly as :func:`load_bcplus_qrels` pins the two qrels files.
 BCPLUS_EVALUATOR_QUERY_FILE = "browsecomp_plus_decrypted.jsonl"
 
+#: How many docids one record may list as both relevant and a hard negative before the overlap
+#: stops looking like mining residue and starts looking like two lists about different queries.
+#: The frozen vintage's worst record leaks exactly one, so this leaves the refusal armed with a
+#: real margin rather than tuned to the data it was measured on.
+_MAX_CONTRADICTIONS_PER_RECORD = 4
+
 #: TREC's second column is the iteration marker and carries no information, but requiring it to
 #: be one of these catches the failure it is worth catching: a file whose columns are in some
 #: other order still parses as four whitespace-separated fields, and would then be read with
@@ -418,6 +424,9 @@ class EvaluatorQueryView:
     gold_docids: frozenset[str]
     evidence_docids: frozenset[str]
     negative_docids: frozenset[str]
+    #: Docids the record listed as *both* relevant and a hard negative, removed from
+    #: ``negative_docids`` and kept here so the resolution is visible rather than assumed.
+    demoted_negative_docids: frozenset[str] = frozenset()
 
     def content(self) -> dict:
         return {
@@ -427,6 +436,7 @@ class EvaluatorQueryView:
             "gold_docids": sorted(self.gold_docids),
             "evidence_docids": sorted(self.evidence_docids),
             "negative_docids": sorted(self.negative_docids),
+            "demoted_negative_docids": sorted(self.demoted_negative_docids),
         }
 
 
@@ -558,12 +568,30 @@ def load_evaluator_queries(
         negative = _docids(record.get("negative_docs"), where=where, field="negative_docs")
         contradiction = (gold | evidence) & negative
         if contradiction:
-            # A document cannot be both the evidence for the answer and a hard negative. If the
-            # record says it is, the interference-precision label and the recall numerator would
-            # disagree about the same document and neither could be believed.
+            # A document cannot be both the evidence for the answer and a hard negative: the
+            # interference label and the recall numerator would disagree about the same document.
+            # This used to stop the load, and on the frozen BrowseComp-Plus vintage that refusal
+            # made the study ungradable -- three of 830 records (query_id 810, 741, 1139) carry
+            # exactly one such docid each, out of negative pools of 113, 128 and 61. That is the
+            # ordinary residue of mining hard negatives by retrieval and subtracting the known
+            # relevants; it is not a sign that the wrong files were paired.
+            #
+            # Relevance wins, and not arbitrarily: gold_docs and evidence_docs are hand-asserted
+            # per query, while negative_docs is a mined pool, so the two lists are not equally
+            # good evidence about the same document. The docid is removed from the negative pool
+            # and recorded, so a reader sees the resolution instead of inferring it. Recall, the
+            # endpoint this study actually reports, is untouched either way -- it reads
+            # evidence_docids -- and the negative pool is one document smaller for a label no
+            # endpoint in this campaign consumes.
+            negative = negative - contradiction
+        if len(contradiction) > _MAX_CONTRADICTIONS_PER_RECORD:
+            # Wholesale overlap is a different fact from a mining residue: it means the two
+            # lists are not about the same query. Resolving that silently would hide a
+            # mispaired file behind a rule written for three stray docids.
             raise QrelsError(
                 f"{where}: {len(contradiction)} docid(s) are both relevant and hard negatives, "
-                f"e.g. {sorted(contradiction)[:3]}"
+                f"more than the {_MAX_CONTRADICTIONS_PER_RECORD} a mined negative pool can "
+                f"plausibly leak; e.g. {sorted(contradiction)[:3]}"
             )
         if query_id in views:
             raise QrelsError(
@@ -577,6 +605,7 @@ def load_evaluator_queries(
             gold_docids=gold,
             evidence_docids=evidence,
             negative_docids=negative,
+            demoted_negative_docids=contradiction,
         )
 
     if not views:
