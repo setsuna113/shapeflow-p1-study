@@ -1,0 +1,59 @@
+{
+  "_note": [
+    "The benchmark this study measures on, pinned by digest. Hashed into ProtocolBinding as",
+    "bench_manifest_sha, which was the empty string until this file existed -- so the qrels",
+    "vintage, the query count and the split contents were pinned only by Python constants",
+    "(qrels.py BCPLUS_QUERY_COUNT = 830) and by a manifest sitting beside the data. A",
+    "constant in the code and a file on a run host are not the same kind of fact as a digest",
+    "inside the approval: the first two can change without invalidating anything.",
+    "",
+    "Corpus and index shard digests are deliberately NOT repeated here. They are already inside",
+    "protocol/retrieval_freeze.json, which is separately bound, and a second copy is a second",
+    "thing to keep in agreement.",
+    "",
+    "browsecomp_plus_decrypted.jsonl is the answer key. Its digest is recorded; its contents are",
+    "evaluator-only and never enter this repository."
+  ],
+  "bench": "browsecomp-plus",
+  "prep_scripts_commit": "0ca5c7d2b1316bcfad18657e8c94e5868557caa3",
+  "benchdata_root": "/storage/sata/shapeflow/benchdata",
+  "queries": {
+    "file": "browsecomp-plus/repo/topics-qrels/queries.tsv",
+    "count": 830,
+    "sha256": "d3d47d3cd6a8e14fa24268b75fbbda50dadd280d09c30412257978933b9c0bfa"
+  },
+  "qrels": {
+    "qrel_golds.txt": {
+      "rows": 2407,
+      "sha256": "b875af4a745712bee7a94f464ed989232f8c77977c31824428470e11dcb28c73"
+    },
+    "qrel_evidence.txt": {
+      "rows": 5064,
+      "sha256": "a6f594975be57339de9e4e9f67f13c044f647feda77c0b84c45a1581e3041bd1"
+    }
+  },
+  "evaluator_queries": {
+    "file": "browsecomp-plus/data/browsecomp_plus_decrypted.jsonl",
+    "count": 830,
+    "sha256": "0374946363a5c59f4d3707fa9c31b9e5152269c0f024668a71687dda4e48a85e",
+    "evaluator_only": true
+  },
+  "splits": {
+    "seed": 20260727,
+    "method": "pure random; the decrypted records carry no topic or answer-type field to stratify on",
+    "dev": {
+      "file": "splits/bcplus_dev.txt",
+      "n": 530,
+      "sha256": "3ee68bef54a6bc02611d27dfe37fe715f7130d34d2c3b5d322d4e3431d930db5"
+    },
+    "test": {
+      "file": "splits/bcplus_test.txt",
+      "n": 300,
+      "sha256": "918890f6f4da1b5996875d31f6f2e2bcb95ef4ba795dedc12c718d0501636bd7"
+    }
+  },
+  "retriever": {
+    "_note": "identity lives in protocol/retrieval_freeze.json; named here so a reader knows where to look",
+    "freeze_file": "protocol/retrieval_freeze.json"
+  }
+}

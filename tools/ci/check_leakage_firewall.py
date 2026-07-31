@@ -94,6 +94,14 @@ FREEZE_1 = FirewallSpec(
     ),
     evaluator_modules=(
         "shapeflow.bench.bcplus.qrels",
+        # Each of these also declares EVALUATOR_ONLY in its own file, which is the mechanism that
+        # is supposed to make this list unnecessary. Named here anyway, because the marker rule
+        # and the name rule fail differently: the marker is read from the module's source, so a
+        # module that is deleted, renamed, or has its marker dropped in a refactor stops being
+        # evaluator-only silently, and this list is what still refuses the import.
+        "shapeflow.bench.bcplus.recall",
+        "shapeflow.bench.bcplus.analysis",
+        "shapeflow.bench.bcplus.render",
         "shapeflow.bench.grading",
     ),
     forbidden_names=(
