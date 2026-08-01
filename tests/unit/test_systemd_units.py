@@ -233,31 +233,32 @@ def test_the_coordinator_receives_the_leased_device():
         assert "SHAPEFLOW_GPU_UUID" in body, f"{launcher} does not pass the leased device through"
 
 
-def test_every_screening_lane_receives_the_approved_execution_binding():
-    """The binding has to reach whatever actually starts the screen.
+def test_the_bootstrap_verifies_the_binding_and_stops_rather_than_launching():
+    """The binding has to be verified by whatever the host actually runs.
 
-    It used to reach a single systemd coordinator, which the bootstrap patched in place. The
-    campaign now starts four lane runners from run_lanes.sh, so the assertion follows the launch
-    rather than the mechanism it used to go through -- a check pinned to the old path would have
-    stayed green while the binding reached nothing.
+    This used to assert that the bootstrap exec'd into run_lanes.sh, which brought up four lanes
+    and drove the screen through freeze-shards and merge-shards. None of those exist under
+    Freeze-1: two lanes, per-lane services, and run-bcplus with a shard argument. The assertion
+    now follows what the bootstrap still owns -- deriving the approved binding and refusing to
+    hand a launch anything it did not verify -- and the launch sequence itself is checked where
+    it now lives, in the operations document a human reads before running it.
     """
     install = INSTALL_HOST.read_text(encoding="utf-8")
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
     supervisor = SUPERVISOR.read_text(encoding="utf-8")
-    lanes = (Path(__file__).resolve().parents[2] / "scripts" / "run_lanes.sh").read_text(
-        encoding="utf-8")
+    operations = (Path(__file__).resolve().parents[2]
+                  / "reports" / "BCPLUS_OPERATIONS.md").read_text(encoding="utf-8")
     runner_text = (
         SYSTEMD / "shapeflow-p1-week1.service.template").read_text(encoding="utf-8")
     assert "SHAPEFLOW_EXECUTION_BINDING_SHA" in install
-    # The bootstrap derives it and hands over; run_lanes.sh derives it again for the launch, so
-    # a lane cannot start under a binding nobody verified.
     assert "verified_execution_binding(Path('.')).digest" in bootstrap
-    assert 'exec "$REPO/scripts/run_lanes.sh"' in bootstrap
-    assert "verified_execution_binding(Path('$REPO')).digest" in lanes
-    assert '--protocol-sha "$BINDING"' in lanes
-    # Every lane, not just the first: a lane started without it would run unverified.
-    assert 'for lane in $(seq 0 $((LANE_COUNT - 1))); do' in lanes
-    assert 'SHAPEFLOW_LANE="$lane" setsid /usr/local/bin/sfsupervise' in lanes
+    # It must not exec into a launcher any more, and it must say where the launch is written.
+    assert "run_lanes.sh" not in bootstrap
+    assert "reports/BCPLUS_OPERATIONS.md" in bootstrap
+    # The documented launch carries the binding to every lane, not just the first.
+    assert "freeze-approval --approved-commit" in operations
+    assert "--protocol-sha <binding>" in operations
+    assert "--shard <lane> --shards 2" in operations
     assert "SHAPEFLOW_APPROVAL_FILE=@DATA_ROOT@/approvals/launch_approval.json" in runner_text
     assert "SHAPEFLOW_APPROVAL_FILE=" in supervisor
     assert 'readonly_acl "$DATA_ROOT/approvals" sfrunner sfevaluator' in install

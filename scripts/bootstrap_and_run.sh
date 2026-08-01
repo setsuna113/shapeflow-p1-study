@@ -322,11 +322,14 @@ JSON
 
 echo
 echo "All ${TOTAL_STEPS} hard gates passed (binding $APPROVED_BINDING_SHA)."
-echo "Handing over to the lane gates; the campaign starts only if all five of them pass."
 echo
 # Everything above is single-host correctness: the right bytes, the right approval, the right
-# credentials. run_lanes.sh is the part that can only be checked with the GPUs actually running
-# -- that P1 publishes at all, that four engines coexist, that stopping one damages exactly one
-# lane, that a full-arm canary merges, and that the disk survives the projection. It starts the
-# four screening runners itself once they pass.
-exec "$REPO/scripts/run_lanes.sh"
+# credentials. It stops here on purpose. The Week-1 launcher this used to exec into brought up
+# four lanes and drove the screen through freeze-shards/merge-shards, none of which exist any
+# more -- Freeze-1 runs two lanes with per-lane engine, provider and retrieval services, and
+# starts the campaign with run-bcplus under a shard argument. That sequence is written down in
+# reports/BCPLUS_OPERATIONS.md, where it can be read before it is run, rather than buried in a
+# script that execs itself at the end of a bootstrap.
+echo "Next: bring up the lanes and start the campaign as described in"
+echo "  reports/BCPLUS_OPERATIONS.md"
+echo "Re-mint the approval first -- any commit changes the binding."
