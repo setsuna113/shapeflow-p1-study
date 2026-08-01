@@ -125,9 +125,11 @@ def _liveness_table(arms: Mapping, *, baseline: str) -> list[str]:
     codebase before -- nineteen arms, every check green, not one P1 span published -- so the
     reader is shown the publication counts before being shown any effect.
     """
-    rows = ["| arm | P1 publications | fallbacks | close failures | publication rate |",
-            "|---|---|---|---|---|"]
+    rows = ["| arm | H published / offered | C published / offered | fallbacks | "
+            "close failures | overall rate |",
+            "|---|---|---|---|---|---|"]
     any_treatment = False
+    dead_h, dead_c = [], []
     for arm_id in sorted(arms):
         if arm_id == baseline:
             continue
@@ -135,14 +137,39 @@ def _liveness_table(arms: Mapping, *, baseline: str) -> list[str]:
         if not a.get("p1_opportunities") and not a.get("p1_publications"):
             continue
         any_treatment = True
+        h_n, h_d = a.get("h_publications") or 0, a.get("h_opportunities") or 0
+        c_n, c_d = a.get("c_publications") or 0, a.get("c_opportunities") or 0
+        if h_d and not h_n:
+            dead_h.append(arm_id)
+        if c_d and not c_n:
+            dead_c.append(arm_id)
         rows.append(
-            f"| `{arm_id}` | {a.get('p1_publications')} | {a.get('page_fallbacks')} | "
-            f"{a.get('close_failures')} | {_n(a.get('publication_rate'))} |")
+            f"| `{arm_id}` | {_fraction(h_n, h_d)} | {_fraction(c_n, c_d)} | "
+            f"{a.get('page_fallbacks')} | {a.get('close_failures')} | "
+            f"{_n(a.get('publication_rate'))} |")
     if not any_treatment:
         return ["## Did the treatment fire?", "",
                 "**No arm published a single P1 output.** Every contrast below is a comparison "
                 "of the baseline with itself.", ""]
-    return ["## Did the treatment fire?", "", *rows, ""]
+    # The boundaries are reported apart because summing them hides exactly the failure this
+    # study found: an arm running both can look healthy on a merged rate while one of its two
+    # halves has never emitted a span.
+    notes = []
+    for arms_dead, where in ((dead_h, "H (WEBPAGE_P1)"), (dead_c, "C (RESEARCHER_CLOSE)")):
+        if arms_dead:
+            notes.append(
+                f"**Nothing was published at {where}** by {', '.join(f'`{a}`' for a in arms_dead)}"
+                ": every opportunity fell back to P0. For those arms the contrast below measures "
+                "the cost of attempting P1, not the effect of receiving it.")
+    return ["## Did the treatment fire?", "", *rows, "",
+            *([n for note in notes for n in (note, "")] if notes else [])]
+
+
+def _fraction(numerator: int, denominator: int) -> str:
+    """`--` where the arm has no treatment at this boundary: absent is not the same as zero."""
+    if not denominator:
+        return "--"
+    return f"{numerator} / {denominator} ({numerator / denominator:.0%})"
 
 
 def _contrast_section(arm: str, contrast: Mapping, *, baseline: str) -> list[str]:

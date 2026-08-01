@@ -112,7 +112,9 @@ def test_an_inert_arm_shows_zero_publications_before_any_effect_is_shown():
     assert report["arms"]["H"]["p1_publications"] == 0
     markdown = render_markdown(report)
     assert markdown.index("Did the treatment fire?") < markdown.index("vs `P0`")
-    assert "| `H` | 0 |" in markdown
+    assert "| `H` | 0 / 10 (0%) | -- |" in markdown, (
+        "the H boundary ran and published nothing; C never ran, and the two must not read alike")
+    assert "Nothing was published at H (WEBPAGE_P1)" in markdown
 
 
 def test_the_render_never_sums_prompt_and_completion_tokens():
@@ -121,3 +123,55 @@ def test_the_render_never_sums_prompt_and_completion_tokens():
     markdown = render_markdown(build_report(records, resamples=100))
     assert "Prompt tokens" in markdown and "Completion tokens" in markdown
     assert "Total tokens" not in markdown
+
+
+def _hc_counts(*, h_batches: int, h_fallbacks: int, c_reduced: int, c_failed: int) -> dict:
+    return {"search_queries": 3, "page_batches_reduced": h_batches,
+            "page_fallbacks": h_fallbacks, "close_reduced": c_reduced,
+            "close_failed": c_failed}
+
+
+def test_a_dead_h_boundary_is_not_covered_by_a_live_c_boundary():
+    """The failure that made this split necessary.
+
+    An arm running both boundaries -- H_PLUS_C -- can post a healthy merged publication rate
+    while its H half has never emitted a single span, because the C half's successes are summed
+    into the same numerator. On BrowseComp-Plus that is not hypothetical: the C selector
+    publishes and the H selector falls back every time.
+    """
+    counts = _hc_counts(h_batches=6, h_fallbacks=6, c_reduced=3, c_failed=1)
+    summary = summarize_arm([_cell("t1", "H_PLUS_C", work=1.0, prompt=10, completion=2,
+                                   counts=counts)])
+    assert summary.h_publications == 0 and summary.h_opportunities == 6
+    assert summary.c_publications == 3 and summary.c_opportunities == 4
+    assert summary.h_publication_rate == 0.0
+    assert summary.c_publication_rate == 0.75
+    # The merged number is the one that would have hidden it.
+    assert summary.publication_rate == 0.3, "3 of 10 -- reads as a working arm"
+
+
+def test_an_arm_with_no_treatment_at_a_boundary_reports_none_not_zero():
+    """Absent and never-published produce the same count and mean opposite things."""
+    summary = summarize_arm([_cell("t1", "H_MARKDOWN_ID", work=1.0, prompt=10, completion=2,
+                                   counts=_hc_counts(h_batches=4, h_fallbacks=4,
+                                                     c_reduced=0, c_failed=0))])
+    assert summary.h_publication_rate == 0.0, "ran at H and published nothing"
+    assert summary.c_publication_rate is None, "never ran at C at all"
+
+
+def test_the_report_names_the_boundary_that_published_nothing():
+    records = []
+    for i in range(5):
+        records += [
+            _cell(f"t{i}", "P0", work=2.0 + i, prompt=100 + i, completion=20 + i),
+            _cell(f"t{i}", "H_MARKDOWN_ID", work=3.0 + i, prompt=150 + i, completion=22 + i,
+                  counts=_hc_counts(h_batches=4, h_fallbacks=4, c_reduced=0, c_failed=0)),
+            _cell(f"t{i}", "C_ID", work=2.0 + i, prompt=98 + i, completion=19 + i,
+                  counts=_hc_counts(h_batches=0, h_fallbacks=0, c_reduced=3, c_failed=1)),
+        ]
+    text = render_markdown(build_report(records, baseline_arm="P0", resamples=100))
+    assert "Nothing was published at H (WEBPAGE_P1)" in text
+    assert "`H_MARKDOWN_ID`" in text
+    assert "Nothing was published at C" not in text, "C published; it must not be named"
+    assert "0 / 20 (0%)" in text, "five cells x four batches, none published"
+    assert "15 / 20 (75%)" in text

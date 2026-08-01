@@ -112,20 +112,41 @@ class CellRecord:
     def cached_prompt_tokens(self) -> Optional[int]:
         return _token(self.work, "cached_prompt_tokens")
 
+    # The two boundaries are counted apart, and that is the whole point. Summed, an arm that
+    # runs both -- H_PLUS_C -- can report a healthy publication rate while its H half has never
+    # emitted a span, because the C half's successes cover for it. That is precisely the case
+    # this study has to be able to see: on BrowseComp-Plus the C selector publishes and the H
+    # selector does not, and one merged number says neither thing.
+    @property
+    def published_h(self) -> int:
+        """Page batches that reached publication as P1 rather than falling back to P0."""
+        counts = self.counts or {}
+        return max(0, int(counts.get("page_batches_reduced", 0) or 0)
+                   - int(counts.get("page_fallbacks", 0) or 0))
+
+    @property
+    def opportunities_h(self) -> int:
+        return int((self.counts or {}).get("page_batches_reduced", 0) or 0)
+
+    @property
+    def published_c(self) -> int:
+        """Researcher closes the selector actually reduced."""
+        return int((self.counts or {}).get("close_reduced", 0) or 0)
+
+    @property
+    def opportunities_c(self) -> int:
+        counts = self.counts or {}
+        return (int(counts.get("close_reduced", 0) or 0)
+                + int(counts.get("close_failed", 0) or 0))
+
     @property
     def published_p1(self) -> int:
         """H batches published as P1, plus C closes reduced by the selector."""
-        counts = self.counts or {}
-        reduced = int(counts.get("page_batches_reduced", 0) or 0)
-        fell_back = int(counts.get("page_fallbacks", 0) or 0)
-        return max(0, reduced - fell_back) + int(counts.get("close_reduced", 0) or 0)
+        return self.published_h + self.published_c
 
     @property
     def p1_opportunities(self) -> int:
-        counts = self.counts or {}
-        return (int(counts.get("page_batches_reduced", 0) or 0)
-                + int(counts.get("close_reduced", 0) or 0)
-                + int(counts.get("close_failed", 0) or 0))
+        return self.opportunities_h + self.opportunities_c
 
 
 def _token(work: Mapping, name: str) -> Optional[int]:
@@ -281,6 +302,10 @@ class ArmSummary:
     p1_opportunities: int
     page_fallbacks: int
     close_failures: int
+    h_publications: int = 0
+    h_opportunities: int = 0
+    c_publications: int = 0
+    c_opportunities: int = 0
 
     @property
     def publication_rate(self) -> Optional[float]:
@@ -288,9 +313,24 @@ class ArmSummary:
             return None
         return self.p1_publications / self.p1_opportunities
 
+    @property
+    def h_publication_rate(self) -> Optional[float]:
+        """None means the arm has no H treatment, which is not the same as never publishing."""
+        if not self.h_opportunities:
+            return None
+        return self.h_publications / self.h_opportunities
+
+    @property
+    def c_publication_rate(self) -> Optional[float]:
+        if not self.c_opportunities:
+            return None
+        return self.c_publications / self.c_opportunities
+
     def content(self) -> dict:
         body = {k: v for k, v in self.__dict__.items()}
         body["publication_rate"] = self.publication_rate
+        body["h_publication_rate"] = self.h_publication_rate
+        body["c_publication_rate"] = self.c_publication_rate
         return body
 
 
@@ -322,6 +362,10 @@ def summarize_arm(records: Sequence[CellRecord]) -> ArmSummary:
         p1_opportunities=sum(r.p1_opportunities for r in committed),
         page_fallbacks=sum(int(r.counts.get("page_fallbacks", 0) or 0) for r in committed),
         close_failures=sum(int(r.counts.get("close_failed", 0) or 0) for r in committed),
+        h_publications=sum(r.published_h for r in committed),
+        h_opportunities=sum(r.opportunities_h for r in committed),
+        c_publications=sum(r.published_c for r in committed),
+        c_opportunities=sum(r.opportunities_c for r in committed),
     )
 
 
