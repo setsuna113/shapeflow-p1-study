@@ -266,6 +266,17 @@ def attach_recall(records: Sequence[CellRecord], evaluator_queries) -> None:
 
 
 def _recall(retrieved: set, relevant) -> Optional[float]:
+    """Agent-level recall, and deliberately not :mod:`shapeflow.bench.bcplus.recall`.
+
+    Two recall implementations in one package invites the assumption that one is a stale copy of
+    the other. They measure different things. ``recall.py`` is retriever-level Recall@k: one
+    query, its top-k window, scored against the TREC qrels files, with per-query status and the
+    found/missed docids kept for audit -- that is what chose the encoder. This is agent-level:
+    the union of every docid a *cell* retrieved across all its queries, scored against the
+    decrypted record's own evidence and gold sets, with no k at all, because the agent chooses
+    how many queries to issue and a per-query mean would reward one good query and many empty
+    ones. The study's `evidence_recall` endpoint is this one.
+    """
     relevant = frozenset(str(d) for d in relevant)
     if not relevant:
         # A query with no labelled relevant document has no recall -- reporting 0.0 would drag

@@ -32,6 +32,17 @@ SCANNED = (
     "src/shapeflow/work",
 )
 
+#: Roots from SCANNED that do not exist yet, named one by one. A missing root used to be skipped
+#: by a bare ``if not root.exists(): continue``, so this gate scanned ``broker`` alone and printed
+#: the same green line it prints at full coverage -- two thirds of its declared scope absent and
+#: nothing said so. Silence about what was not checked is the failure mode a CI gate exists to
+#: prevent, so an unexpected absence is now an error and an expected one has to be written down
+#: here, where deleting a live package fails the build instead of quietly shrinking the check.
+NOT_BUILT_YET = {
+    "src/shapeflow/predictor",  # Phase 1: the cost model that prices a form at the tick.
+    "src/shapeflow/work",       # Phase 1: W components and the microbench that fits alpha/beta.
+}
+
 #: A literal is treated as a feature reference if it looks like one. Prefixes come from the
 #: registry itself, so adding a feature family to the contract extends this automatically.
 PREFIXES = tuple(sorted({name.split(".", 1)[0] + "." for name in OBSERVABLE}))
@@ -58,9 +69,22 @@ def violations_in(path: Path) -> list[tuple[int, str]]:
 def main() -> int:
     scanned = 0
     failures: list[str] = []
+    pending: list[str] = []
     for rel in SCANNED:
         root = REPO / rel
         if not root.exists():
+            if rel in NOT_BUILT_YET:
+                pending.append(rel)
+                continue
+            failures.append(
+                f"{rel} is in SCANNED, is not listed in NOT_BUILT_YET, and does not exist. "
+                "Either it was deleted -- in which case this gate just stopped covering it -- or "
+                "the path is wrong and it never covered it at all.")
+            continue
+        if rel in NOT_BUILT_YET:
+            failures.append(
+                f"{rel} exists but is still listed in NOT_BUILT_YET, so a reader is told it is "
+                "unbuilt while its literals go unscanned. Remove it from NOT_BUILT_YET.")
             continue
         for path in sorted(root.rglob("*.py")):
             if path.name in EXEMPT_FILES or "__pycache__" in path.parts:
@@ -83,8 +107,12 @@ def main() -> int:
         )
         return 1
 
-    print(f"observability: {scanned} module(s) scanned, {len(OBSERVABLE)} registered features, "
-          "no unregistered feature reference")
+    # The pending roots are printed on the success line, not swallowed. A gate that reports what
+    # it did not look at is the difference between "clean" and "clean over two thirds of itself".
+    not_yet = f"; not built yet: {', '.join(sorted(pending))}" if pending else ""
+    print(f"observability: {scanned} module(s) scanned across "
+          f"{len(SCANNED) - len(pending)} of {len(SCANNED)} root(s), "
+          f"{len(OBSERVABLE)} registered features, no unregistered feature reference{not_yet}")
     return 0
 
 

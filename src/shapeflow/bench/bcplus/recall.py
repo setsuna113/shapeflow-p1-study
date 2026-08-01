@@ -15,6 +15,17 @@ directions have been seen in published tables and neither is recoverable afterwa
 EVALUATOR-ONLY: this reads the answer key. Nothing on the treatment path may import it -- an
 aggregator that could compute its own recall could also optimize for it, which is the oracle
 AGENTS.md §2 forbids.
+
+**What calls this, and what does not.** Retriever-level Recall@k over the TREC qrels files: one
+query, its top-k window, per-query status, found and missed docids kept so a disputed number is
+checkable. That is the quantity the index screen reported when it chose the encoder.
+
+The campaign's ``evidence_recall`` endpoint is *not* this function. ``analysis.attach_recall``
+computes it separately, because it is a different measurement: the union of every docid one cell
+retrieved across all its queries, against the decrypted record's own evidence and gold sets, with
+no k -- the agent decides how many queries to issue, so a per-query mean would reward issuing one
+good query and many empty ones. Both are named here so that finding two recall implementations in
+one package does not read as one of them being a stale copy of the other.
 """
 
 from __future__ import annotations
