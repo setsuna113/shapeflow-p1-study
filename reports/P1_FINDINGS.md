@@ -1,6 +1,7 @@
 # P1 on BrowseComp-Plus — findings
 
-**Status: interim.** The main campaign is in flight (141 of 560 cells at the time of writing).
+**Status: interim.** The main campaign is in flight (343 of 560 cells committed at the time of
+writing, plus 31 censored -- see section 3a, which is the biggest caveat on everything here).
 Everything below is stated at the sample size it was measured at, and the mechanism findings are
 separated from the effect sizes on purpose: the first are properties of the machine and are
 already settled, the second are estimates that will tighten.
@@ -120,14 +121,48 @@ rather than of the published output — but coupled-seed end-to-end ITT lets tra
 after the first intervention and the between-task variance is large. Not interpreted until the
 full run.
 
-**Caveat on `C_CPU_CONTROL`.** Five cells have failed terminally, all in this arm, on
-`telemetry_complete: False` — inference attempts left unaccounted after `BrokenPipeError` in the
-provider writing to clients that had already hung up. The cells were scientifically fine (full
-reports, C published, `fell_back: false`); the runner correctly refuses a cell whose work
-accounting is incomplete. The failures skew heavy (mean 28 page summaries vs 20.6 for survivors),
-so this arm's surviving work numbers are **biased cheap**, and its contrast will carry the
-survivorship warning rather than be reported clean. Not fixed mid-run: the client timeout lives
-in a hashed config, so changing it re-mints the binding and orphans the campaign.
+---
+
+## 3a. Censoring — the largest threat to the numbers above
+
+At 374 terminal cells, **31 have failed and every one has the same cause**:
+`telemetry_complete: False`, one or two inference attempts left unaccounted after
+`BrokenPipeError` in the provider writing a response to a client that had already hung up. The
+cells were otherwise fine — full reports, treatment published where it was assigned,
+`fell_back: false`. The runner refuses a cell whose work accounting is incomplete, which is the
+correct behaviour for a study whose primary endpoint *is* the work accounting.
+
+| arm | committed | failed | survival |
+|---|---|---|---|
+| `H_CPU_CONTROL` | 54 | 0 | 100 % |
+| `H_MARKDOWN_ID` | 51 | 2 | 96 % |
+| `H_PROSE_CONTROL` | 52 | 2 | 96 % |
+| `C_ID` | 50 | 3 | 94 % |
+| `H_PLUS_C` | 51 | 3 | 94 % |
+| `P0` | 48 | 5 | 91 % |
+| `C_CPU_CONTROL` | 37 | **16** | **70 %** |
+| **total** | **343** | **31** | **92 %** |
+
+Two things about it are uncomfortable and are stated rather than smoothed.
+
+**It is accelerating.** By quarter of the run: 5.4 %, 4.3 %, 10.8 %, 12.8 %. It is not the engine
+degrading — median cell latency is flat across those quarters (139 s, 118 s, 140 s, 115 s) and
+p90 is noisy without a trend, disk is at 30 %, memory has 76 GB free, and there is exactly one
+engine process per GPU. The cause is understood at the level of *what* fails and not yet *why it
+worsens*.
+
+**It is not proportional across arms.** `C_CPU_CONTROL` loses 30 % of its cells while
+`H_CPU_CONTROL` loses none, and the heaviest arm — `H_MARKDOWN_ID`, at +70 % prompt tokens —
+loses only 2. So this is not simply "long cells die", which would at least bias every arm the
+same way. `C_CPU_CONTROL`'s contrast falls well below the pre-registered
+`MIN_PAIRED_SURVIVAL` of 0.95 and will be reported with the survivorship warning, not as a clean
+estimate. `P0` at 91 % matters more than it looks: the baseline losing cells shrinks *every*
+pairing, since a contrast needs both arms to have committed on the same task.
+
+Not fixed mid-run, and that is a deliberate choice rather than an oversight: the client timeout
+lives in a hashed config, so changing it re-mints the execution binding, which renames every work
+key and orphans the campaign in progress. The honest options were to let it run and report the
+censoring, or to stop and re-run 374 cells under a new binding. The first is taken.
 
 ---
 
