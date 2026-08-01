@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/freeze_record.schema.json",
+  "$id": "https://shapeflow/schemas/freeze_record.schema.json",
   "title": "FreezeRecord",
   "description": "An outcome-free design lock written before any outcome is observed. It pins the champion, the thresholds, the holdout task ids, the randomization schedule and the software/data manifest hashes, so 'what was pre-registered' is a content hash rather than a promise. Any change after freeze mints a new protocol version instead of overwriting.",
   "type": "object",

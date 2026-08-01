@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/runner_task.schema.json",
+  "$id": "https://shapeflow/schemas/runner_task.schema.json",
   "title": "RunnerTask",
   "description": "What the treatment identity is allowed to see of a task: the question, and nothing else. The authored facets, the fixed queries and both probes stay in the steward's copy -- handing a selector a decomposition of the question that P0 never received would make any measured advantage an artifact of the harness rather than of the P1 mechanism. The separation is a file the runner cannot read, not a field it is asked not to look at.",
   "type": "object",

@@ -20,13 +20,13 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.evidence.chunkers import WhitespaceTokenizer, paragraph_sentence_v1
-from shapeflow_p1.evidence.identity import build_evidence_span, build_visible_message_span
-from shapeflow_p1.hashing import sha256_hex
-from shapeflow_p1.p1.aggregators import AggregatedEvidence, AggregatedItem, stable_union_v1
-from shapeflow_p1.p1.contracts import OVERALL_FACET, SelectionContractError, parse_selection
-from shapeflow_p1.p1.preflight import PreflightConfig, preflight
-from shapeflow_p1.p1.view import CandidateViewRecord, ViewConstructionError
+from shapeflow.evidence.chunkers import WhitespaceTokenizer, paragraph_sentence_v1
+from shapeflow.evidence.identity import build_evidence_span, build_visible_message_span
+from shapeflow.hashing import sha256_hex
+from shapeflow.p1.aggregators import AggregatedEvidence, AggregatedItem, stable_union_v1
+from shapeflow.p1.contracts import OVERALL_FACET, SelectionContractError, parse_selection
+from shapeflow.p1.preflight import PreflightConfig, preflight
+from shapeflow.p1.view import CandidateViewRecord, ViewConstructionError
 
 TOK = WhitespaceTokenizer()
 SOURCE = "Cats are feline animals here. Dogs are canine animals here. Birds can surely fly here."
@@ -175,6 +175,163 @@ def test_query_attempts_belong_to_the_view():
     assert view.candidate_set.resolve("Q1", kind="query_attempt") == "q_a"
 
 
+# --- C_VISIBLE order and evidence/context semantics ------------------------------------
+
+
+def _visible_candidate_view(
+    bodies: list[tuple[str, str, str]],
+    *,
+    contract: str = "P1_ID",
+) -> CandidateViewRecord:
+    """Build one exact visible byte stream from (message_id, kind, body) rows."""
+    view_bytes = b"\n".join(body.encode("utf-8") for _, _, body in bodies)
+    final_hash = sha256_hex(view_bytes)
+    rebuilt = []
+    cursor = 0
+    for message_id, kind, body in bodies:
+        if cursor:
+            cursor += 1
+        encoded = body.encode("utf-8")
+        rebuilt.append(build_visible_message_span(
+            message_id=message_id,
+            message_role=(
+                "tool" if kind in {
+                    "TOOL_EVIDENCE",
+                    "TOOL_UNATTRIBUTED_CONTEXT",
+                }
+                else "ai" if kind == "MODEL_DERIVED_CONTEXT"
+                else "human"
+            ),
+            byte_start=cursor,
+            byte_end=cursor + len(encoded),
+            message_bytes=view_bytes,
+            kind=kind,
+            visible_compressor_view_hash=final_hash,
+            source_occurrence_ids=[OCC] if kind == "TOOL_EVIDENCE" else None,
+        ))
+        cursor += len(encoded)
+    return CandidateViewRecord.build(
+        spans=rebuilt,
+        tokenizer=TOK,
+        namespace="VISIBLE_MESSAGE",
+        visible_views={final_hash: view_bytes},
+        query_attempts=[],
+        token_budget=10_000,
+        contract=contract,
+        topic="feline evidence",
+    )
+
+
+def test_visible_publication_follows_view_offsets_not_message_ids():
+    """Random message ids must not reorder the conversation the compressor actually read."""
+    view = _visible_candidate_view([
+        ("z-first-id", "TOOL_EVIDENCE", "First evidence in the visible stream."),
+        ("a-second-id", "TOOL_EVIDENCE", "Second evidence in the visible stream."),
+    ])
+    sel = parse_selection(
+        {"contract": "P1_ID", "selected_ids": ["E2", "E1"]},
+        view.candidate_set,
+    )
+    rendered = view.render(stable_union_v1(sel, view.registry)).text
+    assert rendered.index("First evidence") < rendered.index("Second evidence")
+
+
+def test_visible_prompt_and_publication_keep_context_non_citable():
+    view = _visible_candidate_view([
+        ("z-tool", "TOOL_EVIDENCE", "A tool returned this source fact."),
+        ("a-model", "MODEL_DERIVED_CONTEXT", "The model previously guessed X."),
+        ("m-user", "USER_CONTEXT", "The user asked about X."),
+    ])
+    prompt = view.prompt_bytes.decode("utf-8")
+    assert "<TOOL_EVIDENCE role=tool; CITABLE_SOURCE>" in prompt
+    assert "<MODEL_DERIVED_CONTEXT role=ai; NON_CITABLE_CONTEXT>" in prompt
+    assert "<USER_CONTEXT role=human; NON_CITABLE_CONTEXT>" in prompt
+
+    sel = parse_selection(
+        {"contract": "P1_ID", "selected_ids": ["E1", "E2", "E3"]},
+        view.candidate_set,
+    )
+    result = preflight(
+        selection=sel,
+        aggregated=stable_union_v1(sel, view.registry),
+        view=view,
+        known_occurrence_ids={OCC},
+        config=PreflightConfig(
+            selected_token_budget=10_000,
+            expected_namespace="VISIBLE_MESSAGE",
+            expected_contract="P1_ID",
+        ),
+    )
+    assert result.ok, result.errors
+    assert result.rendered.text.count("SOURCE:") == 1
+    assert "MODEL-DERIVED CONTEXT (non-citable; not source evidence):" in result.rendered.text
+    assert "USER CONTEXT (non-citable; not source evidence):" in result.rendered.text
+    assert "[E2]" not in result.rendered.text and "[E3]" not in result.rendered.text
+    assert "CONTEXT ITEM (handle E2; non-citable)" in result.rendered.text
+
+
+def test_typed_context_cannot_be_promoted_to_support():
+    view = _visible_candidate_view([
+        ("tool", "TOOL_EVIDENCE", "A tool returned a source fact."),
+        ("model", "MODEL_DERIVED_CONTEXT", "The model asserted an unsupported conclusion."),
+    ], contract="P1_TYPED")
+    sel = parse_selection({
+        "contract": "P1_TYPED",
+        "selections": [
+            {"span_id": "E2", "role": "support", "facet_ids": ["answer"]},
+        ],
+    }, view.candidate_set)
+    result = preflight(
+        selection=sel,
+        aggregated=stable_union_v1(sel, view.registry),
+        view=view,
+        known_occurrence_ids={OCC},
+        config=PreflightConfig(
+            selected_token_budget=10_000,
+            expected_namespace="VISIBLE_MESSAGE",
+            expected_contract="P1_TYPED",
+        ),
+    )
+    assert not result.ok
+    assert any("non-citable MODEL_DERIVED_CONTEXT" in error for error in result.errors)
+
+
+def test_bridge_cannot_cite_model_or_user_context():
+    view = _visible_candidate_view([
+        ("tool", "TOOL_EVIDENCE", "A tool returned a source fact."),
+        ("model", "MODEL_DERIVED_CONTEXT", "The model previously inferred a conclusion."),
+    ], contract="P1_BRIDGE")
+    sel = parse_selection({
+        "contract": "P1_BRIDGE",
+        "selections": [
+            {"span_id": "E1", "role": "support"},
+            {"span_id": "E2", "role": "background"},
+        ],
+        "bridges": [{
+            "text": "These statements connect.",
+            "evidence_ids": ["E2"],
+        }],
+    }, view.candidate_set)
+    result = preflight(
+        selection=sel,
+        aggregated=stable_union_v1(sel, view.registry),
+        view=view,
+        known_occurrence_ids={OCC},
+        config=PreflightConfig(
+            selected_token_budget=10_000,
+            bridge_token_cap_each=20,
+            bridge_token_cap_total=20,
+            expected_namespace="VISIBLE_MESSAGE",
+            expected_contract="P1_BRIDGE",
+        ),
+    )
+    assert not result.ok
+    assert any(
+        "cites non-citable tool/model/user context" in error
+        for error in result.errors
+    )
+
+
 # --- relations are the single source of truth ------------------------------------------
 
 
@@ -272,23 +429,24 @@ def test_a_bridge_drops_only_because_its_evidence_did_and_says_so():
 # --- everything fails closed ------------------------------------------------------------
 
 
-def test_a_source_metadata_leak_is_an_error_not_an_exception():
-    """SourceMetaLeak escaped preflight, so the batch's failure path was the caller's except."""
+def test_unbound_visible_source_metadata_is_rejected_before_selector_dispatch():
+    """C title/URL metadata must be byte-addressed, not checked by whole-view substring."""
     visible = build_visible_message_span(
         message_id="m1", message_role="tool", byte_start=10, byte_end=26,
         message_bytes=VISIBLE, kind="TOOL_EVIDENCE",
         visible_compressor_view_hash=VIEW_HASH, source_occurrence_ids=[OCC])
-    view = CandidateViewRecord.build(
-        spans=[visible], tokenizer=TOK, namespace="VISIBLE_MESSAGE",
-        visible_views={VIEW_HASH: VISIBLE}, snapshot_texts={},
-        query_attempts=[], token_budget=1000, contract="P1_ID", topic="t",
-        source_meta={visible["visible_span_id"]: {"title": "NEVER IN THE VIEW", "url": "u"}},
-    )
-    sel = parse_selection({"contract": "P1_ID", "selected_ids": ["E1"]}, view.candidate_set)
-    res = _pf(view, sel, stable_union_v1(sel, view.registry))
-    assert not res.ok
-    assert res.rendered is None
-    assert any("compressor-visible" in e for e in res.errors)
+    with pytest.raises(ViewConstructionError, match="closed.*byte-range binding"):
+        CandidateViewRecord.build(
+            spans=[visible], tokenizer=TOK, namespace="VISIBLE_MESSAGE",
+            visible_views={VIEW_HASH: VISIBLE}, snapshot_texts={},
+            query_attempts=[], token_budget=1000, contract="P1_ID", topic="t",
+            source_meta={
+                visible["visible_span_id"]: {
+                    "title": "NEVER IN THE VIEW",
+                    "url": "u",
+                }
+            },
+        )
 
 
 def test_cancellation_is_never_swallowed():
@@ -296,7 +454,7 @@ def test_cancellation_is_never_swallowed():
     torn down, and converting it into "P1 failed, use P0" would fabricate a result."""
     import asyncio
 
-    from shapeflow_p1.p1.view import guard_publication
+    from shapeflow.p1.view import guard_publication
 
     def boom():
         raise asyncio.CancelledError()

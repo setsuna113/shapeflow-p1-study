@@ -16,7 +16,7 @@ Type=oneshot
 User=@GATE_USER@
 WorkingDirectory=@REPO@
 # Verifies HEAD/tag/freeze/ledger-phase closure, then releases the label-free holdout to the runner.
-ExecStart=@REPO@/.venv/bin/shapeflow-p1 release-holdout \
+ExecStart=@REPO@/.venv/bin/shapeflow release-holdout \
   --freeze-tag freeze/p1-holdout-v1 --protocol-sha @PROTOCOL_SHA@ --once
 
 UMask=0077

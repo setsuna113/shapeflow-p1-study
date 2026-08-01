@@ -1,7 +1,7 @@
 [project]
 name = "shapeflow-p1-study"
 version = "0.1.0"
-description = "Week-1 kill/keep study for ShapeFlow P1 nodes WEBPAGE_P1 and RESEARCHER_CLOSE"
+description = "ShapeFlow: a broker for joint compression-form and admission decisions in LLM serving"
 requires-python = "==3.12.*"
 
 # Direct dependencies are declared here; uv.lock holds the exact resolution and
@@ -37,6 +37,8 @@ dependencies = [
   # evidence parsing
   "beautifulsoup4",
   "markdown-it-py~=3.0.0",
+  # exact Qwen token budgets and offset-preserving evidence chunking
+  "tokenizers~=0.22.0",
   # the pinned+patched vendor agent (resolved from .build/, see [tool.uv.sources])
   "open_deep_research",
 ]
@@ -50,7 +52,7 @@ dev = [
 ]
 
 [project.scripts]
-shapeflow-p1 = "shapeflow_p1.cli:app"
+shapeflow = "shapeflow.cli:app"
 
 [tool.uv]
 # The pinned vendor commit ships its OWN uv.lock, and that resolution is the stack the graph
@@ -127,18 +129,30 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/shapeflow_p1"]
+packages = ["src/shapeflow"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-filterwarnings = ["error::DeprecationWarning:shapeflow_p1.*"]
+filterwarnings = ["error::DeprecationWarning:shapeflow.*"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# The pinned upstream graph is not ours to restyle, and .build/ is a materialized copy of it.
+# Linting them buried our own findings under ~700 vendor diagnostics, which is why nothing was
+# enforcing this gate at all.
+extend-exclude = ["vendor", ".build"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "S"]
 # S101 (assert) is fine in tests; invariant asserts in src are deliberate and reviewed.
 ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+# The isolation and supervisor tests must actually run setfacl/getfacl/flock and drop
+# privileges -- proving those boundaries is the point, and S603/S607 describe exactly the
+# thing being tested. S108 is a literal /tmp path in a fixture, not a temp-file race.
+"tests/**" = ["S603", "S607", "S108", "S105", "S106"]
+# scripts/ is checked by `bash -n`, not ruff; gpu_diagnostic.py shells out on purpose.
+"scripts/**" = ["S603", "S607"]

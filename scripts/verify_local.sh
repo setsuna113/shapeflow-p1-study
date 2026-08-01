@@ -13,31 +13,76 @@ echo "== package is installed (not just on sys.path) =="
 "$PY" - <<'PYEOF'
 import pathlib, sys
 try:
-    import shapeflow_p1
+    import shapeflow
 except ModuleNotFoundError:
-    sys.exit("shapeflow_p1 is not installed in .venv -- run scripts/dev_setup.sh")
-print("shapeflow_p1 <-", pathlib.Path(shapeflow_p1.__file__).parent)
+    sys.exit("shapeflow is not installed in .venv -- run scripts/dev_setup.sh")
+print("shapeflow <-", pathlib.Path(shapeflow.__file__).parent)
 PYEOF
 
 echo "== import every module =="
 "$PY" - <<'PYEOF'
-import importlib, pkgutil, shapeflow_p1
+import importlib, pkgutil, shapeflow
 ok = 0
-for m in pkgutil.walk_packages(shapeflow_p1.__path__, "shapeflow_p1."):
+for m in pkgutil.walk_packages(shapeflow.__path__, "shapeflow."):
     importlib.import_module(m.name); ok += 1
 print(f"imported {ok} submodules cleanly")
 PYEOF
+
+echo "== the patched vendor tree is the tree we say it is =="
+# The patch injects our imports into vendor bytes, so a package rename, a moved module or an
+# edited hunk all change the patched tree -- and `patched_tree_sha` is inside the approval
+# binding. Materializing here means a divergence surfaces as a local failure with an obvious
+# cause, rather than as an approval that mysteriously stops verifying on the run host, where the
+# tempting fix is to re-mint the approval instead of re-running parity.
+if [ -d vendor/open_deep_research/.git ]; then
+  bash scripts/materialize_vendor.sh >/dev/null || {
+    echo "PATCHED TREE MISMATCH: scripts/materialize_vendor.sh disagrees with"
+    echo "patches/patched_tree.sha256. Regenerate the hash and re-run test-p0-parity;"
+    echo "do not re-mint the approval to make this pass."
+    exit 1; }
+  echo "patched tree matches patches/patched_tree.sha256"
+else
+  echo "vendor submodule not checked out; skipping (run git submodule update --init)"
+fi
+
+echo "== shell syntax =="
+# The launch gate, the host installer and the supervisor are shell. A syntax error in any of
+# them is only discovered on the run host, as root, mid-launch.
+for script in scripts/*.sh; do
+  bash -n "$script" || { echo "SHELL SYNTAX FAILED: $script"; exit 1; }
+done
+
+echo "== whitespace =="
+git diff --check HEAD -- . || { echo "WHITESPACE ERRORS"; exit 1; }
+
+echo "== lint (defect rules) =="
+# Deliberately not the full rule set. The repository carries several hundred stylistic
+# diagnostics (UP007 Optional -> | None, UP035, I001) whose mass rewrite right before a freeze
+# would be a large untested diff for no correctness gain. These families are the ones that
+# catch defects rather than style, and they pass today -- so this gate is real and enforced,
+# instead of aspirational and skipped. Run `ruff check .` for the full picture.
+"$PY" -m ruff check . --select E9,F63,F7,F82,F811,F841,B006,B023,S102,S307,S608 \
+  || { echo "LINT FAILED"; exit 1; }
+
+echo "== observability contract (no unregistered feature may enter a decision) =="
+"$PY" tools/ci/check_observability.py || { echo "OBSERVABILITY CHECK FAILED"; exit 1; }
+
+echo "== leakage firewall (no evaluator material may reach the treatment path) =="
+# Regression gate 9. Gold answers, qrels, evidence sets and negatives are evaluator-only; a
+# treatment path that can reach them is scored on its own answer key, and the failure is invisible
+# in the results because a leaked run looks like a very good run.
+"$PY" tools/ci/check_leakage_firewall.py || { echo "LEAKAGE FIREWALL CHECK FAILED"; exit 1; }
 
 echo "== unit + property tests =="
 "$PY" -m pytest tests -q -p no:cacheprovider
 
 echo "== secret scan (real credentials must not appear; FAKE placeholders allowed) =="
 # Mirrors .gitleaks.toml patterns. Excludes gitignored dirs and the __pycache__.
-hits=$(grep -rEn 'tvly-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{12,}' \
+hits=$(grep -rEn 'tvly-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{12,}|(EXA_API_KEY|x-api-key)["'"'"'[:space:]:=]{1,4}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
         --include='*.py' --include='*.md' --include='*.toml' --include='*.json' \
         --include='*.yaml' --include='*.sh' \
         src tests schemas scripts configs protocol ./*.md ./*.toml 2>/dev/null \
-      | grep -v 'FAKEFAKEFAKE' || true)
+      | grep -vE '(tvly|sk|exa)-[A-Z0-9-]*FAKE[A-Z0-9-]*' || true)
 if [ -n "$hits" ]; then
   echo "SECRET SCAN FAILED:"; echo "$hits"; exit 1
 fi

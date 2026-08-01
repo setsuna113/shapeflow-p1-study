@@ -32,6 +32,10 @@ class AwaitingModel:
         self._log = log
         self._structured = None
         self._config: dict = {}
+        # Production refuses to claim seed pairing unless ODR's configurable-model hook has
+        # the pinned runtime shape.  This double deliberately mimics that shape; omitting it
+        # would test a model construction path production correctly rejects before invocation.
+        self._configurable_fields = ["model", "max_tokens", "api_key"]
         # Per-conversation turn counters keyed by the first message, so the supervisor and the
         # researcher each advance their own script.
         self._turns: dict = {}
@@ -69,7 +73,6 @@ class AwaitingModel:
             return ResearchQuestion(research_brief="Research the harbour totals.")
         if self._structured is Summary:
             return Summary(summary="Harbour 4821; Union 4410.", key_excerpts="4821 / 4410")
-        key = id(self._structured)
         tools = self._config.get("tools", [])
         if "ConductResearch" in tools:
             n = self._turns.get("sup", 0)
@@ -115,7 +118,7 @@ async def test_the_close_hook_fires_in_the_full_graph(monkeypatch):
     monkeypatch.setattr(u, "tavily_search_async", fake_search)
 
     fired = {"close": 0, "page": 0}
-    import shapeflow_p1.odr.vendor_hooks as vh
+    import shapeflow.odr.vendor_hooks as vh
 
     real_close = vh.run_close_strategy
 
@@ -125,18 +128,18 @@ async def test_the_close_hook_fires_in_the_full_graph(monkeypatch):
 
     monkeypatch.setattr(vh, "run_close_strategy", counting_close)
 
-    from shapeflow_p1.campaign.graph_driver import CellSpec, run_cell
-    from shapeflow_p1.campaign.settings import Settings
-    from shapeflow_p1.odr.hooks import StrategyBundle
-    from shapeflow_p1.strategies.close_visible import CloseSelectionStrategy, CloseStrategyConfig
-    from shapeflow_p1.strategies.p0 import VendorPageStrategy
-    from shapeflow_p1.evidence.chunkers import WhitespaceTokenizer
+    from shapeflow.campaign.graph_driver import CellSpec, run_cell
+    from shapeflow.campaign.settings import Settings
+    from shapeflow.odr.hooks import StrategyBundle
+    from shapeflow.strategies.close_visible import CloseSelectionStrategy, CloseStrategyConfig
+    from shapeflow.strategies.p0 import VendorPageStrategy
+    from shapeflow.evidence.chunkers import WhitespaceTokenizer
 
     settings = Settings.load(REPO, data_root=Path("/tmp/hook-probe"))
 
     class EchoSelector:
         async def select(self, *, task_ctx, view):
-            from shapeflow_p1.strategies.pipeline import WorkRecord
+            from shapeflow.strategies.pipeline import WorkRecord
             ids = [c.label for c in view.candidates[:2]]
             return ({"contract": "P1_ID", "selected_ids": ids},
                     WorkRecord(selector_calls=1, completion_tokens=5))
@@ -148,9 +151,9 @@ async def test_the_close_hook_fires_in_the_full_graph(monkeypatch):
         selector=EchoSelector(), tokenizer=WhitespaceTokenizer())
     bundle = StrategyBundle(variant_id="P0+C01", page=VendorPageStrategy({}), close=close)
 
-    from shapeflow_p1.acquire.snapshot_store import SnapshotStore
-    from shapeflow_p1.acquire.source_pool import QueryResponse, RawResult, build_source_pool
-    from shapeflow_p1.object_store import ObjectStore
+    from shapeflow.world.snapshot_store import SnapshotStore
+    from shapeflow.world.source_pool import QueryResponse, RawResult, build_source_pool
+    from shapeflow.object_store import ObjectStore
 
     store = SnapshotStore(ObjectStore(Path("/tmp/hook-probe-obj")))
     pool = build_source_pool("T", [QueryResponse("qs", "q", (
@@ -161,7 +164,9 @@ async def test_the_close_hook_fires_in_the_full_graph(monkeypatch):
     cell = CellSpec(run_id="probe", task_id="T", arm_id="C_VISIBLE", page_variant="P0",
                     close_variant="C01", replicate_id="0", seed=1, work_key="WK",
                     question="Which bodies reported harbour totals?",
-                    cell_token="probe-cell-1")
+                    cell_token="probe-cell-1",
+                    execution_binding_sha256="e" * 64,
+                    protocol_document_sha256="d" * 64)
     result = await asyncio.wait_for(
         run_cell(settings, cell, pool=pool, snapshots=store, bundle=bundle,
                  provider_base_url="http://127.0.0.1:1", runner_token="x",

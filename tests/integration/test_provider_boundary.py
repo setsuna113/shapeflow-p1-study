@@ -1,11 +1,13 @@
-"""The provider over real HTTP, driving the real Tavily and DeepSeek clients.
+"""The provider over real HTTP, driving the real judge client.
 
 The unit tests exercise the service object; this one starts the listener, sends real requests
 through :class:`ProviderClient`, and drives the *existing*
-:class:`~shapeflow_p1.acquire.tavily_client.TavilyCaptureClient` and
-:class:`~shapeflow_p1.evaluation.judge_client.DeepSeekJudge` through it unchanged. That is the
-point: there is one implementation of "call Tavily", and it now reaches the network only through
+:class:`~shapeflow.bench.grading.judge_client.DeepSeekJudge` through it unchanged. That is the
+point: there is one implementation of "call the judge", and it reaches the network only through
 the boundary.
+
+The credential routes are still asserted at the ACL level with raw posts, because the route
+policy is a property of the provider rather than of any client that happens to exist today.
 
 The fake credential is planted in the provider and additionally *echoed back by the upstream* in
 an error body -- the way a real provider leaks one -- and asserted absent from every artifact.
@@ -17,25 +19,25 @@ import json
 
 import pytest
 
-from shapeflow_p1.acquire.tavily_client import TavilyCaptureClient, TavilyParams
-from shapeflow_p1.evaluation.judge_client import DeepSeekJudge, JudgeUnavailable
-from shapeflow_p1.experiment.budget import Budget
-from shapeflow_p1.experiment.ledger import Ledger
-from shapeflow_p1.object_store import ObjectStore
-from shapeflow_p1.providers.provider_client import (
+from shapeflow.bench.grading.judge_client import DeepSeekJudge, JudgeUnavailable
+from shapeflow.experiment.budget import Budget
+from shapeflow.experiment.ledger import Ledger
+from shapeflow.object_store import ObjectStore
+from shapeflow.providers.provider_client import (
     PROVIDER_KEY_PLACEHOLDER,
+    ProviderCallError,
     ProviderClient,
 )
-from shapeflow_p1.runtime.provider_server import (
+from shapeflow.runtime.provider_server import (
     ProviderConfig,
     ProviderService,
     RoleTokens,
     serve_forever,
 )
-from shapeflow_p1.secrets import SecretRedactor
+from shapeflow.secrets import SecretRedactor
 
-FAKE_TAVILY = "tvly-INTEGRATIONFAKEKEY000000"
-FAKE_DEEPSEEK = "sk-INTEGRATIONFAKEDEEPSEEK00"
+FAKE_TAVILY = "tvly-FAKE-INTEGRATION-000000"
+FAKE_DEEPSEEK = "sk-FAKE-INTEGRATION-DEEPSEEK"
 
 TOKENS = {
     "runner": "itest-runner-token-000000000",
@@ -112,34 +114,14 @@ def provider(tmp_path):
 
 def _artifact_texts(store: ObjectStore, ledger: Ledger) -> list[str]:
     rows = ledger.raw_connection.execute(
-        "SELECT request_object_ref, response_object_ref FROM external_calls").fetchall()
+        "SELECT request_object_ref, response_object_ref FROM external_call_attempts"
+    ).fetchall()
     texts = []
     for row in rows:
         for ref in (row["request_object_ref"], row["response_object_ref"]):
             if ref:
                 texts.append(store.get_bytes(ref).decode("utf-8"))
     return texts
-
-
-async def test_the_real_tavily_client_runs_through_the_boundary(provider):
-    base, service, upstream, store, ledger, redactor = provider
-    client = ProviderClient(base_url=base, token=TOKENS["steward"])
-
-    # The existing capture client, unchanged, with the provider as its transport.
-    capture = TavilyCaptureClient(
-        client.tavily_transport(task_id="T1", call_key="qs-1"),
-        TavilyParams(), PROVIDER_KEY_PLACEHOLDER,
-    )
-    captured = await capture.search("T1", "what is a cat")
-
-    assert captured.request_id == "req-1"
-    assert captured.usage == {"credits": 1.0}
-    assert len(captured.response.results) == 1
-    assert captured.response.results[0].raw_content == "RAW A"
-    # The real key went out exactly once, to the upstream, and to nowhere else.
-    assert upstream.calls[0]["body"]["api_key"] == FAKE_TAVILY
-    for text in _artifact_texts(store, ledger):
-        assert FAKE_TAVILY not in text and redactor.is_clean(text)
 
 
 async def test_the_real_judge_client_runs_through_the_boundary(provider):
@@ -162,14 +144,6 @@ async def test_the_real_judge_client_runs_through_the_boundary(provider):
 async def test_a_credential_echoed_back_by_the_upstream_never_lands_in_an_artifact(provider):
     base, service, upstream, store, ledger, redactor = provider
     upstream.mode = "leak"
-
-    steward = ProviderClient(base_url=base, token=TOKENS["steward"])
-    capture = TavilyCaptureClient(
-        steward.tavily_transport(task_id="T2", call_key="qs-2"),
-        TavilyParams(), PROVIDER_KEY_PLACEHOLDER,
-    )
-    with pytest.raises(Exception):
-        await capture.search("T2", "leaky")
 
     evaluator = ProviderClient(base_url=base, token=TOKENS["evaluator"])
     judge = DeepSeekJudge(
@@ -216,6 +190,36 @@ async def test_inference_is_tagged_by_the_cell_path(provider):
     event = [e for e in service.events if e["kind"] == "INFERENCE_COMMITTED"][-1]
     assert event["op_class"] == "RESEARCHER_REACT"
     assert event["task_id"] == "T1" and event["variant_id"] == "H02"
+
+    attestation = await runner.canary_audit(work_keys=["WK1"])
+    assert attestation["work_keys"] == ["WK1"]
+    assert attestation["work"][0]["ops"][0]["op_class"] == "RESEARCHER_REACT"
+    assert attestation["work"][0]["ops"][0]["prompt_tokens"] == 3
+    assert (
+        attestation["work"][0]["settled_gpu_seconds"]
+        == pytest.approx(
+            attestation["work"][0]["ops"][0]["settled_gpu_seconds"])
+    )
+    assert attestation["open_attempts"] == 0
+    assert "prompt_sha256" not in json.dumps(attestation)
+
+
+async def test_empty_canary_work_set_fails_locally_without_an_http_request():
+    client = ProviderClient(
+        base_url="http://127.0.0.1:1", token=TOKENS["runner"])
+    with pytest.raises(
+        ProviderCallError, match="requires at least one work_key"
+    ):
+        await client.canary_audit(work_keys=[])
+
+
+async def test_non_runner_role_cannot_call_the_canary_audit(provider):
+    base, *_ = provider
+    evaluator = ProviderClient(base_url=base, token=TOKENS["evaluator"])
+    status, payload = await evaluator._post(
+        "/v1/canary/audit", {"work_keys": ["WK1"]})
+    assert status == 403
+    assert "may not call" in payload["error"]
 
 
 async def test_an_unknown_route_is_a_404_not_a_guess(provider):

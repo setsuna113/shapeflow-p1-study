@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
-from shapeflow_p1.object_store import CorruptObject, ObjectStore
+from shapeflow.object_store import CorruptObject, ObjectStore
 
 
 def test_roundtrip(tmp_path):
@@ -52,3 +54,19 @@ def test_rejects_non_hex_key(tmp_path):
     store = ObjectStore(tmp_path)
     with pytest.raises(ValueError):
         store.get_bytes("not-a-hash")
+
+
+def test_concurrent_puts_and_reads_do_not_share_zstd_context(tmp_path):
+    store = ObjectStore(tmp_path)
+    payloads = [
+        (f"request-{i % 11}-".encode("ascii") + bytes([i % 251]) * (8192 + i))
+        for i in range(96)
+    ]
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        refs = list(pool.map(store.put_bytes, payloads))
+        recovered = list(pool.map(lambda ref: store.get_bytes(ref.key), refs))
+
+    assert recovered == payloads
+    assert all(store.verify(ref.key) for ref in refs)
+    assert not list(tmp_path.rglob("*.tmp"))

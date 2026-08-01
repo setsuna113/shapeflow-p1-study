@@ -6,16 +6,16 @@ import asyncio
 
 import pytest
 
-from shapeflow_p1.runtime.nvml_sampler import PowerSample, integrate_energy_joules
-from shapeflow_p1.runtime.openai_proxy import (
+from shapeflow.runtime.nvml_sampler import PowerSample, integrate_energy_joules
+from shapeflow.runtime.openai_proxy import (
     InflightGate,
     OverlapViolation,
     ProxyRequest,
     TelemetryProxy,
     UpstreamResult,
 )
-from shapeflow_p1.runtime.request_tags import OpClass
-from shapeflow_p1.runtime.work_accounting import RequestEvent, isolated_service_work
+from shapeflow.runtime.request_tags import OpClass
+from shapeflow.runtime.work_accounting import RequestEvent, isolated_service_work
 
 
 class _Clock:
@@ -54,7 +54,6 @@ async def test_causal_gate_serializes_and_work_is_non_overlapping():
     events: list[RequestEvent] = []
 
     async def upstream(body):
-        start = clock.t
         # simulate work; because the gate is exclusive, two of these cannot interleave
         clock.advance(2.0)
         return UpstreamResult(response={}, prompt_tokens=1, completion_tokens=1)

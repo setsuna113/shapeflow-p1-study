@@ -14,8 +14,8 @@ StartLimitBurst=3
 Type=simple
 User=@RUNNER_USER@
 WorkingDirectory=@REPO@
-# Resume-only once launched; the exact protocol SHA is pinned so a drifted config cannot run.
-ExecStart=@REPO@/.venv/bin/shapeflow-p1 run-week1 --config configs/week1.yaml --resume --protocol-sha @PROTOCOL_SHA@
+# Resume-only once launched; the exact execution-binding digest is pinned so drift cannot run.
+ExecStart=@REPO@/.venv/bin/shapeflow run-week1 --config configs/week1.yaml --resume --protocol-sha @PROTOCOL_SHA@
 ExecStop=@REPO@/scripts/stop_safely.sh
 
 # Restart policy: give up after 3 restarts in 30 min (BLOCKED_REPEATED_CRASH). The
@@ -34,7 +34,12 @@ ReadWritePaths=@DATA_ROOT@/runner @REPO@/reports @REPO@/logs
 # The runner gets an explicit environment allowlist; no credential variables are present.
 Environment=PYTHONHASHSEED=0 TZ=UTC PYTHONUNBUFFERED=1
 Environment=SHAPEFLOW_DATA_ROOT=@DATA_ROOT@
+Environment=SHAPEFLOW_APPROVAL_FILE=@DATA_ROOT@/approvals/launch_approval.json
 Environment=SHAPEFLOW_REPO=@REPO@
+Environment=SHAPEFLOW_ENGINE_EPOCH_FILE=/run/shapeflow-vllm-causal/engine_epoch
+# The leased device. The coordinator takes an flock on it, which is what stops a second worker
+# from using the same card; without this variable the lease was silently skipped entirely.
+Environment=SHAPEFLOW_GPU_UUID=@GPU_UUID@
 
 # Redacted logs (the app's SecretRedactor runs before every handler; journald captures stdio).
 StandardOutput=append:@REPO@/logs/coordinator.log

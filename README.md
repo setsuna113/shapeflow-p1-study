@@ -1,62 +1,76 @@
-# shapeflow-p1-study
+# shapeflow
 
-Week-1 **kill/keep study** for two ShapeFlow P1 nodes. It does not implement a broker,
-a scheduler, or any part of the ShapeFlow proposal — it decides whether the P1 idea
-survives at two specific points in Open Deep Research.
+**ShapeFlow Freeze-1**: a broker that decides, at the vLLM scheduler tick, *which compression
+form* each job uses and *which jobs are admitted* this round — jointly, not in sequence.
 
-## The two nodes
+Protocol of record: [`protocol/SHAPEFLOW_FREEZE_1.md`](protocol/SHAPEFLOW_FREEZE_1.md). It is
+frozen; changes append as numbered amendments.
 
-| Node | Hook | Question |
+## The setting
+
+An Open Deep Research-style agent on vLLM. A supervisor dispatches researchers; each searches in
+a ReAct loop. Evidence compression happens at two boundaries:
+
+| Boundary | Where | Decision unit |
 |---|---|---|
-| `WEBPAGE_P1` | Tavily `raw_content` → vendor `summarize_webpage` | Does short evidence-ID selection beat prose summarization? |
-| `RESEARCHER_CLOSE` | researcher exit → vendor `compress_research` | Does evidence-ID selection beat long prose compression? |
+| **H** | the sibling tool-call batch of one assistant turn, joined by `asyncio.gather` | one gather batch |
+| **C** | researcher close (`ResearchComplete` / max tool calls / no tool call) | one close |
 
-`RESEARCHER_CLOSE` splits into two treatments that are **never merged**:
-`C_VISIBLE` (selector sees exactly what P0's compressor saw — the compressor-only
-experiment) and `C_REGISTRY` (selector may also re-read raw spans — a registry-assisted
-extension, reported separately).
+Two forms compete at each boundary:
 
-Primary design is a 2×2: `P0`, `H`, `C_VISIBLE`, `H+C_VISIBLE`.
+- **P0 (prose)** — one summarization request per page at H; a long free decode at C. Decode is
+  serial per token and is the GPU bottleneck.
+- **P1 (span-ID selection)** — pages are snapshotted by content hash and cut into located
+  fragments; the model emits only fragment IDs, and CPU validates, merges, stably orders and
+  renders them. At H this is one whole-batch selector call published atomically; at C it is a
+  separate selector request after close.
+
+P1 shortens the free decode. It does not remove the language problem: the selector still
+prefills the candidate evidence, and relevance, contradiction and gap judgements remain
+semantic.
+
+## The contribution
+
+The broker, not span selection. Each pending job arrives as an **offer** — a set of alternative
+execution plans (P0: N summary requests; P1: one selector request plus a CPU render) — and the
+broker chooses form *and* admission together, per tick, under a 2 ms solve budget. Quality is a
+hard qualification gate rather than a tradable weight: a job whose P1 plan does not qualify
+keeps P0. Anything that times out or loses its valuation degrades fail-closed.
 
 ## What "answer" means here
 
-Each node gets one of: `KEEP`, `CONDITIONAL`, `MECHANISM_ONLY`, `KILL_STRUCTURAL`,
-`KILL_HARM`, `KILL_NO_HEADROOM`, `NOT_ESTABLISHED` — plus effect size, eligibility
-envelope, coverage, and failure boundary. `MECHANISM_ONLY` means the effect exists in
-the isolated causal setting but not under real batching, and is a proposal NO-GO.
-`NOT_ESTABLISHED` is a NO-GO for the proposal but is *not* evidence of no effect.
+Five claims, in a chain where each link gates the next: safe heterogeneity **exists** → it is
+**predictable** → gating beats any static policy → joint beats sequential → it holds up under
+real serving. A link that fails stops the one after it, and the claims shrink to what survived
+rather than being restated more softly.
 
 ## Design commitments
 
-- **Frozen web.** Tavily is called only during acquisition. Treatment runs query a
-  task-local frozen source pool, so arms cannot get different worlds from ranking drift.
-- **Two measurement layers.** An isolated causal layer (`max_num_seqs=1`, one upstream
-  request in flight) for quality and mechanism; an operational layer (real batching,
-  fixed arrival traces, `TraceBlock` as the unit) for deployment claims. A `KEEP`
-  requires both.
-- **Honest holdout.** Opened once, after an outcome-free tracked freeze, behind a
-  UID/ACL gate — not a convention.
-- **All-offered accounting.** Fallbacks, retries and timeouts keep their cost. A P1 that
-  fell back to P0 is not free.
-
-## Status
-
-Under construction. `reports/BLOCKED*.md` is authoritative when present — the launch
-gate is fail-closed and refuses to start on a missing secret, stack mismatch, unfrozen
-data, P0 parity failure, or smoke failure.
+- **Frozen retrieval.** Treatment runs never reach the live web; every arm of a task retrieves
+  the same corpus with the same ranking, so arms cannot be compared across two different worlds.
+- **Pre-registration with provenance.** Every frozen threshold records the procedure that
+  produced it and the digest of the artifact it read. Pilot data is P0-only, and the fill
+  asserts it.
+- **Gates as code.** Every gate reads its thresholds from the frozen pre-registration by dotted
+  path, is three-valued (`PASS` / `FAIL` / `INPUTS_UNAVAILABLE`), and records the digest of every
+  artifact behind its verdict.
+- **All-offered accounting.** Fallbacks, retries and timeouts keep their cost. A P1 that fell
+  back to P0 is not free.
 
 ## Layout
 
 ```
-protocol/   hash-locked design locks and launch approval (tracked, outcome-free)
+protocol/   the frozen plan, the stack manifest, the frozen pre-registration (tracked)
+configs/    prereg template, campaign, retrieval, variants, budget, stack, gates
 vendor/     pinned ODR submodule, read-only
-patches/    the only sanctioned modification to vendor
-configs/    stack, acquisition, variants, decision thresholds
+patches/    the only sanctioned modification to vendor, plus its tree digest
 schemas/    JSON Schemas; every artifact validates against one
-src/        the study implementation
+src/        the implementation
 data/ runs/ object_store/ logs/   gitignored experiment state
-reports/    generated verdicts and audits
+reports/    generated gate reports and verdicts
 ```
 
-See `AGENTS.md` before changing anything — it lists the invariants whose violation
+See [`AGENTS.md`](AGENTS.md) before changing anything — it lists the invariants whose violation
 produces a result that looks fine and is wrong.
+
+The Week-1 kill/keep study this repo grew out of is sealed at the `week1-archive` tag.

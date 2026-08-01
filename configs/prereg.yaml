@@ -1,0 +1,252 @@
+# Pre-registration template -- Freeze-1 §4.
+#
+# This is the STRUCTURE, authored before any treatment output exists. It is not the frozen
+# document: `shapeflow prereg fill` resolves the PENDING slots and `shapeflow prereg freeze`
+# writes `protocol/prereg.lock.json` once, with per-slot provenance. Both files are bound
+# separately by the execution binding -- `prereg_template_sha` locks this shape and is stable
+# across Phase 0, `prereg_frozen_sha` is empty until the freeze -- because filling a numeric slot
+# legitimately changes the document, and binding one digest would invalidate the approval on
+# every fill.
+#
+# Every unresolved slot carries `fill: <kind>` saying who is allowed to resolve it:
+#
+#   PILOT   a registered procedure derives it from P0-only pilot artifacts. The procedure is
+#           pre-registered and tested against synthetic input BEFORE the pilot runs; the value
+#           is data. `prereg fill` asserts every record it reads carries arm_id == "P0", which
+#           is what makes using pilot data for the freeze legitimate rather than circular.
+#   PLAN    the frozen plan states it. Copied, not chosen.
+#   HUMAN   a policy number the plan does not state and no P0-only data can derive. It must be
+#           decided by a person and recorded with its rationale. `prereg freeze` refuses while
+#           any remains, and nothing may guess one: a fabricated threshold would look exactly
+#           like a pre-registered one afterwards, which is the whole failure mode this file
+#           exists to prevent.
+#
+# §4 item numbers are given per section so this document and the protocol stay checkable
+# against each other.
+version: freeze-1
+protocol_document: protocol/SHAPEFLOW_FREEZE_1.md
+
+# --- (1) endpoints -------------------------------------------------------------------------
+endpoints:
+  primary_quality:
+    name: bcplus_e2e_accuracy
+    estimand: ITT
+    grader: bcplus_official_grader
+    grader_prompt_sha256: {value: PENDING, fill: PILOT, procedure: bcplus_grader_prompt_sha@v1}
+    fill: PLAN
+  co_secondary:
+    - name: evidence_recall
+      # A docid-set intersection against the benchmark's own qrels. No judge is involved, so
+      # this endpoint cannot drift with a judge model.
+      source: bcplus_qrels
+      fill: PLAN
+    - name: W_components
+      components: [uncached_prefill, cached_prefill, decode]
+      always_reported_in_full: true
+      fill: PLAN
+    - name: drgym_report_metrics
+      status: WAIVED
+      waived_utc: "2026-07-28"
+      # Freeze-1 §3.2 pre-declares this fallback, so invoking it is not an amendment and the
+      # plan text is unchanged. What makes it clean is the timing: it was invoked before any
+      # treatment output existed, so it cannot have been chosen because BC+-only results looked
+      # better. That is the entire risk this slot was guarding, and at zero data it is absent
+      # rather than mitigated -- which is why the deadline that used to sit here is gone. A
+      # deadline exists to stop a fallback becoming a post-hoc choice; a fallback taken before
+      # the first datum has nothing to be post hoc about.
+      reason: "DeepResearchGym FineWeb API returns 401 and requires a key by request; waived rather than waited on."
+      fallback_active: true
+      fallback: "Freeze-1 §3.2: C-boundary profiling runs on BC+ only, using the answer-derivability probe; the report construct is covered by G-A alone."
+      # Priced when the fallback was written, not now: C1's C-boundary evidence narrows to the
+      # answer-derivability construct and the paper says so plainly. The H boundary -- where most
+      # broker decisions are -- is unaffected.
+      cost: "C1 C-boundary construct narrows to answer-derivability; H boundary unaffected"
+      fill: PLAN
+  primary_work: W
+
+# --- (2) W, the token-work model -----------------------------------------------------------
+work_model:
+  formula: "alpha*uncached_prefill + beta*cached_prefill + gamma*decode"
+  # Calibrated from this hardware by the W microbench. Frozen afterwards, and explicitly not
+  # adjustable in light of any P1 data.
+  alpha: {value: PENDING, fill: PILOT, procedure: w_weights_from_microbench@v1}
+  beta:  {value: PENDING, fill: PILOT, procedure: w_weights_from_microbench@v1}
+  gamma: {value: PENDING, fill: PILOT, procedure: w_weights_from_microbench@v1}
+  normalization: "gamma == 1.0, so W is denominated in decode-token equivalents"
+  # W stops being additive under contention. The microbench fits both regimes; the idle fit is
+  # what W means, the loaded fit is a registered sensitivity, and G0 checks they agree within
+  # tolerance -- so a regime-specific saving can never be reported as an absolute one.
+  regime_agreement_tolerance: {value: PENDING, fill: HUMAN}
+  components_always_reported: true
+
+# --- (3) work accounting scope -------------------------------------------------------------
+work_scope:
+  included:
+    - selector_requests
+    - summary_requests
+    - fallbacks
+    - downstream_agent_calls_affected_by_trajectory
+    - final_answer_call
+    - tokens_spent_by_failed_requests
+  reported_separately: [predictor_cpu, renderer_cpu]
+  measurement_overhead:
+    shadow_runs: {ledgered: true, excluded_from_evaluated_policy_work: true}
+  fill: PLAN
+
+# --- (4) qualification ---------------------------------------------------------------------
+qualification:
+  rule: "qualified = evidence_loss <= tau_e AND interference_risk <= tau_i AND mechanical_checks_pass"
+  # Set strict-binary on 2026-07-28, following the fail-closed philosophy: a decision qualifies
+  # for P1 only if it loses no gold answer point and introduces no misleading assertion. If G1
+  # shows the qualified share is too small to be useful, relaxing these goes through a numbered
+  # amendment -- which, being after the data was seen, downgrades the affected conclusions to
+  # exploratory. That cost is the point: it is what stops the threshold from drifting toward
+  # whatever makes the result look good.
+  tau_e: 0        # gold answer points lost, per decision
+  tau_i: 0        # misleading assertions introduced, per decision
+  units: count_per_decision
+  # Shipped by the benchmark: ~76 hard negatives per query, 63,316 in total. The interference
+  # label does not have to be constructed, and a negative's identity is not automatically harm --
+  # the probe has to measure it.
+  interference_label_source: bcplus_negative_docs
+  mechanical_checks: [contradiction, source_lineage, budget]
+
+# --- (5) safety ----------------------------------------------------------------------------
+safety:
+  # delta is an EXCESS over P0-only, not an absolute rate: the gated policy's task-level
+  # incident rate may exceed the P0-only arm's by at most 3 percentage points, judged by the
+  # one-sided CI rather than the point estimate. 3pt is the smallest magnitude n=300 can
+  # actually resolve; a tighter bound would be claiming to measure something this design cannot.
+  delta_task_incident_excess:
+    over: P0_only
+    max_pp: 3
+    decided_by: one_sided_CI
+  delta_gate:
+    statistic: "one_sided_UCB(P(unsafe | broker chose P1))"
+    method: clopper_pearson
+    level: 0.95
+    ceiling: 0.05   # realistic at a calibration set capped at 800 labels
+
+# --- (6) epsilon ---------------------------------------------------------------------------
+epsilon:
+  # The PROCEDURE is pre-registered here; the value is data. Written and tested against
+  # synthetic input before the power pilot runs.
+  procedure: epsilon_from_power_pilot@v1
+  rule: "1pt main (sensitivity {0,2}) if 300 tasks support it, else 2pt (sensitivity {1})"
+  main:        {value: PENDING, fill: PILOT, procedure: epsilon_from_power_pilot@v1}
+  sensitivity: {value: PENDING, fill: PILOT, procedure: epsilon_from_power_pilot@v1}
+  inputs: [paired_discordance_rate, serving_randomness_sd, probe_noise_sd]
+
+# --- (7) minimum meaningful saving ---------------------------------------------------------
+utility:
+  minimum_meaningful_work_saving: 0.15   # Freeze-1 §4.7 default
+  fill: PLAN
+
+# --- (8) S1 numbers ------------------------------------------------------------------------
+s1:
+  # Anchored to the P0-only pilot by formula rather than by judgement. The RULE is the
+  # pre-registration and is fixed here; the VALUE resolves from P0-only measurements, so these
+  # slots are PILOT rather than HUMAN and nobody has to guess a millisecond figure in advance.
+  latency_slo_p95:
+    rule: "3 x p0_idle_median_latency"
+    value: {value: PENDING, fill: PILOT, procedure: s1_slo_from_pilot@v1}
+  completion_fraction_floor: 0.95
+  backlog_slope_max: 0
+  instability_rule: "backlog slope > 0 across the measurement window"
+  warmup_s:
+    rule: ">= 2 x p0_median_latency"
+    value: {value: PENDING, fill: PILOT, procedure: s1_windows_from_pilot@v1}
+  measurement_s:
+    rule: ">= 10 x p0_median_latency"
+    value: {value: PENDING, fill: PILOT, procedure: s1_windows_from_pilot@v1}
+  lambda_grid:
+    rule: "p0_pilot_lambda_star x {0.6, 0.8, 1.0, 1.2}"
+    multipliers: [0.6, 0.8, 1.0, 1.2]
+    value: {value: PENDING, fill: PILOT, procedure: s1_lambda_grid_from_pilot@v1}
+  lambda_procedure: bracket_then_concentrate@v1
+  traceblock_count:            {value: PENDING, fill: PILOT, procedure: s1_blocks_from_power_pilot@v1}
+  # Still unset: the 2026-07-28 decision covered the SLO, the two windows, the completion floor,
+  # the instability rule and the lambda grid, but not these. Left PENDING rather than inferred.
+  deadline_ms:                 {value: PENDING, fill: HUMAN}
+  drain_s:                     {value: PENDING, fill: HUMAN}
+  block_arrivals: {min: 30, max: 50}      # Freeze-1 §7
+  blocks_per_key_cell: {min: 6, max: 8}   # Freeze-1 §7
+  # A proxy-level broker whose snapshot is stale enough to be uncorrelated with engine state
+  # runs, fills the ledger, and is decorative. This is a validity criterion for the broker
+  # itself, checked at G0', not a diagnostic.
+  snapshot_staleness_p99_ms_max: {value: PENDING, fill: HUMAN}
+  snapshot_feature_rank_correlation_min: {value: PENDING, fill: HUMAN}
+  # Query embeddings are a different cache from APC and must NOT be salted per arm -- salting
+  # would create exactly the cross-arm timing asymmetry this rule prevents.
+  embedding_cache_hit_rate_min: 0.99
+  embedding_cache_hit_rate_spread_max: {value: PENDING, fill: HUMAN}
+
+# --- (9) statistics ------------------------------------------------------------------------
+statistics:
+  decision_level: {unit: decision_point, se: cluster_robust, cluster: task_id}
+  task_level:     {method: paired_bootstrap, resamples: 10000, seed_source: execution_binding}
+  s1_level:       {method: paired_bootstrap, unit: TraceBlock, resamples: 10000}
+  quality_reporting: [mean_difference, incident_rate]   # always both, never one
+  non_inferiority: one_sided
+  fill: PLAN
+
+# --- (10) iteration ------------------------------------------------------------------------
+iteration:
+  max_repair_iterations_per_gate: 1
+  post_iteration_retest_split: FV-B
+  # S1 has no retest: the sealed split is opened once.
+  no_retest: [S1]
+  fill: PLAN
+
+# --- design (Freeze-1 §3.1, §6 B2) ---------------------------------------------------------
+design:
+  # Not scalars. B2 sweeps the frozen 3x3 grid from Freeze-1 §6, so p_H and p_C are cell
+  # coordinates rather than one chosen pair; the template asked for scalars and that was wrong.
+  # Confirmed unchanged on 2026-07-28: no new data, so the plan's grid stands.
+  policy_grid:
+    p_H: [0.0, 0.5, 1.0]
+    p_C: [0.0, 0.5, 1.0]
+    cells: 9
+    # Only if the H three-point curve is non-monotone or threshold-shaped, and marked
+    # exploratory when used.
+    conditional_extension: {p_H: [0.25, 0.75], p_C: 0.0}
+  assignment:
+    # Not independent Bernoulli: that hits the target only in expectation, leaving power and the
+    # GPU budget unknowable until after the corpus is frozen. A phase drawn from the frozen
+    # binding plus a low-discrepancy rotation gives P(P1) = p exactly at every index, an exact
+    # count in every prefix, and no drift of treatment with position in a trajectory.
+    method: phased_low_discrepancy
+    module: shapeflow.design.point_assignment
+    index: structural_coordinate
+  splits:
+    seed: 20260727
+    itd: {b1_select: 80, b1_confirm: 170, b2: 110}
+    fv:  {fv_a: 75, fv_b: 75}
+    sealed_confirmatory: 300
+    dev_sha256:  "3ee68bef54a6bc02611d27dfe37fe715f7130d34d2c3b5d322d4e3431d930db5"
+    test_sha256: "918890f6f4da1b5996875d31f6f2e2bcb95ef4ba795dedc12c718d0501636bd7"
+
+# --- pilots (Freeze-1 §5.3) ----------------------------------------------------------------
+pilots:
+  competence:
+    tasks: 100
+    split: ITD
+    # The floors that decide whether the frozen retriever is usable at all. Set against the
+    # published reference points for this benchmark -- dense retrieval at Recall@100 = 55.8%,
+    # a strong agent at 79% end-to-end. Below these, epsilon non-inferiority is measuring noise
+    # and the predictor has nothing to learn from.
+    accuracy_floor: 0.10          # P0 end-to-end accuracy
+    evidence_recall_floor: 0.40   # agent-level gold evidence recall, not single-query Recall@k
+  power:
+    tasks: 150
+    seeds_min: 3
+    arm: P0
+  lanes:
+    # Equivalence, not failure-to-reject: an underpowered test that fails to find a lane effect
+    # is not evidence the lanes are interchangeable.
+    method: TOST
+    alpha: 0.05   # conventional; the +-5% bounds below are what was actually specified
+    margin:
+      makespan_relative: 0.05
+      quality_relative: 0.05
+      unit: block

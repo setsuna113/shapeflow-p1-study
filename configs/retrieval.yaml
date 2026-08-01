@@ -1,0 +1,27 @@
+# Retrieval during end-to-end runs.
+#
+# Every arm of a task must retrieve from the same corpus with the same ranking. Query *text* may
+# legitimately differ between arms -- P1 changes what a researcher asks, and that divergence is
+# part of the effect being measured -- but if the corpus or the ranking also moved, the two arms
+# would be compared across two different worlds and the difference would be unattributable.
+#
+# This file was `acquisition.yaml`, which configured calling a live search vendor once per task.
+# Freeze-1 retrieves from a fixed benchmark corpus instead, so the acquisition parameters are
+# gone and what remains is the ranking contract.
+#
+# The BrowseComp-Plus dense retriever, its index commit, its query-encoder revision and its
+# top-k are frozen as one object by the retrieval freeze, which is hashed into the execution
+# binding and becomes effective only once the P0 competence pilot passes. They are deliberately
+# not loose keys here: a retriever that could be edited without changing a recorded digest is
+# not pinned, and every downstream comparison assumes it is.
+version: v0.1
+
+# Deterministic retrieval over a task-local frozen pool. Retained because the offline and canary
+# paths run against a small local corpus with no encoder; the benchmark corpus uses the frozen
+# dense retriever instead.
+frozen_corpus:
+  ranker: bm25_v1
+  k1: 1.5
+  b: 0.75
+  top_k: 5
+  tie_break: occurrence_id

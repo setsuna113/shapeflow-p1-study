@@ -10,7 +10,7 @@ uv venv --python 3.12 .venv >/dev/null 2>&1 || true
 # Dependencies actually imported by the pure-Python modules and their tests.
 uv pip install --python .venv/bin/python -q \
   pytest pytest-asyncio hypothesis jsonschema pydantic PyYAML orjson httpx tenacity zstandard \
-  numpy scipy typer
+  numpy scipy typer tokenizers
 
 # Install the package itself (no deps -- the line above pins what dev actually needs, and the
 # real resolution is uv.lock on the run host). Without this, `pytest` only works when the caller
@@ -18,5 +18,5 @@ uv pip install --python .venv/bin/python -q \
 uv pip install --python .venv/bin/python -q -e . --no-deps
 
 echo "dev venv ready: $(.venv/bin/python --version)"
-.venv/bin/python -c "import shapeflow_p1, pathlib; \
-print('shapeflow_p1 importable from', pathlib.Path(shapeflow_p1.__file__).parent)"
+.venv/bin/python -c "import shapeflow, pathlib; \
+print('shapeflow importable from', pathlib.Path(shapeflow.__file__).parent)"

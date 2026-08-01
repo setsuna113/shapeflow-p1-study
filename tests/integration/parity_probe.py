@@ -34,7 +34,16 @@ def sha(text: str) -> str:
 # calls; an empty list means the researcher stops without calling anything.
 
 def _result(url: str, title: str, content: str, raw: str | None) -> dict:
-    return {"url": url, "title": title, "content": content, "raw_content": raw}
+    return {
+        "url": url,
+        "title": title,
+        "content": content,
+        "raw_content": raw,
+        # Vendor ignores this capture-time sidecar field. The patched explicit-P0 path carries
+        # it through H publication so the actual C checkpoint can prove source provenance
+        # without changing the graph-visible ToolMessage.
+        "_shapeflow_occurrence_id": "occ-" + sha(url)[:16],
+    }
 
 
 SCENARIOS: dict[str, dict] = {
@@ -209,7 +218,12 @@ def install_doubles(scenario: dict, log: list) -> None:
 # --- the run ------------------------------------------------------------------------------
 
 
-async def run(scenario_name: str, strategy: str | None) -> dict:
+async def run(
+    scenario_name: str,
+    strategy: str | None,
+    *,
+    capture_checkpoints: bool = False,
+) -> dict:
     scenario = SCENARIOS[scenario_name]
     log: list = []
     install_doubles(scenario, log)
@@ -251,18 +265,31 @@ async def run(scenario_name: str, strategy: str | None) -> dict:
     # actually executes. Hooks-off never runs that code, so only this can show a bug inside it.
     binding_cm = None
     strategy_cm = None
+    captured_checkpoints: list = []
+    captured_events: list[dict] = []
     if strategy == "p0":
-        from shapeflow_p1.odr.hooks import StrategyBundle, strategies_bound
-        from shapeflow_p1.odr.vendor_hooks import RunBinding, bind_run
-        from shapeflow_p1.p1.selectors import Candidate  # noqa: F401  (import sanity)
-        from shapeflow_p1.strategies.p0 import VendorCloseStrategy, VendorPageStrategy
+        from shapeflow.odr.hooks import StrategyBundle, strategies_bound
+        from shapeflow.odr.vendor_hooks import RunBinding, bind_run
+        from shapeflow.p1.selectors import Candidate  # noqa: F401  (import sanity)
+        from shapeflow.strategies.p0 import VendorCloseStrategy, VendorPageStrategy
 
         page = VendorPageStrategy({})
         strategy_cm = strategies_bound(
             StrategyBundle(variant_id="P0", page=page, close=VendorCloseStrategy()))
         binding_cm = bind_run(RunBinding(
             task_id="parity", researcher_id="r0", attempt_id="a0",
-            task_ctx=None, component_trial=False))
+            task_ctx=None, component_trial=False,
+            store_checkpoint=(
+                lambda checkpoint: captured_checkpoints.append(checkpoint)
+                if capture_checkpoints else None
+            ),
+            on_event=(
+                lambda kind, payload: captured_events.append(
+                    {"kind": kind, "payload": payload}
+                )
+                if capture_checkpoints else None
+            ),
+        ))
 
     config = {"configurable": {
         "search_api": "tavily",
@@ -291,7 +318,7 @@ async def run(scenario_name: str, strategy: str | None) -> dict:
     except Exception as e:  # noqa: BLE001
         exceptions.append(type(e).__name__)
 
-    return {
+    trace = {
         "scenario": scenario_name,
         "strategy": strategy or "none",
         "model_requests": log,
@@ -304,14 +331,43 @@ async def run(scenario_name: str, strategy: str | None) -> dict:
             __import__("open_deep_research").__path__[0]
         ),
     }
+    if capture_checkpoints:
+        from shapeflow.strategies.visible_view import build_visible_view
+
+        trace["captured_c_checkpoints"] = [
+            {
+                "digest": checkpoint.digest,
+                "researcher_id": checkpoint.researcher_id,
+                "tool_messages": [
+                    {
+                        "tool_call_id": message.tool_call_id,
+                        "artifact_canonical": message.artifact_canonical,
+                    }
+                    for message in checkpoint.researcher_messages
+                    if message.role == "tool"
+                ],
+                "visible_segments": list(
+                    build_visible_view(checkpoint.researcher_messages).message_segments
+                ),
+            }
+            for checkpoint in captured_checkpoints
+            if type(checkpoint).__name__ == "CCheckpoint"
+        ]
+        trace["captured_hook_events"] = captured_events
+    return trace
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario")
     parser.add_argument("--strategy", default=None)
+    parser.add_argument("--capture-checkpoints", action="store_true")
     args = parser.parse_args()
-    trace = asyncio.run(run(args.scenario, args.strategy))
+    trace = asyncio.run(run(
+        args.scenario,
+        args.strategy,
+        capture_checkpoints=args.capture_checkpoints,
+    ))
     sys.stdout.write("<<<TRACE>>>" + json.dumps(trace, sort_keys=True))
 
 

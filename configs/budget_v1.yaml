@@ -5,13 +5,37 @@
 version: v0.1
 
 api_budget:
+  # Exa replaced Tavily when the Tavily quota ran out. The tavily_* caps stay so the 262
+  # rejected requests this round already spent remain on the books under the resource that
+  # recorded them; nothing new is charged there.
+  exa_max_requests: 500
+  exa_max_usd: 5.00
   tavily_max_requests: 500
   tavily_max_credits: 1000
-  deepseek_max_requests: 2000
-  deepseek_max_input_tokens: 20000000
-  deepseek_max_output_tokens: 3000000
-  deepseek_max_usd: 10.00
-  max_remote_calls: 2500
+  # Re-derived 2026-07-26 at VERIFIED prices. The previous set was sized against an invented
+  # 2.00/8.00 price snapshot that over-stated spend ~19x, so its $200 ceiling was really about
+  # $10 of authority -- and, worse, its 20,000-request cap would have stopped the campaign long
+  # before the dollar cap was approached. A cap denominated in fictional units is not a control.
+  #
+  # Measured on this corpus, from the completed packets:
+  #   ~290 JUDGE_TRUTH calls per task  (~4 per candidate atom, most of which are rejected)
+  #   2512 input / 867 output tokens per request  <- exact, from the provider's usage field
+  # At v4-pro rates (0.435/0.87 per 1M, the dearer candidate) that is $0.00185/request, so all
+  # 48 packets are ~13,900 calls and ~$26. At v4-flash it is ~$8.
+  #
+  # Report judging over 836 screen cells is the larger and less certain half, and its per-cell
+  # call count is NOT yet measured -- the canary measures it before the screen commits. These
+  # ceilings therefore carry deliberate headroom for it rather than a projection dressed up as
+  # one. All four are sized to bind at roughly the same point (~$300 at pro rates): leaving any
+  # single one low stops the run just as dead, having spent the others.
+  #
+  # They stay hard. The provider may only tighten them, and hitting one stops the campaign
+  # rather than quietly buying past it. Raising one is an authorized, recorded act.
+  deepseek_max_requests: 150000
+  deepseek_max_input_tokens: 400000000
+  deepseek_max_output_tokens: 140000000
+  deepseek_max_usd: 400.00
+  max_remote_calls: 160000
 
 campaign_budget:
   max_gpu_hours: 150

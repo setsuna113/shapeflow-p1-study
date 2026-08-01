@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from shapeflow_p1.ops.live_stack import (
+from shapeflow.ops.live_stack import (
     PLACEHOLDER,
     StackError,
     StackObservation,
@@ -155,7 +155,7 @@ def test_the_model_merkle_root_follows_the_files_that_load(tmp_path):
 
 def test_the_hf_revision_reads_the_commit_not_the_blob_etag(tmp_path):
     """Each metadata file's first line is the commit; the second is that file's own etag."""
-    from shapeflow_p1.ops.live_stack import _hf_revision
+    from shapeflow.ops.live_stack import _hf_revision
 
     meta = tmp_path / ".cache" / "huggingface" / "download"
     meta.mkdir(parents=True)

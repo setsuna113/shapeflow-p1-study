@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/query_attempt.schema.json",
+  "$id": "https://shapeflow/schemas/query_attempt.schema.json",
   "title": "QueryAttempt",
   "description": "A retrieval that was actually made, including the ones that found nothing. This exists so 'no evidence was found for X' can be expressed as a reference to a real failed lookup instead of being fabricated as a source span. P1-TYPED and P1-BRIDGE can cite an attempt_id to mark a gap; P1-ID has no way to express that at all, and measuring the cost of that missing expressiveness is one of the study's questions.",
   "type": "object",

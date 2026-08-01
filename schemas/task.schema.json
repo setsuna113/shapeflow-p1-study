@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/task.schema.json",
+  "$id": "https://shapeflow/schemas/task.schema.json",
   "title": "TaskSpec",
   "description": "A research task and its sealed acquisition plan. Split into two blocks on purpose: 'treatment_visible' is everything an arm is allowed to see, and 'acquisition_spec' is steward-only. The acquisition spec contains authored facets and conflict/negative probes -- handing those to a selector would give P1 a decomposition of the question that P0 never received, which would make any measured advantage an artifact of the harness rather than of the P1 mechanism.",
   "type": "object",

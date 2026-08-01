@@ -4,7 +4,7 @@ This is the test the whole frozen-corpus design exists for. If a treatment run c
 the web, then P1 -- which changes the queries a researcher issues -- also changes which pages
 exist, and P0 and P1 are compared across two different worlds. So the run is executed with
 outbound DNS and non-loopback connections disabled at the socket layer, and it still has to
-finish: prepare, acquire, freeze, then drive vendor's own compiled ``deep_researcher``.
+finish: read a frozen world off disk, then drive vendor's own compiled ``deep_researcher``.
 
 The provider is real (on loopback) and its upstream is a deterministic fake engine, so the run
 also exercises the credential boundary, the cell tagging and the work ledger without a GPU.
@@ -17,33 +17,25 @@ from pathlib import Path
 
 import pytest
 
-from shapeflow_p1.acquire.tavily_client import TavilyCaptureClient
-from shapeflow_p1.campaign.acquire import (
-    acquire_all,
-    acquired_task_ids,
-    load_frozen_pool,
-    tavily_params_from,
-)
-from shapeflow_p1.campaign.graph_driver import CellSpec, run_cell, summarize_events
-from shapeflow_p1.campaign.prepare import prepare_corpus
-from shapeflow_p1.campaign.settings import Settings
-from shapeflow_p1.evaluation.judge_client import DeepSeekJudge
-from shapeflow_p1.experiment.budget import Budget
-from shapeflow_p1.experiment.ledger import Ledger
-from shapeflow_p1.object_store import ObjectStore
-from shapeflow_p1.odr.hooks import StrategyBundle
-from shapeflow_p1.runtime.provider_server import (
+from shapeflow.campaign.graph_driver import CellSpec, run_cell, summarize_events
+from shapeflow.campaign.runner import questions_for
+from shapeflow.campaign.settings import Settings
+from shapeflow.world.pools import acquired_task_ids, load_frozen_pool
+from shapeflow.experiment.budget import Budget
+from shapeflow.experiment.ledger import Ledger
+from shapeflow.object_store import ObjectStore
+from shapeflow.odr.hooks import StrategyBundle
+from shapeflow.runtime.provider_server import (
     ProviderConfig,
     ProviderService,
     RoleTokens,
     serve_forever,
 )
-from shapeflow_p1.secrets import SecretRedactor
-from shapeflow_p1.strategies.p0 import VendorCloseStrategy, VendorPageStrategy
+from shapeflow.secrets import SecretRedactor
+from shapeflow.strategies.p0 import VendorCloseStrategy, VendorPageStrategy
 
 from fixtures.fake_engine import FakeEngine
-from fixtures.fake_tavily import FakeTavily
-from fixtures.scripted_author import ScriptedAuthor
+from fixtures.frozen_world import write_frozen_world
 
 REPO = Path(__file__).resolve().parents[2]
 PATCHED = REPO / ".build" / "open_deep_research-patched" / "src"
@@ -86,33 +78,19 @@ def no_network(monkeypatch):
 
 @pytest.fixture()
 def frozen_world(tmp_path):
-    """A sealed corpus with one task's world already frozen."""
-    settings = Settings.load(REPO, data_root=tmp_path)
-    relaxed = dict(settings.configs["task_source"])
-    relaxed["audit"] = {**relaxed["audit"], "require_distinct_topic_clusters": 4}
-    relaxed["splits"] = {"FORMATIVE_SCREEN": 4, "FORMATIVE_POWER_PILOT": 2, "RESERVE": 2}
-    relaxed["strata_min_counts"] = {"source_conflict": 1}
-    settings.configs["task_source"] = relaxed
-    return settings
+    """Settings pointed at an empty data root; the world itself is written per test."""
+    return Settings.load(REPO, data_root=tmp_path)
 
 
-async def _prepare_and_acquire(settings):
-    # Eight tasks over two clusters: the smallest corpus whose round-robin still reaches
-    # every stratum, which build_registry requires before it will seal anything.
-    author = ScriptedAuthor(clusters=4, per_cluster=2)
-    judge = DeepSeekJudge(author, "deepseek-chat", "@SHAPEFLOW_PROVIDER@")
-    result = await prepare_corpus(
-        settings, judge=judge, authored_at_utc="2026-07-24T00:00:00Z",
-        target_model="Qwen3-14B-AWQ", total=8, clusters=4,
-    )
-    params = tavily_params_from(settings)
-    fake = FakeTavily(pages_per_query=2)
-    await acquire_all(
-        settings,
-        client_factory=lambda task_id: TavilyCaptureClient(fake, params, "@SHAPEFLOW_PROVIDER@"),
-        fetched_at_utc="2026-07-24T01:00:00Z",
-    )
-    return result
+def _freeze_world(settings):
+    """One task with a frozen world, written straight to the runner-readable view.
+
+    Deliberately not built by running an acquisition phase. What this test asserts is that a
+    treatment run cannot reach the network, and that assertion is only as strong as the world
+    being genuinely local -- so the world is a file, not the output of a client that could in
+    principle dial out.
+    """
+    write_frozen_world(settings, task_ids=["T-OFFLINE-1"], pages_per_task=2)
 
 
 def _provider(settings, tmp_path, engine):
@@ -134,11 +112,11 @@ def _provider(settings, tmp_path, engine):
 
 async def test_a_complete_p0_task_runs_with_no_network(frozen_world, tmp_path, no_network):
     settings = frozen_world
-    result = await _prepare_and_acquire(settings)
+    _freeze_world(settings)
     task_ids = acquired_task_ids(settings)
-    assert task_ids, "acquisition produced no frozen pool"
+    assert task_ids, "no frozen pool was written"
     task_id = task_ids[0]
-    question = next(t.question for t in result.registry.tasks if t.task_id == task_id)
+    question = questions_for(settings, [task_id])[task_id]
 
     engine = FakeEngine()
     service, tcp, ledger = _provider(settings, tmp_path, engine)
@@ -148,10 +126,12 @@ async def test_a_complete_p0_task_runs_with_no_network(frozen_world, tmp_path, n
             run_id="RUN-OFFLINE", task_id=task_id, arm_id="P0", page_variant="P0",
             close_variant="P0", replicate_id="0", seed=1, work_key="WK-OFFLINE",
             question=question, cell_token="cell-offline-1",
+            execution_binding_sha256="e" * 64,
+            protocol_document_sha256="d" * 64,
         )
         import asyncio
 
-        from shapeflow_p1.providers.provider_client import ProviderClient
+        from shapeflow.providers.provider_client import ProviderClient
 
         await ProviderClient(base_url=base, token=TOKENS["runner"]).register_cell(
             cell_token=cell.cell_token, run_id=cell.run_id, task_id=cell.task_id,
@@ -203,11 +183,11 @@ async def test_a_complete_p0_task_runs_with_no_network(frozen_world, tmp_path, n
 async def test_the_frozen_search_never_reaches_the_network(frozen_world, tmp_path, no_network):
     """The replacement backend has no HTTP client at all; a miss is empty, not a live query."""
     settings = frozen_world
-    await _prepare_and_acquire(settings)
+    _freeze_world(settings)
     task_id = acquired_task_ids(settings)[0]
     pool, snapshots = load_frozen_pool(settings, task_id)
 
-    from shapeflow_p1.campaign.graph_driver import install_frozen_search
+    from shapeflow.campaign.graph_driver import install_frozen_search
 
     with install_frozen_search(pool, snapshots, max_results=5):
         import open_deep_research.utils as vendor_utils
@@ -229,13 +209,13 @@ async def test_the_frozen_search_never_reaches_the_network(frozen_world, tmp_pat
 async def test_the_search_binding_is_restored_after_a_failure(frozen_world, tmp_path):
     """A cell that raised must not leave the next one searching the previous task's corpus."""
     settings = frozen_world
-    await _prepare_and_acquire(settings)
+    _freeze_world(settings)
     task_id = acquired_task_ids(settings)[0]
     pool, snapshots = load_frozen_pool(settings, task_id)
 
     import open_deep_research.utils as vendor_utils
 
-    from shapeflow_p1.campaign.graph_driver import install_frozen_search
+    from shapeflow.campaign.graph_driver import install_frozen_search
 
     original = vendor_utils.tavily_search_async
     with pytest.raises(RuntimeError):

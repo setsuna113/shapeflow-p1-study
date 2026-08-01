@@ -1,60 +1,155 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/checkpoint.schema.json",
+  "$id": "https://shapeflow/schemas/checkpoint.schema.json",
   "title": "Checkpoint (H or C)",
-  "description": "The immutable, content-addressed state captured at a P1 boundary, before its reducer runs. An H checkpoint holds the whole assistant-turn batch at the WEBPAGE boundary; a C checkpoint holds the full researcher envelope at the RESEARCHER_CLOSE boundary, cloned before vendor's in-place message append. All variants of one boundary fork from the same digest. Raw page bytes are referenced by content_id, never inlined.",
+  "description": "The immutable, content-addressed state captured at a P1 boundary, before its reducer runs. An H checkpoint holds the whole assistant-turn batch at the WEBPAGE boundary; a C checkpoint holds the full researcher envelope at the RESEARCHER_CLOSE boundary, cloned before vendor's in-place message append. All variants of one boundary fork from the same digest, which is why the document is written in full rather than as a reference: a fork in a later process has to be able to rebuild the state. Raw page bytes are referenced by content_id, never inlined.",
   "oneOf": [
-    { "$ref": "#/$defs/HCheckpoint" },
-    { "$ref": "#/$defs/CCheckpoint" }
+    {
+      "$ref": "#/$defs/HCheckpoint"
+    },
+    {
+      "$ref": "#/$defs/CCheckpoint"
+    }
   ],
   "$defs": {
     "sampling": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["model", "temperature", "top_p", "max_tokens"],
+      "required": [
+        "model",
+        "temperature",
+        "top_p",
+        "max_tokens"
+      ],
       "properties": {
-        "model": { "type": "string" },
-        "temperature": { "type": "number" },
-        "top_p": { "type": "number" },
-        "max_tokens": { "type": "integer" },
-        "n": { "type": "integer" },
-        "seed": { "type": ["integer", "null"] }
+        "model": {
+          "type": "string"
+        },
+        "temperature": {
+          "type": "number"
+        },
+        "top_p": {
+          "type": "number"
+        },
+        "max_tokens": {
+          "type": "integer"
+        },
+        "n": {
+          "type": "integer"
+        },
+        "seed": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
       }
     },
     "HCheckpoint": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "task_id", "researcher_id", "assistant_turn_index",
-                   "researcher_state_hash", "sampling", "digest"],
+      "required": [
+        "kind",
+        "task_id",
+        "researcher_id",
+        "assistant_turn_index",
+        "assistant_message",
+        "sibling_tool_calls",
+        "search_result_sets",
+        "non_search_outputs",
+        "researcher_state_hash",
+        "sampling",
+        "digest"
+      ],
       "properties": {
-        "kind": { "const": "H" },
-        "task_id": { "type": "string" },
-        "researcher_id": { "type": "string" },
-        "assistant_turn_index": { "type": "integer", "minimum": 0 },
-        "assistant_message": { "type": "object" },
-        "sibling_tool_calls": { "type": "array" },
-        "search_result_sets": { "type": "array" },
-        "non_search_outputs": { "type": "array" },
-        "researcher_state_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "sampling": { "$ref": "#/$defs/sampling" },
-        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        "kind": {
+          "const": "H"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "researcher_id": {
+          "type": "string"
+        },
+        "assistant_turn_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "assistant_message": {
+          "type": "object"
+        },
+        "sibling_tool_calls": {
+          "type": "array"
+        },
+        "search_result_sets": {
+          "type": "array"
+        },
+        "non_search_outputs": {
+          "type": "array"
+        },
+        "researcher_state_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sampling": {
+          "$ref": "#/$defs/sampling"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
       }
     },
     "CCheckpoint": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "task_id", "researcher_id", "researcher_messages",
-                   "close_reason", "sampling", "digest"],
+      "required": [
+        "kind",
+        "task_id",
+        "researcher_id",
+        "researcher_messages",
+        "evidence_manifest",
+        "query_attempt_ids",
+        "close_reason",
+        "sampling",
+        "digest"
+      ],
       "properties": {
-        "kind": { "const": "C" },
-        "task_id": { "type": "string" },
-        "researcher_id": { "type": "string" },
-        "researcher_messages": { "type": "array" },
-        "evidence_manifest": { "type": "object" },
-        "query_attempt_ids": { "type": "array", "items": { "type": "string" } },
-        "close_reason": { "enum": ["NO_TOOL_CALL", "RESEARCH_COMPLETE", "MAX_REACT_EXCEEDED"] },
-        "sampling": { "$ref": "#/$defs/sampling" },
-        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        "kind": {
+          "const": "C"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "researcher_id": {
+          "type": "string"
+        },
+        "researcher_messages": {
+          "type": "array"
+        },
+        "evidence_manifest": {
+          "type": "object"
+        },
+        "query_attempt_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "close_reason": {
+          "enum": [
+            "NO_TOOL_CALL",
+            "RESEARCH_COMPLETE",
+            "MAX_REACT_EXCEEDED"
+          ]
+        },
+        "sampling": {
+          "$ref": "#/$defs/sampling"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
       }
     }
   }

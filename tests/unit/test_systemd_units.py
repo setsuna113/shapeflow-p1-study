@@ -13,6 +13,9 @@ Two failure modes here are silent by construction, which is why they get tests:
 from __future__ import annotations
 
 import configparser
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +23,9 @@ import yaml
 
 SYSTEMD = Path(__file__).resolve().parents[2] / "systemd"
 STACK = Path(__file__).resolve().parents[2] / "configs" / "stack.yaml"
+INSTALL_HOST = Path(__file__).resolve().parents[2] / "scripts" / "install_host.sh"
+BOOTSTRAP = Path(__file__).resolve().parents[2] / "scripts" / "bootstrap_and_run.sh"
+SUPERVISOR = Path(__file__).resolve().parents[2] / "scripts" / "sfsupervise.sh"
 UNITS = sorted(SYSTEMD.glob("*.service.template"))
 
 
@@ -31,8 +37,68 @@ def _parse(path: Path) -> configparser.ConfigParser:
     return cp
 
 
+def _environment(unit: Path) -> str:
+    """Every ``Environment=`` value in one string.
+
+    ``_parse`` keeps only the *last* value of a repeated key, so an assertion written against
+    ``cp.get("Service", "Environment")`` silently stops checking what it was written to check
+    the moment another Environment line is added below it -- it does not fail, it just tests a
+    different line. Reading them all is what makes these assertions stable.
+    """
+    return "\n".join(
+        line.split("=", 1)[1].strip()
+        for line in unit.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("Environment=")
+    )
+
+
 def test_there_is_at_least_one_unit():
     assert UNITS
+
+
+def _provider_launchers() -> dict[str, str]:
+    """Every place the provider is actually started, by name.
+
+    The unit is not enough on this host: systemd is not PID 1 there, so install_host.sh renders
+    the units "for the record, not started" and the real launch goes through sfsupervise --
+    which passes no environment of its own. Both paths must inject the same credentials or the
+    provider comes up unable to acquire.
+    """
+    unit = SYSTEMD / "shapeflow-api-provider.service.template"
+    start_provider = Path(__file__).resolve().parents[2] / "scripts" / "start_provider.sh"
+    return {
+        "systemd unit": unit.read_text(encoding="utf-8"),
+        "scripts/start_provider.sh": start_provider.read_text(encoding="utf-8"),
+    }
+
+
+@pytest.mark.parametrize("name", sorted(_provider_launchers()))
+def test_every_provider_launcher_injects_the_mandatory_exa_credential(name: str):
+    """provider_main.build_service calls load_exa_key unconditionally.
+
+    Acquisition moved from Tavily to Exa, but neither the unit nor any start script was
+    updated, so a deployed provider raised "no Exa credential" on startup and nothing could be
+    acquired. Tavily is deliberately not asserted here: it is optional now, and requiring it
+    would re-encode the assumption that broke this.
+    """
+    body = _provider_launchers()[name]
+    assert "EXA_API_KEY_FILE" in body, (
+        f"{name} does not inject EXA_API_KEY_FILE; the provider will refuse to start"
+    )
+    assert "DEEPSEEK_API_KEY_FILE" in body
+
+
+@pytest.mark.parametrize("name", sorted(_provider_launchers()))
+def test_no_provider_launcher_embeds_a_credential_value(name: str):
+    """Paths only. A key in a unit file or a start script would land in the repository."""
+    body = _provider_launchers()[name]
+    for line in body.splitlines():
+        if "API_KEY" not in line or line.lstrip().startswith("#"):
+            continue
+        # Accept `NAME_FILE=<path>` and bare `NAME=` forms; reject an assigned literal value.
+        assert "_FILE" in line or line.rstrip().endswith("="), (
+            f"{name} appears to assign a credential value directly: {line.strip()!r}"
+        )
 
 
 @pytest.mark.parametrize("unit", UNITS, ids=lambda p: p.name)
@@ -56,6 +122,34 @@ def test_units_are_hardened_and_bind_locally(unit: Path):
     cp = _parse(unit)
     assert cp.get("Service", "NoNewPrivileges", fallback="") == "true"
     assert cp.get("Service", "UMask", fallback="") == "0077"
+
+
+def test_install_host_grants_evaluator_write_only_below_judgments():
+    """The evaluator must emit scores without gaining write access to frozen truth."""
+    text = INSTALL_HOST.read_text(encoding="utf-8")
+    truth_owner = 'chown -R sfsteward:sfevaluator "$DATA_ROOT/evaluator"'
+    judgment_owner = (
+        'chown -R sfevaluator:sfevaluator "$DATA_ROOT/evaluator/judgments"')
+    assert truth_owner in text
+    assert judgment_owner in text
+    assert text.index(truth_owner) < text.index(judgment_owner)
+    assert (
+        'find "$DATA_ROOT/evaluator/judgments" -type d -exec chmod 0700 {} +'
+        in text
+    )
+    assert (
+        'find "$DATA_ROOT/evaluator/judgments" -type f -exec chmod 0400 {} +'
+        in text
+    )
+    assert 'chmod 0770 "$DATA_ROOT/evaluator"' not in text
+    assert "command -v \"$command\"" in text
+    assert 'readonly_acl "$DATA_ROOT/runner/$published" sfevaluator' in text
+    assert (
+        'readonly_acl "$DATA_ROOT/runner/frozen_corpus" sfrunner sfevaluator'
+        in text
+    )
+    assert 'readonly_acl "$DATA_ROOT/steward/acquisition" sfevaluator' in text
+    assert 'default_args+=("d:u:$reader:r-x")' in text
 
 
 def test_the_two_vllm_layers_are_mutually_exclusive():
@@ -114,3 +208,71 @@ def test_no_unit_still_references_the_removed_single_vllm_service():
     for unit in UNITS:
         text = unit.read_text(encoding="utf-8")
         assert "shapeflow-vllm.service" not in text, f"{unit.name} references the removed unit"
+
+
+def test_causal_engine_mints_and_runner_reads_a_per_boot_epoch():
+    causal = _parse(SYSTEMD / "shapeflow-vllm-causal.service.template")
+    start_pre = causal.get("Service", "ExecStartPre")
+    assert "write_engine_epoch.py" in start_pre
+    assert "/run/shapeflow-vllm-causal/engine_epoch" in start_pre
+    assert "SHAPEFLOW_ENGINE_EPOCH_FILE=/run/shapeflow-vllm-causal/engine_epoch" in (
+        _environment(SYSTEMD / "shapeflow-p1-week1.service.template"))
+
+
+def test_the_coordinator_receives_the_leased_device():
+    """The coordinator takes an flock on this UUID; without it the lease never engages.
+
+    Nothing passed SHAPEFLOW_GPU_UUID through -- not this unit, not sfsupervise, not the
+    bootstrap privilege-drop helper -- so `gpu_lease` returned None in production and the
+    mutual exclusion that stops two workers sharing a card was silently absent.
+    """
+    assert "SHAPEFLOW_GPU_UUID=" in _environment(
+        SYSTEMD / "shapeflow-p1-week1.service.template")
+    for launcher in ("sfsupervise.sh", "bootstrap_and_run.sh"):
+        body = (SUPERVISOR.parent / launcher).read_text(encoding="utf-8")
+        assert "SHAPEFLOW_GPU_UUID" in body, f"{launcher} does not pass the leased device through"
+
+
+def test_the_bootstrap_verifies_the_binding_and_stops_rather_than_launching():
+    """The binding has to be verified by whatever the host actually runs.
+
+    This used to assert that the bootstrap exec'd into run_lanes.sh, which brought up four lanes
+    and drove the screen through freeze-shards and merge-shards. None of those exist under
+    Freeze-1: two lanes, per-lane services, and run-bcplus with a shard argument. The assertion
+    now follows what the bootstrap still owns -- deriving the approved binding and refusing to
+    hand a launch anything it did not verify -- and the launch sequence itself is checked where
+    it now lives, in the operations document a human reads before running it.
+    """
+    install = INSTALL_HOST.read_text(encoding="utf-8")
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+    supervisor = SUPERVISOR.read_text(encoding="utf-8")
+    operations = (Path(__file__).resolve().parents[2]
+                  / "reports" / "BCPLUS_OPERATIONS.md").read_text(encoding="utf-8")
+    runner_text = (
+        SYSTEMD / "shapeflow-p1-week1.service.template").read_text(encoding="utf-8")
+    assert "SHAPEFLOW_EXECUTION_BINDING_SHA" in install
+    assert "verified_execution_binding(Path('.')).digest" in bootstrap
+    # It must not exec into a launcher any more, and it must say where the launch is written.
+    assert "run_lanes.sh" not in bootstrap
+    assert "reports/BCPLUS_OPERATIONS.md" in bootstrap
+    # The documented launch carries the binding to every lane, not just the first.
+    assert "freeze-approval --approved-commit" in operations
+    assert "--protocol-sha <binding>" in operations
+    assert "--shard <lane> --shards 2" in operations
+    assert "SHAPEFLOW_APPROVAL_FILE=@DATA_ROOT@/approvals/launch_approval.json" in runner_text
+    assert "SHAPEFLOW_APPROVAL_FILE=" in supervisor
+    assert 'readonly_acl "$DATA_ROOT/approvals" sfrunner sfevaluator' in install
+
+
+def test_engine_epoch_writer_uses_systemd_invocation_id_and_replaces_on_restart(tmp_path):
+    script = Path(__file__).resolve().parents[2] / "scripts" / "write_engine_epoch.py"
+    target = tmp_path / "run" / "engine_epoch"
+    first = "a" * 32
+    second = "b" * 32
+    for expected in (first, second):
+        subprocess.run(
+            [sys.executable, str(script), str(target)],
+            check=True,
+            env={**os.environ, "INVOCATION_ID": expected},
+        )
+        assert target.read_text(encoding="ascii").strip() == expected

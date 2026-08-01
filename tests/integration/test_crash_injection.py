@@ -26,29 +26,23 @@ from pathlib import Path
 
 import pytest
 
-from shapeflow_p1.acquire.tavily_client import TavilyCaptureClient
-from shapeflow_p1.campaign.acquire import acquire_all, tavily_params_from
-from shapeflow_p1.campaign.prepare import prepare_corpus
-from shapeflow_p1.campaign.runner import available_tasks, questions_for
-from shapeflow_p1.campaign.schedule import ArmSpec, cell_key
-from shapeflow_p1.campaign.settings import Settings
-from shapeflow_p1.evaluation.judge_client import DeepSeekJudge
-from shapeflow_p1.experiment.budget import Budget
-from shapeflow_p1.experiment.ledger import Ledger
-from shapeflow_p1.object_store import ObjectStore
-from shapeflow_p1.providers.provider_client import PROVIDER_KEY_PLACEHOLDER
-from shapeflow_p1.runtime.provider_server import (
+from shapeflow.campaign.runner import available_tasks, questions_for
+from shapeflow.campaign.schedule import ArmSpec, cell_key
+from shapeflow.campaign.settings import Settings
+from shapeflow.experiment.budget import Budget
+from shapeflow.experiment.ledger import TERMINAL_STATES, Ledger
+from shapeflow.object_store import ObjectStore
+from shapeflow.runtime.provider_server import (
     PROVIDER_KEY_PLACEHOLDER as PLACEHOLDER,
     ProviderConfig,
     ProviderError,
     ProviderService,
     RoleTokens,
 )
-from shapeflow_p1.secrets import SecretRedactor
+from shapeflow.secrets import SecretRedactor
 
 from fixtures.fake_engine import FakeEngine
-from fixtures.fake_tavily import FakeTavily
-from fixtures.scripted_author import ScriptedAuthor
+from fixtures.frozen_world import write_frozen_world
 
 REPO = Path(__file__).resolve().parents[2]
 PATCHED = REPO / ".build" / "open_deep_research-patched" / "src"
@@ -85,7 +79,7 @@ def _provider(tmp_path, upstream, caps=None):
         ProviderConfig(served_model="M"), ledger=ledger, budget=budget,
         store=ObjectStore(tmp_path / "objects"), redactor=SecretRedactor(),
         tokens=RoleTokens(TOKENS), upstream=upstream,
-        tavily_key="tvly-CRASHTESTKEY0000000000", deepseek_key="sk-CRASHTESTKEY000000000",
+        tavily_key="tvly-FAKE-CRASHTEST-00000000", deepseek_key="sk-FAKE-CRASHTEST-0000000",
     )
     service.reconcile_on_start()
     return service, ledger, budget
@@ -108,7 +102,7 @@ def test_crash_before_the_reservation_leaves_nothing_charged(tmp_path):
     service, ledger, budget = _provider(tmp_path, lambda *a: calls.append(a))
     before = _totals(ledger)
     with pytest.raises(ProviderError):
-        service.tavily_search({**_tavily_body(), "api_key": "tvly-A-CLIENTS-OWN-KEY-00000"})
+        service.tavily_search({**_tavily_body(), "api_key": "tvly-FAKE-A-CLIENTS-OWN-KEY0"})
     assert calls == []
     assert _totals(ledger) == before
     ledger.close()
@@ -118,8 +112,9 @@ def test_crash_after_reserve_before_send_releases_in_full(tmp_path):
     """A reservation that provably never went out is returned whole, not settled."""
     service, ledger, budget = _provider(tmp_path, lambda *a: (_ for _ in ()).throw(Boom()))
     call_id = service._calls.open_call(provider="tavily", op_class="search", call_key="k")
-    group = service._calls.reserve(call_id, {"tavily_requests": 1.0, "tavily_credits": 2.0})
-    service._calls.fail_before_send(call_id, group, error_class="pre_send")
+    attempt = service._calls.begin_attempt(call_id)
+    group = service._calls.reserve(attempt, {"tavily_requests": 1.0, "tavily_credits": 2.0})
+    service._calls.fail_before_send(attempt, group, error_class="pre_send")
 
     cap, reserved, settled = _totals(ledger)["tavily_credits"]
     assert (reserved, settled) == (0.0, 0.0)
@@ -143,7 +138,7 @@ def test_crash_after_send_keeps_the_worst_case_and_survives_restart(tmp_path):
         ProviderConfig(), ledger=ledger, budget=budget,
         store=ObjectStore(tmp_path / "objects"), redactor=SecretRedactor(),
         tokens=RoleTokens(TOKENS), upstream=upstream,
-        tavily_key="tvly-CRASHTESTKEY0000000000", deepseek_key="sk-CRASHTESTKEY000000000")
+        tavily_key="tvly-FAKE-CRASHTEST-00000000", deepseek_key="sk-FAKE-CRASHTEST-0000000")
     fresh.reconcile_on_start()
     _cap2, reserved2, settled2 = _totals(ledger)["tavily_credits"]
     assert (reserved2, settled2) == (0.0, 2.0)
@@ -175,32 +170,19 @@ def test_the_budget_cap_is_never_exceeded_by_a_crash_loop(tmp_path):
 @pytest.fixture()
 def settings(tmp_path):
     s = Settings.load(REPO, data_root=tmp_path)
-    relaxed = dict(s.configs["task_source"])
-    relaxed["audit"] = {**relaxed["audit"], "require_distinct_topic_clusters": 4}
-    relaxed["splits"] = {"FORMATIVE_SCREEN": 4, "FORMATIVE_POWER_PILOT": 2, "RESERVE": 2}
-    relaxed["strata_min_counts"] = {"source_conflict": 1}
-    s.configs["task_source"] = relaxed
     return s
 
 
-async def _world(settings):
-    author = ScriptedAuthor(clusters=4, per_cluster=2)
-    judge = DeepSeekJudge(author, "deepseek-chat", PROVIDER_KEY_PLACEHOLDER)
-    await prepare_corpus(settings, judge=judge, authored_at_utc="2026-07-24T00:00:00Z",
-                         target_model="Qwen3-14B-AWQ", total=8, clusters=4)
-    params = tavily_params_from(settings)
-    fake = FakeTavily(pages_per_query=2)
-    await acquire_all(
-        settings,
-        client_factory=lambda t: TavilyCaptureClient(fake, params, PROVIDER_KEY_PLACEHOLDER),
-        fetched_at_utc="2026-07-24T01:00:00Z")
+def _world(settings):
+    """Two tasks with frozen worlds, written straight to the runner-readable view."""
+    write_frozen_world(settings, task_ids=["T-CRASH-1", "T-CRASH-2"], pages_per_task=2)
 
 
 @pytest.fixture()
 async def campaign(settings, tmp_path):
     from fixtures.campaign_harness import Harness
 
-    await _world(settings)
+    _world(settings)
     harness = Harness(settings, tmp_path, FakeEngine(selector_ids=["S1"]), TOKENS, REPO)
     try:
         yield harness
@@ -217,14 +199,15 @@ def _integrity(runner, manifest, *, phase_id, split) -> None:
     assert runner.ledger.integrity_check()
     states = runner.cell_states(manifest, phase_id=phase_id, split=split)
     for block in manifest.blocks:
-        complete = all(states.get(cell_key(c)) == "COMMITTED" for c in block.cells)
+        terminal = all(
+            states.get(cell_key(c)) in TERMINAL_STATES for c in block.cells)
         frozen = (runner.settings.path("runs") / "blocks" / f"{block.block_id}.json").exists()
-        assert frozen <= complete, "an incomplete block was frozen"
+        assert frozen <= terminal, "a non-terminal block was frozen"
 
 
 async def test_a_cell_that_dies_mid_run_does_not_commit(campaign, settings, tmp_path):
     """Point 8: the graph raises during publication. The cell must not be COMMITTED."""
-    import shapeflow_p1.campaign.runner as runner_module
+    import shapeflow.campaign.runner as runner_module
 
     tasks = available_tasks(settings, "FORMATIVE_SCREEN")[:1]
     runner = campaign.runner()
@@ -248,8 +231,13 @@ async def test_a_cell_that_dies_mid_run_does_not_commit(campaign, settings, tmp_
 
     states = runner.cell_states(manifest, phase_id="crash", split="FORMATIVE_SCREEN")
     assert "FAILED_UNKNOWN" in states.values()
-    assert runner.freeze_blocks(manifest, phase_id="crash", split="FORMATIVE_SCREEN",
-                                directory=settings.path("runs") / "blocks") == []
+    frozen = runner.freeze_blocks(
+        manifest, phase_id="crash", split="FORMATIVE_SCREEN",
+        directory=settings.path("runs") / "blocks")
+    assert len(frozen) == 1
+    assert frozen[0]["terminal_frozen"] is True
+    assert frozen[0]["complete_success"] is False
+    assert (settings.path("runs") / "blocks" / "FREEZE_ROOT.json").exists()
     _integrity(runner, manifest, phase_id="crash", split="FORMATIVE_SCREEN")
 
 

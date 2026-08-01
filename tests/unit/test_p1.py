@@ -4,29 +4,29 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.evidence.chunkers import WhitespaceTokenizer, paragraph_sentence_v1
-from shapeflow_p1.evidence.identity import CandidateSet, build_evidence_span
-from shapeflow_p1.odr.hooks import TaskContext
-from shapeflow_p1.p1.aggregators import (
+from shapeflow.evidence.chunkers import WhitespaceTokenizer, paragraph_sentence_v1
+from shapeflow.evidence.identity import CandidateSet, build_evidence_span
+from shapeflow.odr.hooks import TaskContext
+from shapeflow.p1.aggregators import (
     AggregatedEvidence,
     AggregatedItem,
     coverage_budget_v1,
     global_rerank_v1,
     stable_union_v1,
 )
-from shapeflow_p1.p1.contracts import (
+from shapeflow.p1.contracts import (
     ParsedBridge,
     ParsedGap,
     SelectionContractError,
     parse_selection,
 )
-from shapeflow_p1.p1.preflight import (
+from shapeflow.p1.preflight import (
     PreflightConfig,
     bridge_novelty_errors,
     preflight,
 )
-from shapeflow_p1.p1.view import CandidateViewRecord
-from shapeflow_p1.p1.selectors import (
+from shapeflow.p1.view import CandidateViewRecord
+from shapeflow.p1.selectors import (
     Candidate,
     CpuLexicalSelector,
     LlmSelector,
@@ -131,6 +131,20 @@ def test_coverage_budget_keeps_both_sides_of_contradiction():
     assert span_ids[0] in kept and span_ids[1] in kept
 
 
+def test_global_rerank_budget_admission_honors_model_order():
+    """Without an explicit score field, list order is the global model's ranking signal."""
+    _, registry, span_ids, cs, coster = _fixture()
+    sel = parse_selection(
+        {"contract": "P1_ID", "selected_ids": ["E3", "E1"]}, cs
+    )
+    one = AggregatedEvidence(items=(AggregatedItem(span_ids[2]),))
+    budget = coster(one, registry)
+    agg = global_rerank_v1(
+        sel, registry, token_budget=budget, coster=coster
+    )
+    assert {item.span_id for item in agg.items} == {span_ids[2]}
+
+
 # --- renderer -------------------------------------------------------------------------
 
 
@@ -223,7 +237,12 @@ def test_adjacent_same_source_spans_share_one_header():
     # One shared SOURCE header, but each span keeps its own label line -- see
     # test_render_keeps_role_and_facet_attached_to_their_own_span for why merging is wrong.
     assert out.text.count("SOURCE:") == 1
-    assert "[E1]" in out.text and "[E2]" in out.text
+    view = _view()
+    assert all(
+        f"[{view.publication_handle_for(span_id)}]" in out.text
+        for span_id in span_ids[:2]
+    )
+    assert "[E1]" not in out.text and "[E2]" not in out.text
     # Both spans' bytes are still present verbatim.
     assert "feline" in out.text and "canine" in out.text
 
@@ -391,7 +410,7 @@ def test_selector_prompt_carries_chunker_metadata():
 
 
 def test_candidate_from_span_picks_up_metadata_in_both_namespaces():
-    from shapeflow_p1.hashing import sha256_hex
+    from shapeflow.hashing import sha256_hex
     snap = {"h" * 64: "Top matter"}
     raw = {"span_id": "a" * 64, "namespace": "RAW_SOURCE",
            "heading_refs": [{"content_hash": "h" * 64, "char_start": 0, "char_end": 3,

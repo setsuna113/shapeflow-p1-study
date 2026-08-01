@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/truth_packet.schema.json",
+  "$id": "https://shapeflow/schemas/truth_packet.schema.json",
   "title": "TruthPacket",
   "description": "The frozen ground truth a task is scored against. EVALUATOR-ONLY: it never reaches a selector, aggregator, or preflight. Every accepted atom binds to exact source spans; a fact with no span cannot enter accepted truth, a contradiction has spans on both sides, and a gap binds to a real query attempt rather than a model's assertion. A machine-authored packet is marked MACHINE_CANDIDATE_PENDING_HUMAN_AUDIT and its verdicts stay PROVISIONAL until the audit gate.",
   "type": "object",
@@ -43,19 +43,33 @@
       }
     },
     "negative_evidence": {
-      "description": "Facts established as NOT present, each bound to the query attempt that looked.",
+      "description": "Grounded absence facts, each retaining the accepted atom and frozen query attempt that establish it.",
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["facet_id", "query_attempt_id"],
+        "required": ["atom_id", "facet_id", "query_attempt_id"],
         "properties": {
+          "atom_id": { "type": "string", "minLength": 1 },
           "facet_id": { "type": "string" },
           "query_attempt_id": { "type": "string" }
         }
       }
     },
-    "known_gaps": { "type": "array", "items": { "type": "string" } },
+    "known_gaps": {
+      "description": "Operationally unresolved frozen query attempts. Membership comes only from the acquisition status, never from a truth-authoring model.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["query_attempt_id", "query_text", "status"],
+        "properties": {
+          "query_attempt_id": { "type": "string", "minLength": 1 },
+          "query_text": { "type": "string" },
+          "status": { "enum": ["FAILED", "TIMEOUT", "BLOCKED_BUDGET"] }
+        }
+      }
+    },
     "critical_items": { "type": "array", "items": { "type": "string" } },
     "authoring_method": { "enum": ["HUMAN_AUTHORED", "MACHINE_CANDIDATE_PENDING_HUMAN_AUDIT"] },
     "verifier_status": { "enum": ["PENDING", "AUDITED", "REJECTED"] },

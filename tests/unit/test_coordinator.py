@@ -4,19 +4,19 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.experiment.coordinator import (
+from shapeflow.experiment.coordinator import (
     Coordinator,
     FatalProtocolError,
     RetryableError,
 )
-from shapeflow_p1.experiment.ledger import Ledger
-from shapeflow_p1.experiment.state_machine import (
+from shapeflow.experiment.ledger import Ledger
+from shapeflow.experiment.state_machine import (
     IllegalPhaseTransition,
     Phase,
     PhaseMachine,
     can_transition,
 )
-from shapeflow_p1.object_store import ObjectStore
+from shapeflow.object_store import ObjectStore
 
 
 # --- phase FSM ------------------------------------------------------------------------

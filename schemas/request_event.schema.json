@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/request_event.schema.json",
+  "$id": "https://shapeflow/schemas/request_event.schema.json",
   "title": "RequestEvent",
   "description": "One model request as the telemetry proxy recorded it (plan §12.2). Fields marked optional carry data only when the doctor proved the frozen vLLM stack can export it reliably; a non-streaming response must not fabricate a first-token time, and per-request cached tokens must not be back-derived from a Prometheus histogram. The op class keeps P0/P1 costs separable and judge cost out of treatment work.",
   "type": "object",

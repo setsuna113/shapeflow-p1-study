@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/variant.schema.json",
+  "$id": "https://shapeflow/schemas/variant.schema.json",
   "title": "Variant",
   "description": "One point in the P1 design space, hashed so that 'which design won' has an exact answer. The controls are not optional: SHORT_PROSE separates the pointer mechanism from simply decoding fewer tokens, and CPU_LEXICAL separates LLM selection from deterministic lexical selection. Without both, a win cannot be attributed to the P1 idea rather than to output length.",
   "type": "object",

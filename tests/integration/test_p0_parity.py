@@ -124,7 +124,7 @@ def test_patched_hooks_off_matches_explicit_p0_strategy(scenario):
 
 def test_the_two_trees_are_actually_different():
     """Guard against the gate passing because the patch was never applied."""
-    from shapeflow_p1.treehash import tree_sha256
+    from shapeflow.treehash import tree_sha256
 
     a = tree_sha256(PRISTINE / "open_deep_research")
     b = tree_sha256(PATCHED / "open_deep_research")
@@ -138,10 +138,50 @@ def test_the_installed_package_is_the_patched_tree():
     is impossible. Comparing tree hashes is both possible and stronger: it proves the running
     bytes are the patched bytes rather than that some path resolves somewhere.
     """
-    from shapeflow_p1.treehash import tree_sha256
+    from shapeflow.treehash import tree_sha256
 
     site = Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" \
         / "site-packages" / "open_deep_research"
     if not site.exists():
         pytest.skip("open_deep_research not installed in this interpreter")
     assert tree_sha256(site) == tree_sha256(PATCHED / "open_deep_research")
+
+
+def test_actual_graph_c_checkpoint_receives_capture_time_tool_provenance():
+    """The real patched ToolMessage stays artifact-free, but its frozen C clone is evidence."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = f"{PATCHED}:{REPO / 'src'}"
+    env["PYTHONHASHSEED"] = "0"
+    env["TZ"] = "UTC"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(PROBE),
+            "single_search",
+            "--strategy",
+            "p0",
+            "--capture-checkpoints",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=REPO,
+    )
+    assert "<<<TRACE>>>" in proc.stdout, proc.stderr[-4000:]
+    trace = json.loads(proc.stdout.split("<<<TRACE>>>", 1)[1])
+    checkpoints = trace["captured_c_checkpoints"]
+    assert checkpoints, "the actual graph reached close without freezing a C checkpoint"
+    tool = checkpoints[-1]["tool_messages"][0]
+    artifact = json.loads(tool["artifact_canonical"])
+    expected = "occ-" + __import__("hashlib").sha256(
+        b"https://a.example"
+    ).hexdigest()[:16]
+    assert artifact["source_occurrence_ids"] == [expected]
+    segment = next(
+        item
+        for item in checkpoints[-1]["visible_segments"]
+        if item["role"] == "tool"
+    )
+    assert segment["kind"] == "TOOL_EVIDENCE"
+    assert segment["occurrence_ids"] == [expected]

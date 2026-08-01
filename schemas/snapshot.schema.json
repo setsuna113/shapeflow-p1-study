@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://shapeflow-p1/schemas/snapshot.schema.json",
+  "$id": "https://shapeflow/schemas/snapshot.schema.json",
   "title": "CanonicalSnapshot",
   "description": "Frozen retrieved content, addressed by the digest of its exact bytes. The bytes themselves live in the content-addressed object store; this record is the identity and provenance. Two URLs serving identical bytes share one snapshot -- the distinct citation lineage is carried by SourceOccurrence, not here.",
   "type": "object",

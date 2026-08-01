@@ -1,0 +1,27 @@
+{
+  "arm": "P0",
+  "criteria": [
+    {
+      "floor": 0.1,
+      "measured": 0.12244897959183673,
+      "n": 98,
+      "name": "p0_accuracy",
+      "status": "PASS"
+    },
+    {
+      "also_measured_gold_recall": 0.15714285714285714,
+      "floor": 0.4,
+      "floor_applies_to": "evidence_docids",
+      "measured": 0.14884228583208176,
+      "n": 98,
+      "name": "agent_evidence_recall",
+      "status": "FAIL"
+    }
+  ],
+  "decided_at_utc": "2026-08-01T05:48:15Z",
+  "gate": "RETRIEVAL_COMPETENCE",
+  "prereg_sha256": "17326e69b965d7d7691320d45382fbb406a27d5ff947c999394b99245b7403a1",
+  "source_report": "/storage/nvme/shapeflow-p1-study/reports/BCPLUS_competence2.json",
+  "source_sha256": "3af109baab9d74e3647548215f56971bc402fe876fd51fe3721bf7744abfdf66",
+  "verdict": "FAIL"
+}

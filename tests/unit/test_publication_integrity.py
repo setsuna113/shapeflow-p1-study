@@ -16,23 +16,23 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.evidence.chunkers import (
+from shapeflow.evidence.chunkers import (
     WhitespaceTokenizer,
     markdown_structure_v1,
     paragraph_sentence_v1,
 )
-from shapeflow_p1.evidence.identity import CandidateSet, build_evidence_span
-from shapeflow_p1.hashing import sha256_hex
-from shapeflow_p1.p1.aggregators import AggregatedEvidence, AggregatedItem, stable_union_v1
-from shapeflow_p1.p1.contracts import (
+from shapeflow.evidence.identity import CandidateSet, build_evidence_span
+from shapeflow.hashing import sha256_hex
+from shapeflow.p1.aggregators import AggregatedEvidence, AggregatedItem, stable_union_v1
+from shapeflow.p1.contracts import (
     OVERALL_FACET,
     ParsedBridge,
     ParsedGap,
     SelectionContractError,
     parse_selection,
 )
-from shapeflow_p1.p1.preflight import PreflightConfig, preflight
-from shapeflow_p1.p1.view import CandidateViewRecord, ViewConstructionError
+from shapeflow.p1.preflight import PreflightConfig, preflight
+from shapeflow.p1.view import CandidateViewRecord, ViewConstructionError
 
 TOK = WhitespaceTokenizer()
 SOURCE = "Cats are feline animals here. Dogs are canine animals here. Birds can surely fly here."
@@ -173,7 +173,7 @@ def test_table_context_survives_the_whole_real_chain():
     has, so real table rows reached the selector with no header at all. The previous test used a
     hand-built span carrying that dead field, which hid the break.
     """
-    from shapeflow_p1.p1.selectors import Candidate
+    from shapeflow.p1.selectors import Candidate
 
     table = "| Name | Value |\n|------|-------|\n| a | 1 |\n"
     row = next(c for c in markdown_structure_v1(table, tokenizer=TOK, max_tokens=100)
@@ -360,7 +360,7 @@ def test_an_unresolvable_candidate_is_refused_before_the_model_sees_it():
 
 
 def test_preflight_returns_a_decision_rather_than_raising():
-    from shapeflow_p1.p1.view import guard_publication
+    from shapeflow.p1.view import guard_publication
 
     def boom():
         raise RuntimeError("structural failure inside rendering")
@@ -382,7 +382,7 @@ def test_renderer_grouping_version_is_pinned_in_config():
 
     import yaml
 
-    from shapeflow_p1.p1.renderer import RENDERER_GROUPING_VERSION
+    from shapeflow.p1.renderer import RENDERER_GROUPING_VERSION
 
     configs = Path(__file__).resolve().parents[2] / "configs"
     data = yaml.safe_load((configs / "variants.yaml").read_text(encoding="utf-8"))

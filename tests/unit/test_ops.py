@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from shapeflow_p1.ops.gpu_lease import GpuLease, LeaseHeld
-from shapeflow_p1.ops.watchdog import DriftGuard, check_drift, evaluate_auto_stop
-
+from shapeflow.ops.gpu_lease import GpuLease, LeaseHeld
+from shapeflow.ops.watchdog import DriftGuard, check_drift, evaluate_auto_stop
 
 # --- GPU lease ------------------------------------------------------------------------
 
@@ -86,3 +85,68 @@ def test_stop_reasons_listed():
     stop = evaluate_auto_stop(budget_exhausted=True, freeze_hash_changed=True)
     assert stop.stop
     assert len(stop.reasons) == 2
+
+
+# --- reports may not claim what no artifact supports ----------------------------------------
+
+
+def test_a_report_that_claims_a_finished_block_fails_the_gate(tmp_path):
+    from shapeflow.ops.acceptance import check_report_claims
+
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "WEEK1_P1_FINAL.md").write_text(
+        "# Week 1\n\nBlock C/D 完成; ran on a leased GPU with 662 tests all green.\n",
+        encoding="utf-8",
+    )
+    gate = check_report_claims(tmp_path)
+    assert gate.status == "FAIL"
+    assert "block_cd_complete" in gate.detail
+    assert "gpu_exclusivity" in gate.detail
+    assert "stale_test_count" in gate.detail
+    assert "WEEK1_P1_FINAL.md" in gate.detail
+
+
+def test_the_gate_does_not_write_the_phrase_it_searches_for(tmp_path):
+    """A scanner whose own output lands under reports/ must not quote the banned string.
+
+    The failure detail is written to reports/ACCEPTANCE.json, which the next run scans. When
+    the detail quoted the phrase, that file became a permanent finding and the gate could never
+    pass again however the reports were fixed -- observed on the run host, where it blocked the
+    launch on its own previous output.
+    """
+    import json
+
+    from shapeflow.ops.acceptance import UNSUPPORTED_CLAIMS, check_report_claims
+
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "NOTES.md").write_text(
+        "ran on a leased GPU\n", encoding="utf-8")
+    gate = check_report_claims(tmp_path)
+    assert gate.status == "FAIL"
+
+    banned = [p for phrases, _why in UNSUPPORTED_CLAIMS.values() for p in phrases]
+    serialized = json.dumps(gate.as_dict(), ensure_ascii=False)
+    for phrase in banned:
+        assert phrase not in serialized, (
+            f"the gate's own output contains {phrase!r}; writing it under reports/ would make "
+            "the next run fail on this file forever"
+        )
+
+
+def test_a_report_of_what_actually_happened_passes(tmp_path):
+    from shapeflow.ops.acceptance import check_report_claims
+
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "FAILED_AUTHORING_ATTEMPT.md").write_text(
+        "Authoring stopped: the search credential was rejected 262 times.\n"
+        "Spend kept on the books: $1.339 DeepSeek, 990 GPU-seconds.\n",
+        encoding="utf-8",
+    )
+    assert check_report_claims(tmp_path).status == "PASS"
+
+
+def test_the_gate_is_vacuous_only_when_there_are_no_reports(tmp_path):
+    from shapeflow.ops.acceptance import check_report_claims
+
+    gate = check_report_claims(tmp_path)
+    assert gate.status == "PASS" and "no reports yet" in gate.detail

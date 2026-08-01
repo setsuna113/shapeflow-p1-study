@@ -1,8 +1,8 @@
 # The Week-1 campaign configuration (plan §4.2, §14).
 #
-# Hash-locked like every other config: its config_sha enters protocol/launch_approval.json, so a
-# changed arm set, split size or canary definition invalidates the approval instead of quietly
-# altering what runs.
+# Hash-locked like every other config: its config_sha enters the external append-only approval
+# binding, so a changed arm set, split size or canary definition invalidates the approval
+# instead of quietly altering what runs.
 #
 # Deliberately host-independent. Absolute paths live in SHAPEFLOW_DATA_ROOT (an environment
 # variable, not hashed) and only the relative layout is declared here -- otherwise the authoring
@@ -41,6 +41,10 @@ paths:
   visible_truth: evaluator/visible_truth
   judgments: evaluator/judgments
   provider_ledger: provider/provider_ledger.sqlite
+  # The frozen task-to-lane partition. Steward-owned like every other pre-registration artifact
+  # and readable by every lane: a lane that could rewrite its own share could choose its tasks
+  # after seeing a result.
+  shards: shards
 
 provider:
   bind_host: 127.0.0.1
@@ -50,6 +54,7 @@ provider:
   # back up unable to talk to each other. Each file is owned by its role and
   # group-readable by the provider, so a role can read only its own capability.
   token_dir: /etc/shapeflow-tokens
+  exa_endpoint: https://api.exa.ai/search
   tavily_endpoint: https://api.tavily.com/search
   deepseek_base_url: https://api.deepseek.com
   vllm_base_url: http://127.0.0.1:8000/v1
@@ -60,10 +65,23 @@ provider:
   inference_timeout_seconds: 900.0
   # Worst-case reservations. Admission control only means something if the reserved amount is an
   # upper bound on what the call can cost, so these are ceilings and not estimates.
+  # Derived in Settings from the pinned num_results and the Exa price list, and asserted
+  # to cover it. Declared here so the frozen config states the number that was reserved.
+  exa_usd_worst_case: 0.007
   tavily_credits_worst_case: 2.0
-  deepseek_input_tokens_worst_case: 32000.0
+  # Derived, not guessed. truth.py batches excerpts to max_prompt_chars=80_000; ID-dense JSON
+  # tokenizes at roughly 2.5 chars/token, so 80k chars is already ~32k tokens -- which is why
+  # the previous 32000 was not an upper bound at all and settlement logged 59
+  # `budget_under_reserved` incidents at 33-36k. This assumes a pathological 2 chars/token
+  # (40k) plus 8k for the system prompt, instructions and schema.
+  deepseek_input_tokens_worst_case: 48000.0
+  # Must track configs/judge.yaml model.max_tokens; reasoning tokens are billed inside
+  # completion_tokens, so thinking and the JSON answer share this ceiling.
   deepseek_output_tokens_worst_case: 8000.0
-  deepseek_usd_worst_case: 0.05
+  # Derived from the two token ceilings above at the admission prices in configs/judge.yaml
+  # (48000/1e6*0.435 + 8000/1e6*0.87 = 0.02784), not chosen. Settings.deepseek_usd_worst_case
+  # recomputes it at load and refuses a value that does not cover its own token bound.
+  deepseek_usd_worst_case: 0.028
   gpu_seconds_worst_case: 900.0
 
 # One alias per call site, all rewritten to the single served model before dispatch. This is the
@@ -79,72 +97,466 @@ model_aliases:
   qwen-selector-page: PAGE_P1_SELECTOR_LOCAL
   qwen-selector-page-global: PAGE_P1_SELECTOR_GLOBAL
   qwen-selector-close: COMPRESSOR_P1_SELECTOR
-  qwen-prose-page: PAGE_P1_SELECTOR_LOCAL
-  qwen-prose-close: COMPRESSOR_P1_SELECTOR
+  # The SHORT_PROSE controls carry their own op classes. These previously pointed at the
+  # structured-selector classes, so every prose-control request was recorded in the work ledger
+  # as structured-selector work -- collapsing the one distinction H_ID_VS_PROSE and
+  # C_ID_VS_PROSE are there to measure. The engine still receives the same served model; only
+  # the ledger label changes.
+  qwen-prose-page: PAGE_P1_SHORT_PROSE
+  qwen-prose-close: COMPRESSOR_SHORT_PROSE
 
 # Vendor knobs both arms share. P0 and P1 must start from the same bytes under the same
 # truncation, so max_content_length is protocol, not a tuning parameter.
 odr:
+  # The vendor's own tool name, not the acquisition provider. At run time nothing
+  # reaches a search vendor at all: FrozenTaskCorpusBackend answers from the frozen
+  # world in the shape vendor's tavily_search builds, which is what keeps the
+  # vendor-visible view reproducible.
   search_api: tavily
   max_react_tool_calls: 5
   max_content_length: 50000
+  # Vendor hard-codes 60s here and, on timeout, returns the RAW page instead of a summary. The
+  # first real GPU smoke logged 212 timeouts.
+  #
+  # The cause was NOT slow prefill -- measured PAGE_P0_SUMMARY latency was p50 7.4s, max 12.7s.
+  # It was vendor summarising every page of a result set concurrently (utils.py asyncio.gather)
+  # while the causal layer admitted one upstream request at a time: eight concurrent summaries
+  # queued behind each other, and the eighth waited out the timeout it had already spent 7/8ths
+  # of. An earlier note here blamed "38-83s in prefill", read off vLLM's interval-averaged
+  # throughput line, which includes idle time; that reading was wrong.
+  #
+  # It is protocol rather than tuning because the failure is asymmetric: under P1 the page hook
+  # returns from defer_page_batch before vendor's summarizer is ever awaited, so only P0 can time
+  # out. A timed-out P0 carries the whole raw page as its "compressed" note, worst on the largest
+  # pages -- exactly the high-evidence-volume stratum where P1 is meant to win.
+  #
+  # The patch reads this through SHAPEFLOW_SUMMARIZE_TIMEOUT_S and defaults to vendor's own 60.0
+  # when unset, so an unconfigured graph stays byte-for-byte vendor and the P0 parity gate is
+  # untouched. Both arms run under the same value.
+  summarization_timeout_seconds: 300
   max_structured_output_retries: 3
   research_model_max_tokens: 4096
-  summarization_model_max_tokens: 1024
+  # The pinned vendor default (configuration.py: summarization_model_max_tokens = 8192). It was
+  # set to 1024 here, and that starved only P0: vendor's summarizer falls back to the RAW page
+  # when its completion is cut off, so 263 of 1839 P0 summaries (14.3%) published whole pages as
+  # their "compressed" note -- worst on the largest pages, which is exactly the stratum where P1
+  # is supposed to win. P1 never touches this path. An asymmetric truncation on the baseline is
+  # not a shared knob, so it goes back to vendor's own value.
+  summarization_model_max_tokens: 8192
+  # What vendor's prompt wraps around the page content: system message, instructions, the
+  # JSON-shaped output contract and the chat template. Subtracted from the engine window along
+  # with the completion cap to derive how much page content either arm may see, so the bound
+  # moves when the window or the cap moves instead of drifting out of agreement with them.
+  # Sized generously; it costs a little visible content on the very largest pages and nothing
+  # anywhere else, whereas an underestimate is a refused request.
+  summarization_prompt_overhead_tokens: 1024
   compression_model_max_tokens: 4096
   final_report_model_max_tokens: 8192
   max_researcher_iterations: 3
   max_concurrent_research_units: 1
 
+# Every knob above that differs from the pinned vendor default, with the reason it differs. A
+# deviation not listed here fails its test: `summarization_model_max_tokens` sat at 1024 for the
+# whole design without anyone having written down why, and because vendor's summarizer falls back
+# to the raw page when truncated, it silently degraded 14.3% of P0 summaries -- an asymmetric
+# handicap on the baseline, on exactly the largest pages, which is the stratum P1 must beat.
+#
+# The test that reads this asks two things: that the list matches the deviations exactly, and
+# that each carries `binds`, because a knob binding only one arm is a confound and a knob binding
+# both is a workload choice.
+odr_deviations:
+  - knob: max_react_tool_calls
+    vendor: 10
+    ours: 5
+    binds: BOTH_ARMS
+    reason: >-
+      Bounds tool calls per researcher so 19 arms x 64 tasks fits the GPU budget. Symmetric:
+      the same ceiling applies to the P0 and P1 graphs, so it changes the workload, not the
+      relative cost of the two forms.
+  - knob: max_researcher_iterations
+    vendor: 6
+    ours: 3
+    binds: BOTH_ARMS
+    reason: >-
+      The same budget bound one level up, on how many supervisor rounds a task may take.
+      Symmetric: both graphs stop at the same round, so neither form is given more research.
+  - knob: max_concurrent_research_units
+    vendor: 5
+    ours: 1
+    binds: BOTH_ARMS
+    reason: >-
+      One ConductResearch child at a time bounds per-task cost. This is a breadth choice, not a
+      serialization of the request stream: the concurrency A' restores is vendor's per-page
+      asyncio.gather inside a researcher, which this does not touch.
+  - knob: research_model_max_tokens
+    vendor: 10000
+    ours: 4096
+    binds: BOTH_ARMS
+    reason: >-
+      The served model is a 14B AWQ at 16384 max-model-len; vendor's default is sized for a
+      hosted frontier model. Applies to the same react agent in both arms.
+  - knob: compression_model_max_tokens
+    vendor: 8192
+    ours: 4096
+    binds: BOTH_ARMS
+    reason: >-
+      Same context bound. This is the C node's own cap and it binds P0's compressor and the C
+      arms identically; measured truncation-fallback rate at this value is 0%.
+  - knob: final_report_model_max_tokens
+    vendor: 10000
+    ours: 8192
+    binds: BOTH_ARMS
+    reason: >-
+      Same context bound, applied to the single final writer both arms share; measured
+      truncation rate 0%.
+  - knob: summarization_timeout_seconds
+    vendor: 60
+    ours: 300
+    binds: P0_ONLY
+    reason: >-
+      Vendor hard-codes 60s and returns the RAW page on timeout. Under P1 the page hook returns
+      before vendor's summarizer is awaited, so only P0 can time out -- the asymmetry is in
+      vendor's own design, and leaving it at 60 under a serialized gateway produced 212 timeouts
+      that would have manufactured the headline. A' removes the serialization that caused them;
+      this stays raised so the remaining tail cannot re-introduce the same asymmetry, and both
+      arms run under the same value.
+
 # The isolated causal layer is what this round runs. The operational layer is configured and has
 # its own unit, but a deployment claim needs it to run separately -- mixing the two would let a
 # batched result be read as a causal one.
 measurement:
-  layer: causal
+  # The primary layer. It preserves the pinned graph's own concurrency inside a cell -- vendor's
+  # asyncio.gather over a result set, and H's per-page selectors -- because the question is what
+  # happens when P1 is deployed into real ODR, not what happens in a system built to make one
+  # metric legible. See stack.yaml isolation.causal_native for why the previous layer existed.
+  layer: causal_native
+  # The serialized layer is still run, on the core 2x2 only, as a mechanism control. It answers
+  # "with batching removed, what does an ID selector do that a prose reducer does not" and is
+  # barred from the product verdict; the frozen prereg carries that restriction.
+  mechanism_layer: causal
+  mechanism_layer_arms: [P0, H_MARKDOWN_ID, C_ID, H_PLUS_C]
+  # Pre-registered before any A' data exists. Split, never summed: prompt and completion tokens
+  # are priced differently, come from different phases of inference, and move in OPPOSITE
+  # directions between the arms -- P1 buys a shorter decode with a longer selector prefill. One
+  # combined "tokens" number with a threshold on it would hide the entire trade under study.
+  endpoints:
+    primary_work: interval_union_seconds
+    co_primary:
+      - prompt_tokens
+      - completion_tokens
+    secondary:
+      - e2e_latency_seconds
+      - energy_joules
+      - cached_prompt_tokens
+    # Defined only where intervals do not overlap, i.e. the mechanism layer.
+    mechanism_only:
+      - service_work_seconds
   selected_token_budget: 512
+  # Four GPUs, one schedule. Tasks are partitioned across isolated lanes; arms and replicates
+  # are NOT. A block is paired-valid only under a single engine epoch, and the paired contrast
+  # is P1 against P0 on the same task, so P0 on one card and P1 on another would fold that
+  # card's clocks and thermals into the treatment effect with no way to separate them
+  # afterwards. Cross-GPU parallelism here is independent replication of whole tasks, which
+  # leaves the system under test unchanged.
+  #
+  # The partition is frozen before treatment from pre-treatment corpus size only, with ties
+  # broken from the approved execution binding. There is no rebalancing and no mid-task
+  # migration: moving a half-finished task would either splice two engine epochs into one block
+  # or move its remaining arms to another card, which is the pairing violation above.
+  shards:
+    lane_count: 4
+    # Only lane 0 reaches an upstream that costs money. Four providers each admitting against
+    # the full DeepSeek cap would be a four-fold budget, and a cap that can be multiplied by
+    # starting another process is not admission control. The provider refuses the paid routes on
+    # the other lanes rather than relying on a runbook.
+    paid_upstream_lane: 0
+    vllm_base_port: 8000
+    provider_base_port: 8787
+    # Each lane owns its own runner ledger and object store: the ledger is single-writer by
+    # design and four runners must not share one. They are merged only after the run, by a check
+    # that requires every pre-registered cell exactly once.
+    runner_root_template: "runner-lane{lane}"
   # Generation is capped by the completion limit and guided decoding, never by a schema's
   # maxItems: maxItems bounds how many items may be *accepted*, not how many tokens the model
   # may emit, and reporting it as a decode cap would overstate the saving.
   selector_max_completion_tokens: 768
   guided_decoding: true
 
+# The frozen domain of an H publication handle. This is protocol, not tuning: the handle is the
+# pointer P1 spends its tokens on, so its cost bound is part of the form claim, and its coordinate
+# bounds decide when one handle could ever mean two spans.
+#
+# The first encoding rendered four coordinates with underscores (H3_1_0_1). Qwen charges a token
+# per underscore and per digit and never merges a digit with a letter, so every handle cost 9-10
+# tokens against a cap of 8; every H arm failed view construction before its first selector call
+# and fell back to P0, in all 146 canary cells, silently. The encoding now packs the coordinates
+# by mixed radix and renders them in bijective base 26, and preflight enumerates the entire
+# domain against the frozen tokenizer rather than arguing the bound.
+#
+# Each radix is deliberately larger than the configuration can reach; a coordinate outside them
+# fails its cell rather than widening the domain in place.
+p1_publication_handle:
+  format_version: h_publication_ordinal_bijective_base26_v1
+  max_publication_handle_tokens: 8
+  radices:
+    # odr.max_researcher_iterations is 3.
+    researcher_iteration: 8
+    # odr.max_concurrent_research_units is 1.
+    child_ordinal: 2
+    # odr.max_react_tool_calls is 5, plus structured-output retries; canary observed 3.
+    assistant_turn: 16
+    # Tool-call sets per assistant turn; canary observed 0.
+    toolset: 4
+    # Publication ordinals are allocated across every span of every page in one atomic batch,
+    # so this is the whole batch's chunk count. The frozen corpus's worst case is the eight
+    # largest pages under markdown_structure_v1 at 320 tokens: 23,782 spans. Median page 97,
+    # p95 656 -- this bound binds three pages in the entire corpus.
+    evidence: 24000
+
 # The first real GPU run. It checks engineering correctness and P1 non-inertness only; it may
 # never gate on a quality outcome, because choosing whether to continue based on how good the
 # results look is outcome-dependent design.
 canary:
   tasks: 4
+  # Run every arm that the full screen will run.  This is slightly more expensive than a
+  # seven-arm smoke, but it prevents an untested hierarchical/bridge/C arm from consuming the
+  # remaining 700+ cells and makes the cost forecast arm-stratified rather than extrapolating
+  # cheap core arms onto more expensive variants.
   arms:
     - {arm_id: P0, page_variant: P0, close_variant: P0}
-    - {arm_id: H_ID, page_variant: H02, close_variant: P0}
-    - {arm_id: H_TYPED, page_variant: H03, close_variant: P0}
-    - {arm_id: C_VISIBLE, page_variant: P0, close_variant: C01}
+    - {arm_id: H_FIXED_ID, page_variant: H01, close_variant: P0}
+    - {arm_id: H_MARKDOWN_ID, page_variant: H02, close_variant: P0}
+    - {arm_id: H_TYPED_STABLE, page_variant: H_TYPED_STABLE, close_variant: P0}
+    - {arm_id: H_TYPED_COVERAGE, page_variant: H03, close_variant: P0}
+    - {arm_id: H_HIER_COVERAGE, page_variant: H_HIER_COVERAGE, close_variant: P0}
+    - {arm_id: H_HIERARCHICAL, page_variant: H04, close_variant: P0}
+    - {arm_id: H_BRIDGE, page_variant: H05, close_variant: P0}
+    - {arm_id: C_ID, page_variant: P0, close_variant: C01}
+    - {arm_id: C_TYPED_STABLE, page_variant: P0, close_variant: C_TYPED_STABLE}
+    - {arm_id: C_TYPED_COVERAGE, page_variant: P0, close_variant: C02}
+    - {arm_id: C_BRIDGE, page_variant: P0, close_variant: C03}
     - {arm_id: H_PLUS_C, page_variant: H02, close_variant: C01}
-    - {arm_id: CPU_LEXICAL, page_variant: H00-CPU, close_variant: P0}
-    - {arm_id: SHORT_PROSE, page_variant: H00-PROSE, close_variant: P0}
+    - {arm_id: H_PLUS_C_CPU_CONTROL, page_variant: H00-CPU, close_variant: C00-CPU}
+    - {arm_id: H_PLUS_C_PROSE_CONTROL, page_variant: H00-PROSE, close_variant: C00-PROSE}
+    - {arm_id: H_CPU_CONTROL, page_variant: H00-CPU, close_variant: P0}
+    - {arm_id: H_PROSE_CONTROL, page_variant: H00-PROSE, close_variant: P0}
+    - {arm_id: C_CPU_CONTROL, page_variant: P0, close_variant: C00-CPU}
+    - {arm_id: C_PROSE_CONTROL, page_variant: P0, close_variant: C00-PROSE}
 
-# Forked-state component screening (plan §14.4): every boundary state always carries P0, and the
-# assigned P1/control variants fork from the same checkpoint hash so the contrast is within a
-# state rather than across two different worlds.
+# Full formative E2E screen. The canary is intentionally shallow in tasks but deliberately runs
+# the exact same 19-arm semantic set, so every expensive mechanism has an engineering and cost
+# observation before the screen. Complete within-task blocks keep comparisons paired while
+# exercising every currently runnable H/C mechanism and both node-specific controls. The
+# explicit one-factor matched contrasts below remove contract/aggregation/scope confounding
+# without making an HTML/DOM claim.
+screen_arms:
+  arms:
+    - {arm_id: P0, page_variant: P0, close_variant: P0}
+    - {arm_id: H_FIXED_ID, page_variant: H01, close_variant: P0}
+    - {arm_id: H_MARKDOWN_ID, page_variant: H02, close_variant: P0}
+    - {arm_id: H_TYPED_STABLE, page_variant: H_TYPED_STABLE, close_variant: P0}
+    - {arm_id: H_TYPED_COVERAGE, page_variant: H03, close_variant: P0}
+    - {arm_id: H_HIER_COVERAGE, page_variant: H_HIER_COVERAGE, close_variant: P0}
+    - {arm_id: H_HIERARCHICAL, page_variant: H04, close_variant: P0}
+    - {arm_id: H_BRIDGE, page_variant: H05, close_variant: P0}
+    - {arm_id: C_ID, page_variant: P0, close_variant: C01}
+    - {arm_id: C_TYPED_STABLE, page_variant: P0, close_variant: C_TYPED_STABLE}
+    - {arm_id: C_TYPED_COVERAGE, page_variant: P0, close_variant: C02}
+    - {arm_id: C_BRIDGE, page_variant: P0, close_variant: C03}
+    - {arm_id: H_PLUS_C, page_variant: H02, close_variant: C01}
+    - {arm_id: H_PLUS_C_CPU_CONTROL, page_variant: H00-CPU, close_variant: C00-CPU}
+    - {arm_id: H_PLUS_C_PROSE_CONTROL, page_variant: H00-PROSE, close_variant: C00-PROSE}
+    - {arm_id: H_CPU_CONTROL, page_variant: H00-CPU, close_variant: P0}
+    - {arm_id: H_PROSE_CONTROL, page_variant: H00-PROSE, close_variant: P0}
+    - {arm_id: C_CPU_CONTROL, page_variant: P0, close_variant: C00-CPU}
+    - {arm_id: C_PROSE_CONTROL, page_variant: P0, close_variant: C00-PROSE}
+
+# --- Freeze-1 / BrowseComp-Plus -----------------------------------------------------------
+#
+# The Week-1 blocks above screened nineteen arms to find out which mechanisms are even runnable.
+# That question is answered; Freeze-1 does not re-ask it. What runs on BrowseComp-Plus is the
+# core 2x2 -- measurement.mechanism_layer_arms, unchanged -- plus exactly one control, and the
+# control is the point of including it.
+#
+# H_PROSE_CONTROL replaces the ID selector with a SHORT_PROSE reducer under the *same* token
+# budget at the *same* boundary. Without it, "H beat P0" has two explanations that no amount of
+# data separates: the arm selected spans by id, or the arm simply emitted fewer tokens. Those are
+# different claims -- the first is about representation, the second is about a decode cap anyone
+# can apply to P0 in one line -- and only the second one is free. Every H number in the write-up
+# is reported against both P0 and this control for that reason.
+#
+# H_MARKDOWN_ID (H02) is the H champion, C_ID (C01) the C champion; H_PLUS_C is the two halves
+# composed, named as such rather than treated as a third mechanism.
+#
+# The two CPU controls were added after the liveness smoke, and the reason they are admissible
+# is that they are controls. The smoke found every LLM-selected P1 batch failing preflight --
+# 116/116 at H, 7/7 at C -- with "rendered N tokens exceeds selected_token_budget 512". A
+# hundred-percent fallback has two readings that no amount of P0-vs-P1 data separates: the
+# publication path cannot emit a P1 span on this corpus at all, or the LLM selector will not
+# keep to a budget it is told but cannot measure. C00-CPU and its H twin settle it, because
+# their selector is a greedy loop that charges the exact shared renderer and stops at the same
+# budget (strategies/selectors_async.py) -- they take the identical chunker, aggregator,
+# preflight and renderer, and therefore publish or fail for structural reasons only.
+#
+# Adding a control can only weaken a P1 claim, never manufacture one, and both arms were already
+# pre-registered: H_LLM_VS_CPU and C_LLM_VS_CPU are frozen entries in matched_contrasts below,
+# authored before any BrowseComp-Plus data existed. This restores two arms of the frozen design
+# that the first roster left out for budget; it invents nothing and changes no threshold,
+# contract or budget. No treatment parameter was touched in response to the smoke.
+bcplus_arms:
+  arms:
+    - {arm_id: P0, page_variant: P0, close_variant: P0}
+    - {arm_id: H_MARKDOWN_ID, page_variant: H02, close_variant: P0}
+    - {arm_id: C_ID, page_variant: P0, close_variant: C01}
+    - {arm_id: H_PLUS_C, page_variant: H02, close_variant: C01}
+    - {arm_id: H_PROSE_CONTROL, page_variant: H00-PROSE, close_variant: P0}
+    - {arm_id: H_CPU_CONTROL, page_variant: H00-CPU, close_variant: P0}
+    - {arm_id: C_CPU_CONTROL, page_variant: P0, close_variant: C00-CPU}
+
+# The competence pilot (protocol section 5.3). P0 only, and that is not a simplification: the
+# pilot decides whether the frozen retriever supports the task at all, and a P1 arm in it would
+# make the retriever's admission condition depend on treatment data -- which is precisely the
+# data-dependent design choice the prereg exists to prevent.
+bcplus_pilot_arms:
+  arms:
+    - {arm_id: P0, page_variant: P0, close_variant: P0}
+
+# Pre-declared one-factor contrasts. Each entry names two full E2E arm IDs and every executable
+# variant field that is allowed to differ. Tests resolve the arms through variants.yaml and
+# require the observed difference set to equal factor_fields exactly. Bridge caps belong to the
+# bridge contract, so they are contract-owned fields in the two typed-vs-bridge contrasts.
+# Because this block lives in week1.yaml, changing a pair, level, or allowed field changes
+# week1_sha and invalidates the launch approval.
+matched_contrasts:
+  version: matched_contrasts_v2
+  executable_variant_fields:
+    - node
+    - chunker
+    - scope
+    - contract
+    - aggregation
+    - close_mode
+    - selector_backend
+    - publication_path
+    - output_representation
+    - bridge_token_cap_each
+    - bridge_token_cap_total
+  pairs:
+    - {contrast_id: H_ID_VS_TYPED, kind: ID_vs_TYPED, left_arm_id: H_MARKDOWN_ID, right_arm_id: H_TYPED_STABLE, target_factor: contract, left_level: P1_ID, right_level: P1_TYPED, factor_fields: [contract, output_representation]}
+    - {contrast_id: C_ID_VS_TYPED, kind: ID_vs_TYPED, left_arm_id: C_ID, right_arm_id: C_TYPED_STABLE, target_factor: contract, left_level: P1_ID, right_level: P1_TYPED, factor_fields: [contract, output_representation]}
+    - {contrast_id: H_STABLE_VS_COVERAGE, kind: stable_vs_coverage, left_arm_id: H_TYPED_STABLE, right_arm_id: H_TYPED_COVERAGE, target_factor: aggregation, left_level: stable_union_v1, right_level: coverage_budget_v1, factor_fields: [aggregation]}
+    - {contrast_id: C_STABLE_VS_COVERAGE, kind: stable_vs_coverage, left_arm_id: C_TYPED_STABLE, right_arm_id: C_TYPED_COVERAGE, target_factor: aggregation, left_level: stable_union_v1, right_level: coverage_budget_v1, factor_fields: [aggregation]}
+    - {contrast_id: H_PER_PAGE_VS_HIERARCHICAL, kind: per_page_vs_hierarchical, left_arm_id: H_TYPED_COVERAGE, right_arm_id: H_HIER_COVERAGE, target_factor: scope, left_level: per_page, right_level: hierarchical, factor_fields: [scope]}
+    - {contrast_id: H_TYPED_VS_BRIDGE, kind: typed_vs_bridge, left_arm_id: H_HIER_COVERAGE, right_arm_id: H_BRIDGE, target_factor: contract, left_level: P1_TYPED, right_level: P1_BRIDGE, factor_fields: [contract, output_representation, bridge_token_cap_each, bridge_token_cap_total]}
+    - {contrast_id: C_TYPED_VS_BRIDGE, kind: typed_vs_bridge, left_arm_id: C_TYPED_COVERAGE, right_arm_id: C_BRIDGE, target_factor: contract, left_level: P1_TYPED, right_level: P1_BRIDGE, factor_fields: [contract, output_representation, bridge_token_cap_each, bridge_token_cap_total]}
+    # CPU is now a genuinely one-factor selector-backend control: it emits P1_ID, uses the same
+    # stable aggregator/renderer/preflight, and greedily obeys the exact same rendered-token
+    # budget. A fixed top-k control would confound backend with selected cardinality.
+    - {contrast_id: H_LLM_VS_CPU, kind: LLM_vs_CPU, left_arm_id: H_MARKDOWN_ID, right_arm_id: H_CPU_CONTROL, target_factor: selector_backend, left_level: LLM, right_level: CPU_LEXICAL, factor_fields: [selector_backend]}
+    # SHORT_PROSE deliberately uses another publication path. It is a whole-mechanism control
+    # for structured pointers versus generic short summarization, not a contract-only ablation.
+    - {contrast_id: H_ID_VS_PROSE, kind: structured_selection_vs_prose, left_arm_id: H_MARKDOWN_ID, right_arm_id: H_PROSE_CONTROL, target_factor: publication_path, left_level: STRUCTURED_SELECTION, right_level: DIRECT_PROSE, factor_fields: [contract, publication_path, output_representation]}
+    - {contrast_id: C_LLM_VS_CPU, kind: LLM_vs_CPU, left_arm_id: C_ID, right_arm_id: C_CPU_CONTROL, target_factor: selector_backend, left_level: LLM, right_level: CPU_LEXICAL, factor_fields: [selector_backend]}
+    - {contrast_id: C_ID_VS_PROSE, kind: structured_selection_vs_prose, left_arm_id: C_ID, right_arm_id: C_PROSE_CONTROL, target_factor: publication_path, left_level: STRUCTURED_SELECTION, right_level: DIRECT_PROSE, factor_fields: [contract, publication_path, output_representation]}
+    # These two comparisons randomize the entire H+C policy from the same pre-H state. The
+    # first H input must match, while later C inputs/trajectories may differ as mediated E2E
+    # outcomes. They identify a joint configuration increment, not a fixed-C-checkpoint reducer.
+    - {contrast_id: HC_LLM_VS_CPU, kind: LLM_vs_CPU, left_arm_id: H_PLUS_C, right_arm_id: H_PLUS_C_CPU_CONTROL, target_factor: selector_backend, left_level: {page: LLM, close: LLM}, right_level: {page: CPU_LEXICAL, close: CPU_LEXICAL}, factor_fields: [selector_backend], factor_scope: JOINT_E2E_POLICY, affected_nodes: [WEBPAGE_P1, C_VISIBLE], first_treatment_boundary: WEBPAGE_P1}
+    - {contrast_id: HC_ID_VS_PROSE, kind: structured_selection_vs_prose, left_arm_id: H_PLUS_C, right_arm_id: H_PLUS_C_PROSE_CONTROL, target_factor: publication_path, left_level: {page: STRUCTURED_SELECTION, close: STRUCTURED_SELECTION}, right_level: {page: DIRECT_PROSE, close: DIRECT_PROSE}, factor_fields: [contract, publication_path, output_representation], factor_scope: JOINT_E2E_POLICY, affected_nodes: [WEBPAGE_P1, C_VISIBLE], first_treatment_boundary: WEBPAGE_P1}
+
+# The primary screening estimand is coupled-seed end-to-end ITT. Every arm runs the complete
+# graph from the same task/replicate seed. Search results, reasoning trajectory and later
+# checkpoints may diverge after P1's first intervention; that divergence is part of P1's effect.
+# A separate component-only command may replay reducers at exactly the same H/C checkpoint, but
+# it is unavailable until the actual graph has a validated boundary-resume backend.
 screen:
   split: FORMATIVE_SCREEN
-  # Which arm set screening runs. `canary` is the primary 2x2 (P0, H, C_VISIBLE, H+C) plus
-  # H-typed and both controls -- seven arms, run as COMPLETE blocks so every task sees every arm.
-  #
-  # This is a deliberate, declared narrowing of plan section 14.4, which assigns 2-3 P1 variants
-  # per boundary state from the full sixteen-variant registry under a balanced incomplete design.
-  # Complete blocks over seven arms answer "does P1 work, and is it the pointer mechanism or just
-  # fewer tokens" with the controls in every block; the full registry sweep would cost roughly
-  # five times the GPU hours and explores design space this formative round does not need to
-  # settle. The nine unrun variants are unrun, not eliminated, and the report says so.
-  arms_block: canary
+  primary_estimand: COUPLED_SEED_E2E_ITT
+  component_estimand: SAME_CHECKPOINT_REDUCER_REQUIRES_BOUNDARY_BACKEND
+  # The small canary proves the plumbing. The actual screen uses every runnable H/C mechanism,
+  # their node-specific controls, and the core 2x2. Non-runnable extensions stay explicitly
+  # unrun; they may not be substituted by a differently-defined fallback.
+  arms_block: screen_arms
   max_h_states: 48
   max_c_states: 48
   variants_per_state: 5
+  # 19 arms x (32 primary tasks + an exact 8-task second-seed subset) = 760 screen cells.
+  # The 4-task x 19-arm canary adds 76, for 836 total. The 150 GPU-hour cap therefore permits a
+  # campaign-wide weighted mean of about 646 GPU-seconds per completed cell, including retries.
+  # provider.gpu_seconds_worst_case is per inference request, not per graph cell, so multiplying
+  # a request ceiling by the cell count would be a false budget proof: each cell makes a
+  # treatment-dependent number of requests. The canary must report an arm-stratified forecast
+  # using each arm's observed canary maximum; the hard ledger cap remains authoritative.
+  #
+  # The partial second seed is not a second independent task sample. It is a pre-treatment,
+  # hash-ranked sensitivity sample that reveals whether the observed task-level effect is
+  # brittle to model/search stochasticity without silently doubling the whole campaign.
   second_seed_fraction: 0.25
   seeds: [1, 2]
   # A block enters the primary comparison only when every cell in it is terminal. A partial
   # block is not a paired observation and is never spliced with another one.
   require_complete_blocks: true
+
+# The SECONDARY "direct node effect" of protocol section 15.1 #1: a same-checkpoint fork that
+# answers immediate representation/work/quality at one close boundary. It is NOT the primary C
+# estimand and is NOT wired into any decision this round -- screen.primary_estimand above
+# (COUPLED_SEED_E2E_ITT) is the single decision-facing estimand for P0/H/C/H+C alike.
+#
+# A previous revision declared this block "the PRIMARY C estimand", on the premise that "C fires
+# after all research, so it cannot have changed anything upstream". That premise is false. In the
+# pinned vendor graph, supervisor_tools puts the compressed note into supervisor_messages and
+# returns Command(goto="supervisor"); the supervisor can then emit another ConductResearch, spawn
+# a researcher and run new searches. C's own output conditions how much further research happens,
+# so post-C divergence is a real causal mediation path, not noise to be averaged away.
+#
+# Holding the supervisor's realized plan fixed therefore measures a controlled direct effect of
+# replacing one child's note while its siblings stay P0 -- a different treatment from deploying
+# C01 across every close node of a live run. It also cannot be summed into a whole-task work
+# saving: boundaries share upstream work and each would re-run the final writer. Promoting it
+# would additionally break the core 2x2, since H and H+C are full-graph E2E and main effects and
+# the HxC interaction must come from one estimand.
+#
+# This block is hash-locked like every other: changing an arm, the allowlist or terminal_mode
+# changes week1_sha and invalidates the launch approval.
+c_fork:
+  split: FORMATIVE_SCREEN
+  # Names the TrialKind the backend implements, so config and code cannot drift.
+  estimand: C_FROZEN_CONTINUATION
+  # Its place in protocol section 15.1's taxonomy: estimand #1, the direct node effect. The
+  # decision-facing estimand is #2, screen.primary_estimand (COUPLED_SEED_E2E_ITT), for C
+  # exactly as for H.
+  estimand_class: DIRECT_NODE_EFFECT
+  # Not read by any decision path, and no production caller exists this round. Both flags are
+  # config-visible so "secondary" is a frozen property rather than a claim in a commit message.
+  decision_facing: false
+  wired: false
+  # One full-graph P0 cell per task supplies the trajectory, every close checkpoint, the
+  # continuation envelope, and the upstream work constant every arm of that anchor carries.
+  anchor_variant: P0
+  # P0 is the same-boundary baseline and is mandatory; a fork set of P0 alone measures nothing.
+  arms: [P0, C01, C_TYPED_STABLE, C02, C03, C00-CPU, C00-PROSE]
+  # REPORT runs to a final report. CLOSE_ONLY is the fail-closed degradation if the report
+  # re-entry cannot be validated on the actual graph -- it is config-visible precisely so it
+  # cannot be flipped after seeing results.
+  terminal_mode: REPORT
+  # The only op classes a fork arm may issue. The provider refuses anything else before
+  # dispatch, so a leaked researcher call costs nothing rather than being found afterwards.
+  # Widening this is a binding change, deliberately not a runtime flag.
+  #
+  # COMPRESSOR_SHORT_PROSE is required, not optional: C00-PROSE is a listed arm above and it
+  # dispatches that op class. Omitting it made the arm refuse itself at its own boundary, which
+  # would have silently removed C_ID_VS_PROSE -- one of the six Holm-family mechanism contrasts.
+  allowed_op_classes: [COMPRESSOR_P0, COMPRESSOR_P1_SELECTOR, COMPRESSOR_SHORT_PROSE, FINAL_WRITER]
+  # Bounds the phase against the same GPU budget as the screen. Cheaper per boundary than a
+  # full-graph cell -- the anchor is the cost. The per-arm call count is NOT fixed: a CPU close
+  # issues no selector call at all, a strict-P1 fallback issues selector + P0 compressor + writer,
+  # and retries add more. Work is counted from real ledger events, never from an assumed constant.
+  max_boundaries_per_task: 2
+  # Arms run back to back with their anchor. get_today_str() is datetime.now() and is
+  # formatted into both the compressor and the final-report prompt, and the shared upstream
+  # constant belongs to one engine boot; a boundary spread across either is void.
+  require_same_utc_date: true
+  require_same_engine_epoch: true
 
 runtime:
   lease_seconds: 1800

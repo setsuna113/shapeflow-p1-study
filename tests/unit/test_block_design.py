@@ -7,7 +7,7 @@ import itertools
 import numpy as np
 import pytest
 
-from shapeflow_p1.experiment.block_design import (
+from shapeflow.experiment.block_design import (
     Factor,
     assign_to_states,
     check_freeze_gates,
@@ -142,7 +142,7 @@ def test_freeze_gates_reject_rank_deficient():
 
 
 def test_freeze_gates_reject_empty_state():
-    from shapeflow_p1.experiment.block_design import StateAssignment
+    from shapeflow.experiment.block_design import StateAssignment
 
     variants = _full_factorial([CHUNKER, CONTRACT, AGG])
     X, _ = encode_design(variants, [CHUNKER, CONTRACT, AGG])

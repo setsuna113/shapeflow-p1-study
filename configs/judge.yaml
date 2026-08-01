@@ -20,6 +20,12 @@ model:
   forbid: [deepseek-reasoner, deepseek-chat]
   temperature: 0.0
   top_p: 1.0
+  # These fields are sent on every truth/report judgment and are part of the frozen policy.
+  # A retry advances the seed by its attempt ordinal, which is also recorded per response.
+  seed: 20260725
+  max_tokens: 8000
+  enable_thinking: false
+  send_thinking_switch: false
   response_format: json_object
 
 retry:
@@ -49,14 +55,15 @@ blinding:
   same_judge_calls_are_not_independent_raters: true
 
 prompts:
-  atomize_version: judge_atomize_v1
-  truth_version: judge_truth_v1
-  report_version: judge_report_v1
-  # Filled by `shapeflow-p1 freeze-stack` from the rendered prompt bytes; a change to any prompt
-  # mints a new protocol SHA rather than silently re-judging under different instructions.
-  atomize_prompt_sha256: "@STEWARD_FREEZES@"
-  truth_prompt_sha256: "@STEWARD_FREEZES@"
-  report_prompt_sha256: "@STEWARD_FREEZES@"
+  atomize_version: rule_atomize_v1
+  truth_version: judge_truth_v2_full_world
+  report_version: relation_v1
+  # The actual code-derived digests are frozen in stack_manifest.json under evaluation.*.
+  # Keeping another writable placeholder here falsely implied freeze-stack mutated this tracked
+  # config. These stable references are config identity; the manifest carries the resolved hash.
+  atomize_prompt_sha256: "stack_manifest:evaluation.atomize_prompt_sha256"
+  truth_prompt_sha256: "stack_manifest:evaluation.truth_prompt_sha256"
+  report_prompt_sha256: "stack_manifest:evaluation.report_prompt_sha256"
 
 truth_packet:
   # An atom enters accepted truth only if it binds to at least one exact source span. A fact the
@@ -83,15 +90,24 @@ human_audit:
 # than only tokens. Recorded rather than looked up at runtime: a price that moved mid-campaign
 # would otherwise rewrite what earlier calls appear to have cost.
 pricing:
-  # UNVERIFIED for the v4 models. The published price list is a JavaScript-rendered page the run
-  # host cannot read, and the previous figures belonged to deepseek-chat, which no longer exists.
-  # These are a deliberate upper bound, not an estimate: the study's rule is that a possible cost
-  # is never under-counted, so the USD ledger over-reports until the real price is confirmed.
-  # The token counts beside it are exact -- they come from the provider's own usage field.
+  # VERIFIED against the published price list. The previous figures (2.00/8.00) were an invented
+  # "conservative upper bound" adopted when the page could not be read from the run host, and
+  # they over-reported settled spend by ~19x: a ledger reading $31.40 against a real bill of
+  # about $1.60. An upper bound is the right instinct for a *reservation*; writing it into
+  # settlement makes the recorded spend unrelated to the invoice and makes any USD cap
+  # meaningless. Reservations stay worst-case via the token ceilings in week1.yaml; these are
+  # the rates settlement is computed at, and the token counts beside them are exact.
+  #
+  # Quoted for deepseek-v4-pro, the dearer of the two candidate judges, so the figure remains an
+  # upper bound whichever model the calibration selects (v4-flash is 0.14 / 0.28, with a
+  # 0.0028 cache-hit rate). DeepSeek prices cache-hit prompt tokens ~120x below cache-miss and
+  # reports the split in `usage`; a judging workload re-sends near-identical prompts constantly,
+  # so ignoring the split materially over-counts.
   source: https://api-docs.deepseek.com/quick_start/pricing
-  retrieved_utc: "2026-07-24"
-  verified: false
-  basis: conservative_upper_bound_pending_verification
+  retrieved_utc: "2026-07-26"
+  verified: true
+  basis: published_price_list_v4_pro_upper_bound_of_both_candidates
   currency: USD
-  usd_per_1m_input_tokens: 2.00
-  usd_per_1m_output_tokens: 8.00
+  usd_per_1m_input_tokens: 0.435
+  usd_per_1m_input_tokens_cached: 0.003625
+  usd_per_1m_output_tokens: 0.87

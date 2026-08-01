@@ -14,11 +14,14 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 REPORTS="$REPO/reports"
 DATA_ROOT="${SHAPEFLOW_DATA_ROOT:-/storage/nvme/shapeflow-data}"
+APPROVAL_FILE="${SHAPEFLOW_APPROVAL_FILE:-$DATA_ROOT/approvals/launch_approval.json}"
+export SHAPEFLOW_APPROVAL_FILE="$APPROVAL_FILE"
 CONFIG="${SHAPEFLOW_CONFIG:-$REPO/configs/week1.yaml}"
+ENGINE_EPOCH_FILE="${SHAPEFLOW_ENGINE_EPOCH_FILE:-/run/shapeflow-vllm-causal/engine_epoch}"
 VENDOR_PIN="408da442a661ea5e40a6163329f82e3f22628949"
 PATCHED=".build/open_deep_research-patched"
 MIN_FREE_BYTES=12884901888   # 12 GiB hard floor (plan §5.2)
-TOTAL_STEPS=17
+TOTAL_STEPS=18
 STEP=0
 SPEND_POSSIBLE=0
 
@@ -40,7 +43,7 @@ blocked() {  # blocked <slug> <message...>
     else
       echo
       echo "A paid step had already run. Consult the ledger for what was actually spent:"
-      echo '    shapeflow-p1 status'
+      echo '    shapeflow status'
     fi
   } > "$REPORTS/BLOCKED_${slug}.md"
   echo "BLOCKED[$slug]: $*" >&2
@@ -63,11 +66,14 @@ step() { STEP=$((STEP + 1)); echo "== [${STEP}/${TOTAL_STEPS}] $* =="; }
 # it -- so a step would run as the right uid while failing the check that says so.
 as() { local role="$1"; shift; runuser -u "$role" -- env USER="$role" LOGNAME="$role" \
         SHAPEFLOW_DATA_ROOT="$DATA_ROOT" SHAPEFLOW_REPO="$REPO" \
+        SHAPEFLOW_APPROVAL_FILE="$APPROVAL_FILE" \
         PYTHONHASHSEED=0 TZ=UTC \
+        ${SHAPEFLOW_GPU_UUID:+SHAPEFLOW_GPU_UUID="$SHAPEFLOW_GPU_UUID"} \
         ${SHAPEFLOW_ENGINE_PID:+SHAPEFLOW_ENGINE_PID="$SHAPEFLOW_ENGINE_PID"} \
         ${SHAPEFLOW_ENGINE_LOG:+SHAPEFLOW_ENGINE_LOG="$SHAPEFLOW_ENGINE_LOG"} \
+        SHAPEFLOW_ENGINE_EPOCH_FILE="$ENGINE_EPOCH_FILE" \
         "$@"; }
-SF="$REPO/.venv/bin/shapeflow-p1"
+SF="$REPO/.venv/bin/shapeflow"
 
 # The causal engine runs under sfsupervise; find the api_server pid that is genuinely a
 # descendant of OUR supervisor (its pid is in the run file), so doctor's flags check reads this
@@ -95,18 +101,39 @@ discover_engine_pid() {
 
 # ---------------------------------------------------------------------------------------
 step "singleton: no active coordinator"
-systemctl is-active --quiet shapeflow-p1-week1.service \
-  && blocked "ACTIVE_COORDINATOR" "shapeflow-p1-week1.service is already running"
+# `systemctl is-active` is not sufficient on this host: systemd is not PID 1 here, so the call
+# fails, `&&` short-circuits, and the gate passed unconditionally -- while the coordinator that
+# actually runs is an sfsupervise process holding a flock. Check both, so the gate means the
+# same thing under systemd and under the supervisor.
+if command -v systemctl >/dev/null 2>&1 && [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ]; then
+  systemctl is-active --quiet shapeflow-p1-week1.service \
+    && blocked "ACTIVE_COORDINATOR" "shapeflow-p1-week1.service is already running"
+fi
+for lock in "${SHAPEFLOW_RUN_DIR:-/run/shapeflow}"/week1*.lock; do
+  [ -e "$lock" ] || continue
+  # flock -n succeeds only if nothing holds it; if we cannot take it, a coordinator is live.
+  if ! flock -n "$lock" true 2>/dev/null; then
+    blocked "ACTIVE_COORDINATOR" "a supervised coordinator already holds $lock"
+  fi
+done
 
 step "credentials present, readable only by the provider"
-runuser -u sfprovider -- test -r /etc/shapeflow/tavily.key \
-  || blocked "NO_SECURE_SECRET_INJECTION" "sfprovider cannot read the Tavily credential"
+# Exa is the acquisition credential the provider refuses to start without; Tavily is optional
+# since acquisition moved off it. Checking only tavily.key here would have passed a host that
+# cannot acquire anything at all.
+runuser -u sfprovider -- test -r /etc/shapeflow/exa.key \
+  || blocked "NO_SECURE_SECRET_INJECTION" "sfprovider cannot read the Exa credential"
 runuser -u sfprovider -- test -r /etc/shapeflow/deepseek.key \
   || blocked "NO_SECURE_SECRET_INJECTION" "sfprovider cannot read the DeepSeek credential"
+# Every credential actually present must be unreachable by every non-provider role. Probing one
+# fixed filename would leave a newly added key unproven.
 for role in sfrunner sfinfer sfevaluator; do
-  if runuser -u "$role" -- cat /etc/shapeflow/tavily.key >/dev/null 2>&1; then
-    blocked "SECRET_ISOLATION" "$role can read a credential; the boundary does not hold"
-  fi
+  for key in exa deepseek tavily; do
+    [ -f "/etc/shapeflow/$key.key" ] || continue
+    if runuser -u "$role" -- cat "/etc/shapeflow/$key.key" >/dev/null 2>&1; then
+      blocked "SECRET_ISOLATION" "$role can read $key.key; the boundary does not hold"
+    fi
+  done
 done
 
 step "campaign quota + free-space floor"
@@ -114,7 +141,7 @@ FREE_BYTES="$(df -B1 --output=avail "$DATA_ROOT" | tail -1 | tr -d ' ')"
 [ "$FREE_BYTES" -ge "$MIN_FREE_BYTES" ] || blocked "LOW_DISK" \
   "free ${FREE_BYTES}B is under the ${MIN_FREE_BYTES}B floor"
 
-step "one GPU, leased by UUID, with no foreign process on it"
+step "every lane has a GPU, leased by UUID, with no foreign process on it"
 command -v nvidia-smi >/dev/null 2>&1 || blocked "NO_GPU" "nvidia-smi not found"
 
 step "submodule + vendor commit"
@@ -129,13 +156,20 @@ step "materialize the pinned submodule and verify the patched-tree hash"
 
 step "uv sync --frozen"
 command -v uv >/dev/null 2>&1 || blocked "NO_UV" "uv not installed"
-uv sync --frozen --all-extras || blocked "UV_SYNC" "uv sync --frozen failed; do not relax --frozen"
+# open_deep_research is a path install of .build/, which the previous step just rewrote, and its
+# version string never changes -- so uv has no way to notice the bytes moved and will happily
+# keep a stale copy installed. Observed on the run host: the patched tree hashed correctly on
+# disk while the *installed* package was still the previous round's. The next step catches that
+# and blocks, but it blocks on a condition that is trivially avoidable, so force this one
+# package to be reinstalled from the tree that was just materialized.
+uv sync --frozen --all-extras --reinstall-package open_deep_research \
+  || blocked "UV_SYNC" "uv sync --frozen failed; do not relax --frozen"
 
 step "the installed ODR is the patched tree"
 "$REPO/.venv/bin/python" - <<'PY' || blocked "IMPORT_ORIGIN" "the installed ODR is not the patched tree"
 import sys, pathlib
 sys.path.insert(0, "src")
-from shapeflow_p1.treehash import tree_sha256
+from shapeflow.treehash import tree_sha256
 import open_deep_research
 live = tree_sha256(pathlib.Path(open_deep_research.__path__[0]))
 want = tree_sha256(pathlib.Path(".build/open_deep_research-patched/src/open_deep_research"))
@@ -152,8 +186,10 @@ step "tests"
 "$REPO/.venv/bin/python" -m pytest -q || blocked "TESTS" "test suite failed"
 
 step "approval binds the live configuration"
-"$SF" verify-approval --approval "$REPO/protocol/launch_approval.json" --config "$CONFIG" \
-  || blocked "APPROVAL_MISMATCH" "launch_approval.json does not bind the live configuration"
+SHAPEFLOW_APPROVAL_FILE="$APPROVAL_FILE" \
+  "$SF" verify-approval --approval "$APPROVAL_FILE" --config "$CONFIG" \
+  || blocked "APPROVAL_MISMATCH" \
+    "external approval $APPROVAL_FILE does not bind the clean live configuration"
 
 step "doctor: stack, GPU UUID, driver, CUDA, vLLM, model revision, patch, APC"
 # The frozen stack manifest is only verifiable against a running engine. Give doctor the
@@ -174,17 +210,97 @@ step "P0 parity (mock model, no GPU, no credits)"
 # Everything past this line can consume a paid resource.
 SPEND_POSSIBLE=1
 
-step "prepare + acquire (steward) then GPU smoke (runner)"
+# The last free gate, and deliberately the one immediately before the first paid command.
+# "The credential file is readable" and "the vendor accepts it" are different facts, and only
+# the second predicts whether acquisition can work. Without this check a rejected key is
+# discovered one billed rejection at a time -- which is exactly how a dead Tavily key turned
+# into 262 charged 401s and an empty frozen world. The probe sends a deliberately invalid body,
+# so a working credential answers 400 and nothing is searched or charged.
+step "upstream credentials are accepted (free probe, before anything is bought)"
+# Over TCP, not the Unix socket: /run/shapeflow is sfprovider-only (0750) and the socket is
+# srw-rw---- sfprovider:sfprovider, so every other role gets EACCES on connect. The loopback
+# listener is how the runner and steward reach the provider in normal operation.
+PROBE_URL="http://${SHAPEFLOW_PROVIDER_HOST:-127.0.0.1}:${SHAPEFLOW_PROVIDER_PORT:-8787}"
+PROBE_STATUS="$(as sfsteward curl -sS -o /tmp/sf-credential-probe.json -w '%{http_code}' \
+  --max-time 120 \
+  -H "Authorization: Bearer $(cat /etc/shapeflow-tokens/steward.token)" \
+  -X POST "$PROBE_URL/v1/credentials/probe" 2>/dev/null || echo 000)"
+if [ "$PROBE_STATUS" != "200" ]; then
+  # A rejected credential and an unreachable upstream both stop the launch, but they are
+  # different problems: one needs a new key, the other needs a retry. Naming them the same
+  # sent an operator looking for a bad credential after a transient connection error.
+  PROBE_BODY="$(head -c 500 /tmp/sf-credential-probe.json 2>/dev/null)"
+  case "$PROBE_BODY" in
+    *unreachable*) SLUG="UPSTREAM_UNREACHABLE" ;;
+    *)             SLUG="CREDENTIAL_REJECTED" ;;
+  esac
+  rm -f /tmp/sf-credential-probe.json
+  blocked "$SLUG" \
+    "the provider's upstream credential probe returned HTTP $PROBE_STATUS: $PROBE_BODY"
+fi
+rm -f /tmp/sf-credential-probe.json
+
+step "prepare + acquire + freeze machine truth candidates (steward)"
+# A sealed corpus is write-once and outlives a blocked launch, so re-running this gate must not
+# mean re-authoring it. `prepare` resumes an existing seal instead: it re-derives the per-task
+# views (a pure function of the registry) and authors nothing, so this stays a plain call.
 as sfsteward "$SF" prepare --config "$CONFIG" || blocked "PREPARE" "prepare failed"
 as sfsteward "$SF" acquire --config "$CONFIG" || blocked "ACQUIRE" "acquisition failed"
-as sfrunner "$SF" smoke --config "$CONFIG" || blocked "GPU_SMOKE" "the GPU canary failed"
+# Truth construction reads only the already-frozen task/source world and writes into the
+# evaluator tree.  It runs before treatment so neither an arm's report nor an observed effect
+# can influence which atoms enter the candidate answer key.  Human audit remains a later,
+# explicit verdict gate; this command never labels machine candidates AUDITED.
+#
+# SHAPEFLOW_TRUTH_CONCURRENT=1 runs it as its own supervised job instead of inline. Truth is
+# DeepSeek-API-bound and the screen is GPU-bound, and nothing between here and the screen reads
+# a truth packet -- freeze-analysis-design, preflight, smoke and run-screen all touch only the
+# task/source world. Serialising them therefore adds ~27h of wall clock and buys nothing. The
+# ordering property that matters is unchanged and is enforced elsewhere: truth is built from
+# the frozen world alone, so no arm's output can reach it whenever it runs, and `evaluate`
+# cannot score a task whose packet is not yet frozen.
+if [ "${SHAPEFLOW_TRUTH_CONCURRENT:-0}" = "1" ]; then
+  echo "  build-truth: started as a concurrent supervised job (see logs/build-truth.log)"
+  setsid /usr/local/bin/sfsupervise build-truth sfsteward "$REPO" "$DATA_ROOT" -- \
+    "$SF" build-truth --config "$CONFIG" >> "$REPO/logs/build-truth.log" 2>&1 &
+else
+  as sfsteward "$SF" build-truth --config "$CONFIG" \
+    || blocked "BUILD_TRUTH" "machine truth-candidate construction failed"
+fi
+# --rebind-stale-config covers the case where the design is unchanged but the receipt names
+# config hashes that have since moved -- which happens whenever any hash-locked config is edited
+# for reasons unrelated to the analysis design. It is refused unless the re-derived registry and
+# eligibility spec are byte-identical to the frozen ones, so it cannot author a new design after
+# treatment state may have been observed; that guard is untouched.
+as sfsteward "$SF" freeze-analysis-design --config "$CONFIG" --rebind-stale-config \
+  || blocked "ANALYSIS_DESIGN" \
+    "pre-treatment feature registry or eligibility specification could not be frozen"
 
+# Preflight is the last check BEFORE treatment, so it runs before the GPU canary rather
+# than after it. It used to sit after prepare, acquire and smoke, by which point the
+# credits and the GPU hours it was meant to protect were already spent.
 step "preflight against the approved protocol SHA"
-APPROVED_SHA="$("$REPO/.venv/bin/python" -c \
+APPROVED_PROTOCOL_SHA="$("$REPO/.venv/bin/python" -c \
   "import sys; sys.path.insert(0,'src'); from pathlib import Path; \
-from shapeflow_p1.protocol import protocol_sha; print(protocol_sha(Path('.')))")"
-as sfrunner "$SF" preflight --config "$CONFIG" --approved-protocol-sha "$APPROVED_SHA" \
-  || blocked "PREFLIGHT" "campaign preflight failed under protocol $APPROVED_SHA"
+from shapeflow.protocol import protocol_sha; print(protocol_sha(Path('.')))")"
+APPROVED_BINDING_SHA="$("$REPO/.venv/bin/python" -c \
+  "import sys; sys.path.insert(0,'src'); from pathlib import Path; \
+from shapeflow.protocol import verified_execution_binding; \
+print(verified_execution_binding(Path('.')).digest)")"
+as sfrunner "$SF" preflight --config "$CONFIG" \
+  --approved-protocol-sha "$APPROVED_PROTOCOL_SHA" \
+  || blocked "PREFLIGHT" "campaign preflight failed under protocol $APPROVED_PROTOCOL_SHA"
+
+step "seal the previous round's treatment artifacts as unanalysable"
+# It ran 146 cells across 19 arms and published no P1 output at all: every H batch failed view
+# construction on its first candidate and fell back to P0 as a whole. Nothing is deleted -- the
+# point is that a later reader can tell "no P1 effect" from "P1 never executed", which the
+# artifacts alone cannot say, because a P0 fallback is a legitimate part of the ITT design.
+# Idempotent: the record is write-once and a second run verifies rather than rewrites it.
+as sfrunner "$SF" invalidate-treatment --config "$CONFIG" \
+  --attempt-id serial-engineering-smoke \
+  --state INVALIDATED_SERIAL_ENGINEERING_SMOKE \
+  --note "sealed by bootstrap_and_run.sh before the A-prime round" \
+  || echo "  (already sealed)"
 
 # ---------------------------------------------------------------------------------------
 cat > "$REPORTS/LAUNCH_GATE_PASSED.json" <<JSON
@@ -192,7 +308,9 @@ cat > "$REPORTS/LAUNCH_GATE_PASSED.json" <<JSON
   "status": "GATES_GREEN_LAUNCHING",
   "approval_mode": "USER_EXPLICIT_AUTO_LAUNCH",
   "claim_scope": "FORMATIVE_ONLY",
-  "protocol_sha": "$APPROVED_SHA",
+  "protocol_sha": "$APPROVED_PROTOCOL_SHA",
+  "execution_binding_sha256": "$APPROVED_BINDING_SHA",
+  "approval_file": "$APPROVAL_FILE",
   "vendor_commit": "$GOT",
   "config": "$CONFIG",
   "data_root": "$DATA_ROOT",
@@ -203,8 +321,15 @@ cat > "$REPORTS/LAUNCH_GATE_PASSED.json" <<JSON
 JSON
 
 echo
-echo "All ${TOTAL_STEPS} hard gates passed. Starting screening under systemd (protocol $APPROVED_SHA)."
-sed -i "s|@PROTOCOL_SHA@|$APPROVED_SHA|" /etc/systemd/system/shapeflow-p1-week1.service
-systemctl daemon-reload
-systemctl enable --now shapeflow-p1-week1.service
-systemctl --no-pager status shapeflow-p1-week1.service | head -20
+echo "All ${TOTAL_STEPS} hard gates passed (binding $APPROVED_BINDING_SHA)."
+echo
+# Everything above is single-host correctness: the right bytes, the right approval, the right
+# credentials. It stops here on purpose. The Week-1 launcher this used to exec into brought up
+# four lanes and drove the screen through freeze-shards/merge-shards, none of which exist any
+# more -- Freeze-1 runs two lanes with per-lane engine, provider and retrieval services, and
+# starts the campaign with run-bcplus under a shard argument. That sequence is written down in
+# reports/BCPLUS_OPERATIONS.md, where it can be read before it is run, rather than buried in a
+# script that execs itself at the end of a bootstrap.
+echo "Next: bring up the lanes and start the campaign as described in"
+echo "  reports/BCPLUS_OPERATIONS.md"
+echo "Re-mint the approval first -- any commit changes the binding."
