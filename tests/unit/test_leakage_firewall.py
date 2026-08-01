@@ -766,3 +766,27 @@ def test_every_declared_treatment_package_exists(package):
     path = REPO / "src" / Path(*package.split("."))
 
     assert path.is_dir(), f"{package} is in the firewall spec but not in the tree"
+
+
+def test_every_marked_module_is_also_named_in_the_frozen_spec():
+    """The two rules must cover the same set, and only one of them survives a refactor.
+
+    A module is evaluator-only if it declares the marker, and separately if the frozen spec names
+    it. The spec's own comment says why both exist: the marker is read from the module's source,
+    so deleting the module, renaming it, or dropping the marker in a refactor silently stops it
+    being evaluator-only, and the name list is what still refuses the import.
+
+    ``shapeflow.bench.bcplus.grader`` was marked and unnamed. It holds the grading prompt and
+    scores a prediction against the gold answer, so it had the weaker half of the protection and
+    nothing said so. An audit found it; this test is what stops the next one needing an audit.
+    """
+    marked = set()
+    for path in (REPO / "src" / "shapeflow").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if any(f"{marker} = True" in text for marker in fw.MARKERS):
+            marked.add(".".join(path.relative_to(REPO / "src").with_suffix("").parts))
+    assert marked, "no module declares the marker; the scan is broken, not the tree"
+    missing = sorted(marked - set(fw.FREEZE_1.evaluator_modules))
+    assert not missing, (
+        "these modules declare the evaluator-only marker but are not named in FREEZE_1, so they "
+        f"lose all protection the moment the marker is dropped: {missing}")

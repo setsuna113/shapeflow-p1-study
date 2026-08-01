@@ -37,6 +37,7 @@ from ..bench.bcplus.tasks import load_questions, questions_digest, read_split_id
 from ..canonical import canonical_json
 from ..hashing import sha256_hex
 from ..protocol import verified_execution_binding
+from ..scoped_paths import safe_scope_component
 from .runner import CampaignRunner, RunnerConfig, write_status
 from .schedule import cell_key
 from .selector_client import SelectorModelCall
@@ -311,7 +312,14 @@ async def _run_leased(
             guided_decoding=bool(settings.get("week1", "measurement", "guided_decoding")),
         )
 
-    resolved_run_id = run_id or f"bcplus-{layer}-{arms_block}-{execution_binding_sha256[:12]}"
+    # run_id and layer arrive from the command line and are then joined into filesystem paths --
+    # the schedule directory, the frozen block directory, the STATUS file. That is a trust
+    # boundary, and the grammar that guards it already existed in shapeflow.scoped_paths with no
+    # caller. A run_id of "../.." would otherwise write a campaign's schedule outside the data
+    # root that the isolation between roles depends on.
+    resolved_run_id = safe_scope_component(
+        run_id or f"bcplus-{layer}-{arms_block}-{execution_binding_sha256[:12]}", name="run_id")
+    safe_scope_component(layer, name="layer")
     config = RunnerConfig(
         run_id=resolved_run_id,
         provider_base_url=client.base_url,

@@ -218,3 +218,22 @@ def test_a_p0_close_half_is_not_credited_with_publishing_at_c():
         _hc_counts(h_batches=4, h_fallbacks=1, c_reduced=2, c_failed=0))])
     assert summary.c_opportunities == 0 and summary.c_publication_rate is None
     assert summary.h_publications == 3 and summary.h_opportunities == 4
+
+
+def test_a_run_id_that_escapes_its_root_is_refused():
+    """run_id and layer come off the command line and are then joined into paths.
+
+    The schedule directory, the frozen block directory, the STATUS file and the report filename
+    are all built from them. The grammar that guards that boundary lived in shapeflow.scoped_paths
+    with no caller at all, so "../.." would have written a campaign's schedule outside the data
+    root the whole role isolation depends on.
+    """
+    import pytest
+
+    from shapeflow.scoped_paths import safe_scope_component
+
+    assert safe_scope_component("campaign1", name="run_id") == "campaign1"
+    assert safe_scope_component("bcplus-b1_select-x.2", name="run_id") == "bcplus-b1_select-x.2"
+    for bad in ("../..", "a/b", "", ".hidden", "x" * 129, "with space", "/abs"):
+        with pytest.raises(ValueError, match="one safe path component"):
+            safe_scope_component(bad, name="run_id")

@@ -27,6 +27,18 @@ There is no rebalancing and no mid-task migration. A lane that falls behind stay
 a half-finished task would either splice two engine epochs into one block or discard work that
 is already on the ledger, and the tempting third option -- move the *remaining* arms -- is
 exactly the cross-GPU pairing the rule above forbids.
+
+**What Freeze-1 actually calls.** ``assign_tasks_to_lanes`` and ``Lane``, the latter through
+``campaign.settings``. ``build_shard_manifest``, ``verify_shard_manifest`` and
+``merge_shard_freeze_roots`` have no caller: they served ``freeze-shards`` and ``merge-shards``,
+which are gone with the Week-1 screen, and ``campaign.bcplus`` partitions inline instead --
+``sha256(binding:layer:task_id) % shards`` into ``RunnerConfig.owned_block_ids``, with
+``grade-bcplus --lanes`` reading the lanes' ledgers and deduplicating rather than merging frozen
+roots. They are kept, and named here as uncalled so a reader is not misled into thinking the
+merge check runs, because the lane validations live inside ``build_shard_manifest``: exactly one
+lane may reach a paid upstream, and no two lanes may share a GPU, a port or a runner root. Those
+are properties this study still depends on, and deleting the function to tidy the tree would
+delete them with it.
 """
 
 from __future__ import annotations

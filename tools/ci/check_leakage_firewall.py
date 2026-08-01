@@ -102,6 +102,11 @@ FREEZE_1 = FirewallSpec(
         "shapeflow.bench.bcplus.recall",
         "shapeflow.bench.bcplus.analysis",
         "shapeflow.bench.bcplus.render",
+        # It holds the grading prompt and scores a prediction against the gold answer, and it was
+        # the one marked module missing from this list -- so it had the marker rule protecting it
+        # and not the name rule, which is exactly the asymmetry the comment above warns about.
+        # ``test_every_marked_module_is_also_named`` now makes the omission impossible to repeat.
+        "shapeflow.bench.bcplus.grader",
         "shapeflow.bench.grading",
     ),
     forbidden_names=(

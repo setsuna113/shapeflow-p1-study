@@ -729,6 +729,13 @@ def grade_bcplus(
 
     _require_role("evaluator")
     binding = _require_approval()
+    # Both reach the filesystem: run_id names a schedule directory and a report file, layer names
+    # the schedule inside it. They come off the command line, so they get the same one-component
+    # grammar the runner applies before it writes anything.
+    from .scoped_paths import safe_scope_component
+
+    run_id = safe_scope_component(run_id, name="run_id")
+    layer = safe_scope_component(layer, name="layer")
     # A work key is namespaced by the execution binding, and the binding contains
     # ``approved_commit`` -- so every commit renames every work key ever written. For the runner
     # that is the point: a cell committed under different bytes is a different cell. For the
