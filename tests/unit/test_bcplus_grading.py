@@ -649,6 +649,38 @@ def test_validate_verdict_accepts_the_contract():
     ) is None
 
 
+def test_a_null_extracted_answer_is_a_judgment_not_an_outage():
+    """The prompt asks for None; JSON spells None as null.
+
+    Refusing the literal threw away half the first graded sample -- two of four tasks came back
+    with a null extraction and "correct": "no", which is precisely what the criteria demand of a
+    response that states no final answer. The verdict never depended on that field's type.
+    """
+    payload = {"extracted_final_answer": None, "reasoning": "no answer given", "correct": "no"}
+    assert validate_verdict(payload) is None
+    grade = Grader(lambda system, user: payload).grade(**ASK)
+    assert grade.outcome is GradeOutcome.INCORRECT
+    assert grade.source is GradeSource.JUDGE
+    assert grade.extracted_answer == "None", "normalised to the string the prompt asked for"
+
+
+def test_a_null_extraction_called_correct_is_refused():
+    """Extracted nothing and still said yes: inconsistent, so it goes to the human queue."""
+    payload = {"extracted_final_answer": None, "reasoning": "r", "correct": "yes"}
+    with pytest.raises(VerdictUnparseable, match="contradicts itself"):
+        validate_verdict(payload)
+    assert Grader(lambda system, user: payload).grade(**ASK).outcome is GradeOutcome.UNAVAILABLE
+
+
+@pytest.mark.parametrize("key", ["reasoning", "correct"])
+def test_null_is_still_refused_for_the_other_two_fields(key):
+    """Only the extraction has a documented None; a null verdict or rationale is off contract."""
+    payload = {"extracted_final_answer": "Kyoto", "reasoning": "r", "correct": "no"}
+    payload[key] = None
+    with pytest.raises(VerdictUnparseable, match="not a string"):
+        validate_verdict(payload)
+
+
 def test_an_empty_prediction_is_an_itt_miss_and_costs_no_judge_call():
     judge = scripted("yes")
     grade = Grader(judge).grade(question="which city?", prediction="   ", gold="Kyoto")

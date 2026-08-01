@@ -199,10 +199,30 @@ def validate_verdict(data: Any) -> None:
     for key in _REQUIRED_KEYS:
         if key not in data:
             raise VerdictUnparseable(f"verdict has no {key!r} key: keys are {sorted(data)}")
+        if data[key] is None and key == "extracted_final_answer":
+            # The instruction is "the extracted answer is the string None", and the output
+            # contract writes it "<the final answer taken from the response, or None>". A model
+            # asked for None inside a JSON object emits the JSON literal null, because that is
+            # how JSON spells None -- so null here is the judge obeying, not drifting off
+            # contract. Refusing it discarded a perfectly usable judgment: on the first four
+            # graded tasks two came back this way, and both carried "correct": "no", which is
+            # exactly what the criteria demand of a response with no final answer. Half the
+            # sample was being routed to the human queue over the type of a field the verdict
+            # does not depend on.
+            continue
         if not isinstance(data[key], str):
             raise VerdictUnparseable(
                 f"verdict {key!r} is {type(data[key]).__name__}, not a string"
             )
+    if data["extracted_final_answer"] is None and str(data["correct"]).strip().lower() == "yes":
+        # Extracted nothing and still called it right. That is not a lenient judgment, it is an
+        # internally inconsistent one, and the criteria explicitly say to answer no when the
+        # extracted answer is None. Unparseable, so it goes to the human queue rather than
+        # silently becoming a correct answer nobody gave.
+        raise VerdictUnparseable(
+            "verdict extracted no final answer yet says 'correct': 'yes'; the criteria require "
+            "'no' when the extracted answer is None, so this body contradicts itself"
+        )
     verdict = data["correct"].strip().lower()
     if verdict not in _VERDICTS:
         raise VerdictUnparseable(

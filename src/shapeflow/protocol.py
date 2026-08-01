@@ -297,6 +297,23 @@ def approval_chain(repo: Path, approval_path: Optional[Path] = None) -> list[dic
     return list(body.get("approvals") or [])
 
 
+def approval_chain_digests(
+    repo: Path, approval_path: Optional[Path] = None
+) -> frozenset[str]:
+    """Every execution binding this repository has ever approved.
+
+    The evaluator needs it because a work key is namespaced by the binding and the binding moves
+    with every commit, so grading a finished run from a tree that has advanced means naming the
+    namespace the run actually wrote under. Answering that from the chain rather than from the
+    caller is what keeps it an audit question instead of a free parameter.
+    """
+    return frozenset(
+        str(link.get("binding_sha256"))
+        for link in approval_chain(repo, approval_path)
+        if link.get("binding_sha256")
+    )
+
+
 def _write_atomic(path: Path, body: dict) -> None:
     """Write through a temp file and rename, so a reader never sees half an approval."""
     import os

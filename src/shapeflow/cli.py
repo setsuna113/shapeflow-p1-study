@@ -891,6 +891,11 @@ def grade_bcplus(
              "unsharded lane."),
     skip_grading: bool = typer.Option(
         False, "--skip-grading", help="Recall and work only; no judge calls."),
+    ran_under_binding: Optional[str] = typer.Option(
+        None, "--ran-under-binding",
+        help="Execution binding the run committed under, when the tree has since moved. "
+             "Grading is read-only; refusing to name it would mean a grading bug could only "
+             "ever be fixed by re-running the campaign."),
 ) -> None:
     """Evaluator-only: grade a finished BC+ run and emit the paired analysis.
 
@@ -906,11 +911,35 @@ def grade_bcplus(
 
     _require_role("evaluator")
     binding = _require_approval()
+    # A work key is namespaced by the execution binding, and the binding contains
+    # ``approved_commit`` -- so every commit renames every work key ever written. For the runner
+    # that is the point: a cell committed under different bytes is a different cell. For the
+    # evaluator it is a trap. Grading reads a finished run and writes no cell, yet with the
+    # namespace pinned to HEAD the only way to fix a grading bug was to re-run the campaign that
+    # exposed it. Twice already a judge-parsing fix would have cost a pilot.
+    #
+    # So the run's own binding may be named. It is checked against the approval chain, not taken
+    # on trust: an unrecorded digest is refused, which keeps this from becoming a way to point
+    # the analysis at an arbitrary namespace.
+    namespace = binding.digest
+    if ran_under_binding and ran_under_binding != binding.digest:
+        from .protocol import approval_chain_digests
+
+        known = approval_chain_digests(_REPO)
+        if ran_under_binding not in known:
+            _fail(
+                f"--ran-under-binding {ran_under_binding[:12]} is not in this repository's "
+                f"approval chain ({len(known)} recorded binding(s)). Grading a namespace that "
+                "was never approved would be grading a run this protocol never authorised."
+            )
+        typer.echo(f"grading cells committed under {ran_under_binding[:12]} "
+                   f"(the live approval is {binding.digest[:12]})")
+        namespace = ran_under_binding
 
     def work_key_for(ledger, cell: dict) -> str:
         arm = cell["arm"]
         return ledger.work_key(
-            protocol_sha=binding.digest, split=layer, phase_id=phase_id,
+            protocol_sha=namespace, split=layer, phase_id=phase_id,
             task_id=str(cell["task_id"]), arm_id=str(arm["arm_id"]),
             variant_id=f"{arm['page_variant']}+{arm['close_variant']}",
             replicate_id=str(cell["replicate_id"]), checkpoint_hash=str(cell["block_id"]),
