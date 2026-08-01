@@ -53,12 +53,16 @@ Publication, campaign to date, per boundary:
 
 | arm | selector | H published | C published |
 |---|---|---|---|
-| `H_CPU_CONTROL` | CPU greedy | **56 / 56 (100 %)** | — |
-| `H_PROSE_CONTROL` | LLM, prose | **37 / 38 (97 %)** | — |
-| `H_MARKDOWN_ID` | LLM, span IDs | **2 / 51 (4 %)** | — |
-| `H_PLUS_C` | LLM, span IDs | **3 / 50 (6 %)** | **1 / 21 (5 %)** |
-| `C_CPU_CONTROL` | CPU greedy | — | **15 / 17 (88 %)** |
-| `C_ID` | LLM, span IDs | — | **1 / 21 (5 %)** |
+| `H_CPU_CONTROL` | CPU greedy | **138 / 138 (100 %)** | — |
+| `H_PROSE_CONTROL` | LLM, prose | **92 / 98 (94 %)** | — |
+| `H_MARKDOWN_ID` | LLM, span IDs | **2 / 125 (2 %)** | — |
+| `H_PLUS_C` | LLM, span IDs | **4 / 119 (3 %)** | **2 / 49 (4 %)** |
+| `C_CPU_CONTROL` | CPU greedy | — | **29 / 37 (78 %)** |
+| `C_ID` | LLM, span IDs | — | **3 / 50 (6 %)** |
+
+At 343 committed cells these are no longer estimates of a rate; they are the rate. The LLM
+selector has published 11 times out of 391 opportunities across four arms and two boundaries.
+The CPU selector has published 167 times out of 175.
 
 Every failure is the same assertion:
 
