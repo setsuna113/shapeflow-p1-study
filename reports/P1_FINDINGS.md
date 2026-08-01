@@ -1,6 +1,6 @@
 # P1 on BrowseComp-Plus — findings
 
-**Status: interim.** The main campaign is in flight (68 of 560 cells at the time of writing).
+**Status: interim.** The main campaign is in flight (141 of 560 cells at the time of writing).
 Everything below is stated at the sample size it was measured at, and the mechanism findings are
 separated from the effect sizes on purpose: the first are properties of the machine and are
 already settled, the second are estimates that will tighten.
@@ -45,19 +45,19 @@ exact same renderer against the exact same budget, so they publish or fail struc
 
 ## 2. The central finding
 
-**Span-ID selection driven by an LLM almost never publishes. The identical mechanism driven by a
-greedy CPU loop almost always does.**
+**Span-ID selection driven by an LLM almost never publishes, at either boundary. The identical
+mechanism driven by a greedy CPU loop almost always does, at both.**
 
 Publication, campaign to date, per boundary:
 
 | arm | selector | H published | C published |
 |---|---|---|---|
-| `H_CPU_CONTROL` | CPU greedy | **28 / 28 (100 %)** | — |
-| `H_PROSE_CONTROL` | LLM, prose | **20 / 21 (95 %)** | — |
-| `H_MARKDOWN_ID` | LLM, span IDs | **2 / 27 (7 %)** | — |
-| `H_PLUS_C` | LLM, span IDs | **3 / 21 (14 %)** | **0 / 9 (0 %)** |
-| `C_CPU_CONTROL` | CPU greedy | — | **6 / 7 (86 %)** |
-| `C_ID` | LLM, span IDs | — | **0 / 10 (0 %)** |
+| `H_CPU_CONTROL` | CPU greedy | **56 / 56 (100 %)** | — |
+| `H_PROSE_CONTROL` | LLM, prose | **37 / 38 (97 %)** | — |
+| `H_MARKDOWN_ID` | LLM, span IDs | **2 / 51 (4 %)** | — |
+| `H_PLUS_C` | LLM, span IDs | **3 / 50 (6 %)** | **1 / 21 (5 %)** |
+| `C_CPU_CONTROL` | CPU greedy | — | **15 / 17 (88 %)** |
+| `C_ID` | LLM, span IDs | — | **1 / 21 (5 %)** |
 
 Every failure is the same assertion:
 
@@ -95,35 +95,39 @@ greedy loop that can price each candidate meets the same budget every time.
 
 ## 3. What P1 costs and what it saves
 
-Paired on the same task, campaign to date. **n ≈ 10 tasks; treat magnitudes as provisional.**
-The signs, however, are mechanically forced, and the reason is given for each.
+Paired on the same task, campaign to date. **n = 17–21 tasks; magnitudes provisional until the
+full run gives bootstrap intervals.** The signs are mechanically forced, and the reason is given
+for each.
 
 | arm | GPU-busy | prompt tok | completion tok | energy | why the sign is not luck |
 |---|---|---|---|---|---|
-| `H_CPU_CONTROL` | **−67 %** | **−66 %** | **−79 %** | −66 % | replaces the page summary outright: no `PAGE_P0_SUMMARY` at all |
-| `H_PROSE_CONTROL` | **−57 %** | −11 % | **−69 %** | −55 % | same, and the shorter pages shrink the researcher's context downstream |
-| `C_CPU_CONTROL` | −35 % | −21 % | −29 % | −34 % | replaces the compressor (`COMPRESSOR_P0` drops to 0.1 per cell) |
-| `C_ID` | −15 % | −2 % | −20 % | −16 % | publishes nothing; see caveat below |
-| `H_PLUS_C` | **+8 %** | **+50 %** | +5 % | +7 % | pays for the selector, then pays for P0 anyway |
-| `H_MARKDOWN_ID` | **+50 %** | **+78 %** | +38 % | +48 % | same, at every page: 16 selector calls *and* 16 summaries per cell |
+| `H_CPU_CONTROL` | **−66 %** | **−63 %** | **−79 %** | −64 % | replaces the page summary outright: no `PAGE_P0_SUMMARY` at all |
+| `H_PROSE_CONTROL` | **−61 %** | −21 % | **−73 %** | −59 % | same, and the shorter pages shrink the researcher's context downstream |
+| `C_CPU_CONTROL` | −32 % | −15 % | −24 % | −32 % | replaces the compressor (`COMPRESSOR_P0` drops to 0.1 per cell) |
+| `C_ID` | −15 % | **+3 %** | −20 % | −15 % | publishes almost nothing; see caveat below |
+| `H_PLUS_C` | +5 % | **+59 %** | −3 % | +6 % | pays for the selector, then pays for P0 anyway |
+| `H_MARKDOWN_ID` | **+24 %** | **+70 %** | +12 % | +25 % | same, at every page: a selector call *and* a summary per page |
 
 The `H_MARKDOWN_ID` row is the sharpest statement of the result. It runs
 `PAGE_P1_SELECTOR_LOCAL` on every batch, fails preflight, runs `PAGE_P0_SUMMARY` on every batch,
-and publishes output **byte-identical to P0**. It is a 78 % prompt-token surcharge for nothing.
+and publishes output **byte-identical to P0**. It is a 70 % prompt-token surcharge for nothing.
 
-**Caveat on `C_ID`.** It publishes 0/10 yet measures as a saving. That is not consistent with an
-inert arm, which should cost P0 plus the selector. At n = 10 with coupled-seed end-to-end ITT,
-trajectories diverge after the first intervention and the between-task variance is large (cell
-GPU-busy ranges 87–394 s). I read this as noise and will not interpret it until the full run
-gives bootstrap intervals.
+**Caveat on `C_ID`.** Its prompt tokens are now +3 %, which is what an arm that pays for a
+selector and publishes nothing should look like. Its GPU-busy and completion tokens are still
+*down* (−15 %, −20 %), which an inert arm should not be. The likely mechanism is that assigning a
+selector at the close changes when the researcher closes — a mediated effect of the assignment
+rather than of the published output — but coupled-seed end-to-end ITT lets trajectories diverge
+after the first intervention and the between-task variance is large. Not interpreted until the
+full run.
 
-**Caveat on `C_CPU_CONTROL`.** Four cells failed terminally, all in this arm, on
+**Caveat on `C_CPU_CONTROL`.** Five cells have failed terminally, all in this arm, on
 `telemetry_complete: False` — inference attempts left unaccounted after `BrokenPipeError` in the
 provider writing to clients that had already hung up. The cells were scientifically fine (full
 reports, C published, `fell_back: false`); the runner correctly refuses a cell whose work
 accounting is incomplete. The failures skew heavy (mean 28 page summaries vs 20.6 for survivors),
 so this arm's surviving work numbers are **biased cheap**, and its contrast will carry the
-survivorship warning rather than be reported clean.
+survivorship warning rather than be reported clean. Not fixed mid-run: the client timeout lives
+in a hashed config, so changing it re-mints the binding and orphans the campaign.
 
 ---
 
@@ -135,7 +139,15 @@ and a priced menu, and **no frozen parameter was changed in response to either**
 | gate | verdict | measured vs threshold | file |
 |---|---|---|---|
 | P1 liveness (H) | **FAIL** | 0 published spans, floor ≥ 1 | `gates/P1_LIVENESS_SMOKE.md` |
-| P1 liveness (C) | PASS | published in smoke | same |
+| P1 liveness (C) | PASS | 6 published spans in the smoke | same |
+
+**The C gate passed on four tasks and would not pass on eighty.** `C_ID` published 6 of 6 close
+reductions across the smoke's four `pilot_competence` tasks; on the campaign's `b1_select` tasks
+it publishes 1 of 21. The gate is recorded as it was decided — it is a pre-registered check on a
+pre-registered sample, not a claim that gets revised when more data arrives — but the campaign
+number is the one to believe about the mechanism, and it says the C boundary fails the same way H
+does. A four-task liveness sample is enough to catch a mechanism that never fires and not enough
+to characterise one that fires sometimes.
 | retrieval competence — accuracy | **PASS** | 0.1224 vs 0.10 (n=98) | `gates/COMPETENCE_PILOT.md` |
 | retrieval competence — evidence recall | **FAIL** | 0.1488 vs 0.40 (n=98) | same |
 
@@ -191,15 +203,15 @@ never considered.
 **Established** (mechanism properties, robust to sample size):
 
 - LLM-driven span-ID selection under a 512-token rendered budget does not publish on
-  BrowseComp-Plus pages: 7 % at H, 0 % at C.
-- The same mechanism with a budget-aware selector publishes: 100 % at H, 86 % at C.
+  BrowseComp-Plus pages: 4 % at H, 5 % at C.
+- The same mechanism with a budget-aware selector publishes: 100 % at H, 88 % at C.
 - The failure is a budget-compliance failure, not a capability or plumbing failure.
 - An arm that assigns P1 and always falls back costs strictly more than P0 for identical output.
 
 **Established** (work endpoints, direction certain, magnitude provisional at n ≈ 10):
 
-- Replacing the page summary with *anything shorter* is a large saving — around −57 % GPU-busy
-  for short prose, −67 % for CPU-selected spans.
+- Replacing the page summary with *anything shorter* is a large saving — around −61 % GPU-busy
+  for short prose, −66 % for CPU-selected spans.
 - The saving compounds downstream: shorter page outputs shrink the researcher's context.
 
 **Not established**, and will not be by this campaign:
