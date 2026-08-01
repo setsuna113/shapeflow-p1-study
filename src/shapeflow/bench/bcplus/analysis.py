@@ -117,24 +117,54 @@ class CellRecord:
     # emitted a span, because the C half's successes cover for it. That is precisely the case
     # this study has to be able to see: on BrowseComp-Plus the C selector publishes and the H
     # selector does not, and one merged number says neither thing.
+    # ``page_batches_reduced`` counts every bound page batch, including the vendor path a P0
+    # page variant takes -- so a C-only arm like C_ID, whose page half is plain P0, records
+    # batches reduced and no fallbacks and would otherwise be reported as publishing at H with a
+    # perfect rate. It has no H treatment at all. The variant decides whether a boundary is
+    # under treatment; the counters only say what happened once it is.
+    @property
+    def _page_variant(self) -> str:
+        return (self.variant_id or "").split("+")[0]
+
+    @property
+    def _close_variant(self) -> str:
+        parts = (self.variant_id or "").split("+")
+        return parts[1] if len(parts) > 1 else ""
+
+    @property
+    def treats_h(self) -> bool:
+        return bool(self._page_variant) and self._page_variant != "P0"
+
+    @property
+    def treats_c(self) -> bool:
+        return bool(self._close_variant) and self._close_variant != "P0"
+
     @property
     def published_h(self) -> int:
         """Page batches that reached publication as P1 rather than falling back to P0."""
+        if not self.treats_h:
+            return 0
         counts = self.counts or {}
         return max(0, int(counts.get("page_batches_reduced", 0) or 0)
                    - int(counts.get("page_fallbacks", 0) or 0))
 
     @property
     def opportunities_h(self) -> int:
+        if not self.treats_h:
+            return 0
         return int((self.counts or {}).get("page_batches_reduced", 0) or 0)
 
     @property
     def published_c(self) -> int:
         """Researcher closes the selector actually reduced."""
+        if not self.treats_c:
+            return 0
         return int((self.counts or {}).get("close_reduced", 0) or 0)
 
     @property
     def opportunities_c(self) -> int:
+        if not self.treats_c:
+            return 0
         counts = self.counts or {}
         return (int(counts.get("close_reduced", 0) or 0)
                 + int(counts.get("close_failed", 0) or 0))

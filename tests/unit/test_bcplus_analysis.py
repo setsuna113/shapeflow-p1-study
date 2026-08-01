@@ -125,6 +125,12 @@ def test_the_render_never_sums_prompt_and_completion_tokens():
     assert "Total tokens" not in markdown
 
 
+def _variant_cell_at(task: str, arm: str, variant: str, **kw) -> CellRecord:
+    cell = _cell(task, arm, **kw)
+    cell.variant_id = variant
+    return cell
+
+
 def _hc_counts(*, h_batches: int, h_fallbacks: int, c_reduced: int, c_failed: int) -> dict:
     return {"search_queries": 3, "page_batches_reduced": h_batches,
             "page_fallbacks": h_fallbacks, "close_reduced": c_reduced,
@@ -140,8 +146,9 @@ def test_a_dead_h_boundary_is_not_covered_by_a_live_c_boundary():
     publishes and the H selector falls back every time.
     """
     counts = _hc_counts(h_batches=6, h_fallbacks=6, c_reduced=3, c_failed=1)
-    summary = summarize_arm([_cell("t1", "H_PLUS_C", work=1.0, prompt=10, completion=2,
-                                   counts=counts)])
+    cell = _cell("t1", "H_PLUS_C", work=1.0, prompt=10, completion=2, counts=counts)
+    cell.variant_id = "H02+C01"
+    summary = summarize_arm([cell])
     assert summary.h_publications == 0 and summary.h_opportunities == 6
     assert summary.c_publications == 3 and summary.c_opportunities == 4
     assert summary.h_publication_rate == 0.0
@@ -152,9 +159,10 @@ def test_a_dead_h_boundary_is_not_covered_by_a_live_c_boundary():
 
 def test_an_arm_with_no_treatment_at_a_boundary_reports_none_not_zero():
     """Absent and never-published produce the same count and mean opposite things."""
-    summary = summarize_arm([_cell("t1", "H_MARKDOWN_ID", work=1.0, prompt=10, completion=2,
-                                   counts=_hc_counts(h_batches=4, h_fallbacks=4,
-                                                     c_reduced=0, c_failed=0))])
+    cell = _cell("t1", "H_MARKDOWN_ID", work=1.0, prompt=10, completion=2,
+                 counts=_hc_counts(h_batches=4, h_fallbacks=4, c_reduced=0, c_failed=0))
+    cell.variant_id = "H02+P0"
+    summary = summarize_arm([cell])
     assert summary.h_publication_rate == 0.0, "ran at H and published nothing"
     assert summary.c_publication_rate is None, "never ran at C at all"
 
@@ -164,10 +172,14 @@ def test_the_report_names_the_boundary_that_published_nothing():
     for i in range(5):
         records += [
             _cell(f"t{i}", "P0", work=2.0 + i, prompt=100 + i, completion=20 + i),
-            _cell(f"t{i}", "H_MARKDOWN_ID", work=3.0 + i, prompt=150 + i, completion=22 + i,
-                  counts=_hc_counts(h_batches=4, h_fallbacks=4, c_reduced=0, c_failed=0)),
-            _cell(f"t{i}", "C_ID", work=2.0 + i, prompt=98 + i, completion=19 + i,
-                  counts=_hc_counts(h_batches=0, h_fallbacks=0, c_reduced=3, c_failed=1)),
+            _variant_cell_at(f"t{i}", "H_MARKDOWN_ID", "H02+P0", work=3.0 + i,
+                             prompt=150 + i, completion=22 + i,
+                             counts=_hc_counts(h_batches=4, h_fallbacks=4,
+                                               c_reduced=0, c_failed=0)),
+            _variant_cell_at(f"t{i}", "C_ID", "P0+C01", work=2.0 + i,
+                             prompt=98 + i, completion=19 + i,
+                             counts=_hc_counts(h_batches=2, h_fallbacks=0,
+                                               c_reduced=3, c_failed=1)),
         ]
     text = render_markdown(build_report(records, baseline_arm="P0", resamples=100))
     assert "Nothing was published at H (WEBPAGE_P1)" in text
@@ -175,3 +187,34 @@ def test_the_report_names_the_boundary_that_published_nothing():
     assert "Nothing was published at C" not in text, "C published; it must not be named"
     assert "0 / 20 (0%)" in text, "five cells x four batches, none published"
     assert "15 / 20 (75%)" in text
+    assert "| `C_ID` | -- |" in text, (
+        "C_ID's page half is plain P0; it must not be credited with publishing at H")
+
+
+def _variant_cell(arm: str, variant: str, counts: dict) -> CellRecord:
+    cell = _cell("t1", arm, work=1.0, prompt=10, completion=2, counts=counts)
+    cell.variant_id = variant
+    return cell
+
+
+def test_a_p0_page_half_is_not_credited_with_publishing_at_h():
+    """page_batches_reduced counts vendor batches too, and C_ID's page half is plain P0.
+
+    Left ungated, a C-only arm records batches reduced with no fallbacks and is reported as
+    publishing at H with a perfect rate -- while having no H treatment whatsoever. That would
+    contradict the study's central finding in the study's own table.
+    """
+    summary = summarize_arm([_variant_cell(
+        "C_ID", "P0+C01",
+        _hc_counts(h_batches=2, h_fallbacks=0, c_reduced=3, c_failed=1))])
+    assert summary.h_opportunities == 0 and summary.h_publications == 0
+    assert summary.h_publication_rate is None, "no H treatment is not a zero rate"
+    assert summary.c_publication_rate == 0.75
+
+
+def test_a_p0_close_half_is_not_credited_with_publishing_at_c():
+    summary = summarize_arm([_variant_cell(
+        "H_MARKDOWN_ID", "H02+P0",
+        _hc_counts(h_batches=4, h_fallbacks=1, c_reduced=2, c_failed=0))])
+    assert summary.c_opportunities == 0 and summary.c_publication_rate is None
+    assert summary.h_publications == 3 and summary.h_opportunities == 4
