@@ -1270,7 +1270,10 @@ def replay_selectors(
     execution_binding = tree_sha256(Path(shapeflow.__file__).parent)
     digest = tokenizer_sha256(setup.tokenizer)
 
-    out_root = Path(settings.data_root) / "selector_trials"
+    # Under the runner's own runs directory: the data root is root-owned, and the identity that
+    # can read the checkpoints being replayed is the runner. Same reason the census writes here.
+    settings.ensure_paths("runs")
+    out_root = settings.path("runs") / "selector_trials"
     out_root.mkdir(parents=True, exist_ok=True)
 
     seen = written = skipped = unreconstructable = 0
