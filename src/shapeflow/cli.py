@@ -1180,8 +1180,13 @@ def freeze2_census(
         },
     }
 
-    out = _REPO / "reports" / "gates" / "FREEZE2_CENSUS.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
+    # Written into the runner's own tree, not into reports/gates. The isolation is real: the
+    # runner can read the checkpoints and cell outputs this measures and cannot write a gate
+    # file, while the steward can write gate files and cannot read runner artifacts. So the
+    # measurement is produced here and promoted to a gate separately -- the same two steps as
+    # run-bcplus -> grade-bcplus -> bcplus-competence.
+    settings.ensure_paths("runs")
+    out = settings.path("runs") / "FREEZE2_CENSUS.json"
     out.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     typer.echo(f"\nwrote {out}")
     typer.echo(f"  batches reconstructed : {batch_complete}/{batch_total} "
