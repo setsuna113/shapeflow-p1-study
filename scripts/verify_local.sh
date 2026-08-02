@@ -61,6 +61,15 @@ echo "== lint (defect rules) =="
 # would be a large untested diff for no correctness gain. These families are the ones that
 # catch defects rather than style, and they pass today -- so this gate is real and enforced,
 # instead of aspirational and skipped. Run `ruff check .` for the full picture.
+#
+# F401 (unused import) is the notable absence, and it is a defect family rather than a stylistic
+# one: deleting a function silently leaves its imports behind and this gate stays green. That is
+# exactly what happened when five dead symbols were removed. It is excluded only because 36
+# pre-existing sites would have to be fixed first, which is the mass rewrite the paragraph above
+# declines -- not because unused imports are acceptable. (36, not 33: the three imports that
+# deletion orphaned were never part of the pre-existing set, so they must not be netted off it.)
+# Check it by hand after any deletion:
+#   .venv/bin/python -m ruff check <changed files> --select F401
 "$PY" -m ruff check . --select E9,F63,F7,F82,F811,F841,B006,B023,S102,S307,S608 \
   || { echo "LINT FAILED"; exit 1; }
 
@@ -72,6 +81,12 @@ echo "== leakage firewall (no evaluator material may reach the treatment path) =
 # treatment path that can reach them is scored on its own answer key, and the failure is invisible
 # in the results because a leaked run looks like a very good run.
 "$PY" tools/ci/check_leakage_firewall.py || { echo "LEAKAGE FIREWALL CHECK FAILED"; exit 1; }
+
+echo "== cited artifacts (a report's evidence must ship with the report) =="
+# reports/* is gitignored and the finals are force-added by hand, so a newly generated artifact
+# is skipped by `git add -A` in silence. A report citing a file nobody else receives states a
+# number whose backing is unverifiable.
+"$PY" tools/ci/check_cited_artifacts.py || { echo "CITED ARTIFACT CHECK FAILED"; exit 1; }
 
 echo "== unit + property tests =="
 "$PY" -m pytest tests -q -p no:cacheprovider

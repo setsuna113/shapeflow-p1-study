@@ -682,14 +682,3 @@ def cells_needing_work(manifest: ScheduleManifest, states: dict) -> list[Cell]:
         c for c in manifest.cells
         if states.get(_cell_key(c)) not in TERMINAL_STATES
     ]
-
-
-def optional_second_seed_tasks(manifest: ScheduleManifest) -> list[str]:
-    return sorted({b.task_id for b in manifest.blocks if b.replicate_id != "0"})
-
-
-def find_block(manifest: ScheduleManifest, block_id: str) -> Block | None:
-    for block in manifest.blocks:
-        if block.block_id == block_id:
-            return block
-    return None

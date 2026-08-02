@@ -828,6 +828,11 @@ def grade_bcplus(
         "lanes": lane_ids,
         "schedules": schedules,
         "execution_binding_sha256": binding.digest,
+        # The namespace the cells were actually read from, which is the live binding unless
+        # --ran-under-binding moved it. Recorded because it is the one field a reader needs to
+        # re-run this analysis and get this table: without it the artifact names the binding of
+        # the tree that graded the run, under which not one of its cells was produced.
+        "cells_committed_under_sha256": namespace,
         "protocol_document_sha256": binding.protocol_sha,
         "evaluator_source_sha256": queries.source_sha256,
         "grading": grading,

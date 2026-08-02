@@ -41,6 +41,30 @@ _HEADLINE = ("accuracy", "evidence_recall", "interval_union_seconds",
              "prompt_tokens", "completion_tokens", "e2e_latency_seconds")
 
 
+def _binding_lines(context: Mapping) -> list[str]:
+    """The binding block: one line normally, two when the analysis ran under a different one.
+
+    Analysis normally runs under the binding the run committed under, the two digests are the
+    same string, and "execution binding" names it unambiguously. When `--ran-under-binding` moved
+    it they differ, and the live digest is then the tree that *graded* the run rather than the one
+    that produced any of its cells -- the reading a reader would otherwise take.
+
+    In that case the label changes rather than merely gaining a sibling. Everywhere else -- in
+    `P1_FINDINGS.md`, in the approval chain -- "execution binding" means the binding a *cell* was
+    committed under, so leaving the analysis-time digest under that name would leave one phrase
+    denoting two different hashes across documents a reader is meant to cross-reference.
+    """
+    live = str(context.get("execution_binding_sha256", ""))
+    cells = str(context.get("cells_committed_under_sha256", ""))
+    if not cells or cells == live:
+        return [f"- Execution binding: `{live[:16]}`"]
+    return [
+        f"- Analysis binding: `{live[:16]}` (the tree that graded the run)",
+        f"- Execution binding: `{cells[:16]}` -- the cells were committed under this; "
+        f"re-run with `--ran-under-binding {cells}`",
+    ]
+
+
 def _n(value, digits: int = 3) -> str:
     if value is None:
         return "--"
@@ -79,7 +103,7 @@ def render_markdown(report: Mapping, *, title: str = "BrowseComp-Plus: P1 agains
         f"- Tasks: {len(report.get('tasks') or ())}",
         f"- Run: `{context.get('run_id', '')}` layer `{context.get('layer', '')}`"
         f" lanes `{context.get('lanes')}`",
-        f"- Execution binding: `{str(context.get('execution_binding_sha256', ''))[:16]}`",
+        *_binding_lines(context),
         f"- Answer key: `{str(context.get('evaluator_source_sha256', ''))[:16]}`",
         f"- Bootstrap: {(report.get('bootstrap') or {}).get('resamples')} resamples, "
         f"seed {(report.get('bootstrap') or {}).get('seed')}",
@@ -98,6 +122,12 @@ def render_markdown(report: Mapping, *, title: str = "BrowseComp-Plus: P1 agains
     for arm in sorted(contrasts):
         lines += _contrast_section(arm, contrasts[arm], baseline=baseline)
     lines += _reading(contrasts, arms, baseline=baseline)
+    # Every section builder ends with "" so the next one starts after a blank line, which leaves
+    # a trailing empty on the last section and a blank line at end of file. The repository's
+    # whitespace gate rejects that, so a generated report could not be committed as generated --
+    # and an artifact that has to be hand-edited before it can ship is no longer the artifact.
+    while lines and not lines[-1]:
+        lines.pop()
     return "\n".join(lines) + "\n"
 
 
@@ -221,7 +251,15 @@ def _reading(contrasts: Mapping, arms: Mapping, *, baseline: str) -> list[str]:
     for arm in sorted(contrasts):
         metrics = contrasts[arm].get("metrics") or {}
         works, fails, flat = [], [], []
-        for key, metric in metrics.items():
+        # Iterate the label registry, not the caller's dict. The JSON artifact is written with
+        # sorted keys and the markdown is rendered from the in-memory report, so reading the
+        # JSON back and re-rendering used to produce a different ordering from the same data --
+        # a report that cannot be re-derived byte-for-byte from its own record. Any metric the
+        # registry does not name is appended, so a new endpoint still appears.
+        ordered = [k for k in _LABELS if k in metrics]
+        ordered += [k for k in metrics if k not in _LABELS]
+        for key in ordered:
+            metric = metrics[key]
             if not metric.get("reportable"):
                 continue
             label = _LABELS.get(key, (key, "neutral"))[0]

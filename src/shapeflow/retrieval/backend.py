@@ -16,7 +16,7 @@ it lives in another process with a torch dependency this package deliberately do
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Mapping, Optional
+from typing import Callable, Mapping
 
 from ..hashing import derive_id
 from ..world.search_backend import SearchRecord
@@ -116,9 +116,3 @@ def _snippet_of(text: str, *, chars: int = 320) -> str:
         _, _, rest = rest.partition("---")
         body = rest or text
     return " ".join(body.split())[:chars]
-
-
-def make_backend(index: DenseIndex, corpus: CorpusStore, encode: EncodeFn,
-                 *, cache: Optional[dict] = None) -> BrowseCompPlusBackend:
-    return BrowseCompPlusBackend(index=index, corpus=corpus, encode=encode,
-                                 cache=cache if cache is not None else {})

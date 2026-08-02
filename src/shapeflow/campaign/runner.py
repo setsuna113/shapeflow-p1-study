@@ -37,7 +37,6 @@ from ..canonical import canonical_json
 from ..evidence.model_tokenizer import load_frozen_tokenizer
 from ..evidence.shared_view import apply_shared_budget
 from ..experiment.ledger import TERMINAL_STATES, Ledger
-from ..experiment.state_machine import Phase
 from ..hashing import sha256_hex
 from ..object_store import ObjectStore
 from ..strategies.factory import StrategyFactory, load_registry
@@ -1006,7 +1005,3 @@ def available_tasks(settings: Settings, split: str) -> list[str]:
         if body.get("split") == split and body["task_id"] in frozen:
             ids.append(body["task_id"])
     return ids
-
-
-def phase_for(name: str) -> Phase:
-    return Phase(name)
