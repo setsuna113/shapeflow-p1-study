@@ -37,7 +37,6 @@ from ..canonical import canonical_json
 from ..evidence.model_tokenizer import load_frozen_tokenizer
 from ..evidence.shared_view import apply_shared_budget
 from ..experiment.ledger import TERMINAL_STATES, Ledger
-from ..experiment.state_machine import Phase
 from ..hashing import sha256_hex
 from ..object_store import ObjectStore
 from ..strategies.factory import StrategyFactory, load_registry

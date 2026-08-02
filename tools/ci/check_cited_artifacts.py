@@ -40,9 +40,19 @@ _PLACEHOLDER = re.compile(r"[<>*{}]")
 
 
 def tracked_files() -> set[str]:
-    out = subprocess.run(["git", "-C", str(REPO), "ls-files"],
-                         capture_output=True, text=True, check=True).stdout
-    return set(out.split("\n")) - {""}
+    """Every path git is tracking, or a clean refusal.
+
+    ``check=True`` raised a CalledProcessError outside a checkout, which reads as the gate being
+    broken rather than as the gate being inapplicable -- and a gate that looks broken is one
+    people route around.
+    """
+    result = subprocess.run(["git", "-C", str(REPO), "ls-files"],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        raise SystemExit(
+            f"cited-artifact check cannot run: `git ls-files` failed in {REPO} "
+            f"({result.stderr.strip() or 'not a git repository'})")
+    return set(result.stdout.split("\n")) - {""}
 
 
 def main() -> int:

@@ -16,7 +16,7 @@ it lives in another process with a torch dependency this package deliberately do
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Mapping, Optional
+from typing import Callable, Mapping
 
 from ..hashing import derive_id
 from ..world.search_backend import SearchRecord

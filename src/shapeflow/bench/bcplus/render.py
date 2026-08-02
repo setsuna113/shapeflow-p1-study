@@ -41,6 +41,22 @@ _HEADLINE = ("accuracy", "evidence_recall", "interval_union_seconds",
              "prompt_tokens", "completion_tokens", "e2e_latency_seconds")
 
 
+def _cells_binding_line(context: Mapping) -> list[str]:
+    """Name the namespace the cells came from, but only when it is not the live binding.
+
+    Analysis normally runs under the binding the run committed under and the two are the same
+    string, so printing it always would be noise. When `--ran-under-binding` moved it they differ,
+    and then the header's `Execution binding` is the tree that *graded* the run rather than the
+    one that produced any of its cells -- which is the reading a reader would otherwise take.
+    """
+    live = str(context.get("execution_binding_sha256", ""))
+    cells = str(context.get("cells_committed_under_sha256", ""))
+    if not cells or cells == live:
+        return []
+    return [f"- Cells committed under: `{cells[:16]}` "
+            f"(re-run with `--ran-under-binding {cells}`)"]
+
+
 def _n(value, digits: int = 3) -> str:
     if value is None:
         return "--"
@@ -81,6 +97,7 @@ def render_markdown(report: Mapping, *, title: str = "BrowseComp-Plus: P1 agains
         f" lanes `{context.get('lanes')}`",
         f"- Execution binding: `{str(context.get('execution_binding_sha256', ''))[:16]}`",
         f"- Answer key: `{str(context.get('evaluator_source_sha256', ''))[:16]}`",
+        *_cells_binding_line(context),
         f"- Bootstrap: {(report.get('bootstrap') or {}).get('resamples')} resamples, "
         f"seed {(report.get('bootstrap') or {}).get('seed')}",
         "",

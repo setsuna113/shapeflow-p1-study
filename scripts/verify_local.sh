@@ -61,6 +61,13 @@ echo "== lint (defect rules) =="
 # would be a large untested diff for no correctness gain. These families are the ones that
 # catch defects rather than style, and they pass today -- so this gate is real and enforced,
 # instead of aspirational and skipped. Run `ruff check .` for the full picture.
+#
+# F401 (unused import) is the notable absence, and it is a defect family rather than a stylistic
+# one: deleting a function silently leaves its imports behind and this gate stays green. That is
+# exactly what happened when five dead symbols were removed. It is excluded only because 33
+# pre-existing sites would have to be fixed first, which is the mass rewrite the paragraph above
+# declines -- not because unused imports are acceptable. Check it by hand after any deletion:
+#   .venv/bin/python -m ruff check <changed files> --select F401
 "$PY" -m ruff check . --select E9,F63,F7,F82,F811,F841,B006,B023,S102,S307,S608 \
   || { echo "LINT FAILED"; exit 1; }
 

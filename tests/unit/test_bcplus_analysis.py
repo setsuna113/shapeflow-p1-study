@@ -13,6 +13,8 @@ publishable-looking table:
 
 from __future__ import annotations
 
+import json
+
 from shapeflow.bench.bcplus.analysis import (
     CellRecord,
     build_report,
@@ -270,3 +272,56 @@ def test_a_run_id_that_escapes_its_root_is_refused():
     for bad in ("../..", "a/b", "", ".hidden", "x" * 129, "with space", "/abs"):
         with pytest.raises(ValueError, match="one safe path component"):
             safe_scope_component(bad, name="run_id")
+
+
+def test_the_markdown_is_reproducible_from_the_json_it_ships_with():
+    """The two render paths must agree, and neither may depend on the hash seed.
+
+    The JSON artifact is written with sorted keys while the markdown is rendered from the
+    in-memory report, so `_reading` iterating the caller's metrics dict produced one ordering
+    when the tool wrote the pair and a different one when anybody re-rendered from the saved
+    record. A report whose own evidence file does not reproduce it is the failure the
+    `content_sha256` and `source_refs` fields exist to prevent.
+    """
+    records = _pair(6, treatment_correct=True, baseline_correct=False,
+                    treatment_work=4.0, baseline_work=10.0)
+    report = build_report(records, resamples=100)
+
+    from_memory = render_markdown(report)
+    from_disk = render_markdown(json.loads(json.dumps(report, sort_keys=True)))
+    assert from_memory == from_disk, (
+        "re-rendering from the sorted-key JSON must reproduce the markdown byte for byte")
+
+    # Endpoint-hierarchy order, not alphabetical: the primary work endpoint leads.
+    reading = from_memory.split("## Reading", 1)[1]
+    assert reading.index("GPU-busy seconds") < reading.index("Prompt tokens")
+
+
+def test_the_markdown_does_not_end_with_a_blank_line():
+    """Every section builder ends with "", so the last one used to leave a blank line at EOF --
+    which this repository's own whitespace gate rejects, making a generated report uncommittable
+    as generated."""
+    report = build_report(_pair(4, treatment_correct=True, baseline_correct=True,
+                                treatment_work=4.0, baseline_work=10.0), resamples=100)
+    text = render_markdown(report)
+    assert text.endswith("\n") and not text.endswith("\n\n")
+
+
+def test_the_namespace_the_cells_came_from_is_named_when_it_is_not_the_live_binding():
+    """`--ran-under-binding` reads cells from a namespace the live approval is not.
+
+    Without this the header records the binding of the tree that *graded* the run, under which
+    not one of the cells in the file was produced, and the artifact cannot say what to pass to
+    reproduce itself.
+    """
+    records = _pair(3, treatment_correct=True, baseline_correct=True,
+                    treatment_work=4.0, baseline_work=10.0)
+    moved = build_report(records, resamples=100, context={
+        "execution_binding_sha256": "b" * 64, "cells_committed_under_sha256": "a" * 64})
+    assert f"--ran-under-binding {'a' * 64}" in render_markdown(moved)
+    assert "Cells committed under: `" + "a" * 16 + "`" in render_markdown(moved)
+
+    # Same string is the normal case, and repeating it would be noise.
+    same = build_report(records, resamples=100, context={
+        "execution_binding_sha256": "b" * 64, "cells_committed_under_sha256": "b" * 64})
+    assert "Cells committed under" not in render_markdown(same)

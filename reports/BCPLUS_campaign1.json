@@ -225,8 +225,9 @@
   },
   "cells_committed": 520,
   "cells_total": 560,
-  "content_sha256": "63cbda85b9fa9d7bf2922e255ac0ccbace481a0922ee0c62eeed8cbaf2a8721c",
+  "content_sha256": "6979963ca2f96d5af9d5dec2d73bf5f5b202abf30de3b295126a705662789653",
   "context": {
+    "cells_committed_under_sha256": "c091c41f1a0ea0280eb855e3909ff1dea512c81e09d24feca4ee3e90a4242f02",
     "evaluator_source_sha256": "0374946363a5c59f4d3707fa9c31b9e5152269c0f024668a71687dda4e48a85e",
     "execution_binding_sha256": "3e73c63194e7a7fd3b8b3e3fee47cd3ec7e061911432c4eec5a9467f1075c4ee",
     "grading": {

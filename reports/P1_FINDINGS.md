@@ -394,3 +394,13 @@ fed them. Gate verdicts are in `reports/gates/`; the per-lane ledger and object 
 `$DATA_ROOT/runner-lane{n}/` and are not in this repository.
 
 A run other than this one writes `reports/BCPLUS_<run-id>.{json,md}`.
+
+**One amendment to that artifact is on the record.** It was written without
+`cells_committed_under_sha256`, so it named only the binding of the tree that *graded* the run —
+`3e73c63194e7`, under which not one of its cells was produced — and could not say what to pass to
+reproduce itself. The field was added in place and `content_sha256` recomputed with the same
+canonical function `build_report` uses, after verifying the artifact still hashed to its recorded
+digest (`63cbda85b9fa`, now `6979963ca2f9`). It was amended rather than regenerated because the
+value is known exactly while re-deriving it would mean 520 fresh judge calls against an engine
+stack that has since been shut down. No number in the file changed; the code that writes it now
+records the field, so no later artifact needs this note.
