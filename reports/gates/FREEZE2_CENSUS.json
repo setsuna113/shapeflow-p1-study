@@ -1,0 +1,234 @@
+{
+  "batch_geometry": {
+    "content_pages_per_batch": {
+      "max": 33,
+      "mean": 9.07,
+      "min": 5,
+      "n": 1808,
+      "p50": 8,
+      "p90": 15,
+      "p95": 19,
+      "p99": 23
+    },
+    "siblings_per_batch": {
+      "1": 1808
+    }
+  },
+  "decided_at_utc": "2026-08-02T18:16:27Z",
+  "gate": "FREEZE2_CENSUS",
+  "inputs": {
+    "checkpoint_roots": [
+      "/storage/nvme/shapeflow-data/runner/checkpoints",
+      "/storage/nvme/shapeflow-data/runner-lane0/checkpoints",
+      "/storage/nvme/shapeflow-data/runner-lane1/checkpoints",
+      "/storage/nvme/shapeflow-data/runner-lane2/checkpoints",
+      "/storage/nvme/shapeflow-data/runner-lane3/checkpoints"
+    ],
+    "corpus_dir": "/storage/sata/shapeflow/benchdata/browsecomp-plus/corpus/data",
+    "corpus_documents": 100195,
+    "corpus_shard_sha256": [
+      "7c07f9e23b1ca548110fd831714cadc67d44db5223bace6e45fcaa795d3153d0",
+      "e92d8202e0f656a85b262153dbcd22ecf80ea2d0c96d9884f9c8e25480b869ab",
+      "0e4113a4503342527258d8f2c49877747435f3e65bfe1f7306b4f488c8d225fe",
+      "0ceea5e703332a2e3ce700f641273400d84583fad84b659d3248ed06d3a9fef3",
+      "15b62914ddc3de6946893c770f07d5d84d29646e833ca1447955668f2b57940c",
+      "a9a75708ad37c522e93a774e5a968a3129e12b0559971c8f950a5628e0201df0",
+      "290062b60c1a6ebba7d5469a37a431f0a2596e68788295284b1b2d35db07b62c"
+    ],
+    "object_store_roots": [
+      "/storage/nvme/shapeflow-data/runner/object_store",
+      "/storage/nvme/shapeflow-data/runner-lane0/object_store",
+      "/storage/nvme/shapeflow-data/runner-lane1/object_store",
+      "/storage/nvme/shapeflow-data/runner-lane2/object_store",
+      "/storage/nvme/shapeflow-data/runner-lane3/object_store"
+    ],
+    "occurrences_indexed": 7990,
+    "shared_content_budget": {
+      "max_chars": 50000,
+      "max_tokens": 23552
+    },
+    "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+  },
+  "reconstruction": {
+    "batch_reconstruction_rate": 0.9027,
+    "batches_fully_reconstructed": 1632,
+    "h_checkpoints": 1808,
+    "incomplete_examples": [
+      {
+        "checkpoint": "01fa49cf3b68e4b5",
+        "statuses": {
+          "NO_DOCID": 10
+        },
+        "task_id": "T1ff9b112c4277a"
+      },
+      {
+        "checkpoint": "020af8ab133f752f",
+        "statuses": {
+          "NO_DOCID": 10
+        },
+        "task_id": "T29c3ac216deffc"
+      },
+      {
+        "checkpoint": "02c43bed175ef718",
+        "statuses": {
+          "NO_DOCID": 13
+        },
+        "task_id": "T1f0237fd88adc8"
+      },
+      {
+        "checkpoint": "04a6ab3446be2f22",
+        "statuses": {
+          "NO_DOCID": 12
+        },
+        "task_id": "T114aaa1d55b0cb"
+      },
+      {
+        "checkpoint": "054510cd26e3ad47",
+        "statuses": {
+          "NO_DOCID": 13
+        },
+        "task_id": "T1f0237fd88adc8"
+      },
+      {
+        "checkpoint": "075dc28a67294cf9",
+        "statuses": {
+          "NO_DOCID": 10
+        },
+        "task_id": "T29c3ac216deffc"
+      },
+      {
+        "checkpoint": "0995a47f5ff16f8e",
+        "statuses": {
+          "NO_DOCID": 12
+        },
+        "task_id": "T114aaa1d55b0cb"
+      },
+      {
+        "checkpoint": "0a05fe4c293a3d1f",
+        "statuses": {
+          "NO_DOCID": 13
+        },
+        "task_id": "T1f0237fd88adc8"
+      },
+      {
+        "checkpoint": "0bfa72b70541de61",
+        "statuses": {
+          "NO_DOCID": 10
+        },
+        "task_id": "T29c3ac216deffc"
+      },
+      {
+        "checkpoint": "0c72de8c54a1a477",
+        "statuses": {
+          "NO_DOCID": 10
+        },
+        "task_id": "T29c3ac216deffc"
+      },
+      {
+        "checkpoint": "0d12c657c2478213",
+        "statuses": {
+          "NO_DOCID": 12
+        },
+        "task_id": "T114aaa1d55b0cb"
+      },
+      {
+        "checkpoint": "0e64b463d90eee84",
+        "statuses": {
+          "NO_DOCID": 10
+        },
+        "task_id": "T29c3ac216deffc"
+      },
+      {
+        "checkpoint": "11985096f42458bc",
+        "statuses": {
+          "NO_DOCID": 13
+        },
+        "task_id": "T1f0237fd88adc8"
+      },
+      {
+        "checkpoint": "11b6dab640a578f7",
+        "statuses": {
+          "NO_DOCID": 12
+        },
+        "task_id": "T114aaa1d55b0cb"
+      },
+      {
+        "checkpoint": "15ec4086352545a3",
+        "statuses": {
+          "NO_DOCID": 13
+        },
+        "task_id": "T1f0237fd88adc8"
+      },
+      {
+        "checkpoint": "16be89ff3b20b64f",
+        "statuses": {
+          "NO_DOCID": 10
+        },
+        "task_id": "T29c3ac216deffc"
+      },
+      {
+        "checkpoint": "17fe1c4c23e1f233",
+        "statuses": {
+          "NO_DOCID": 13
+        },
+        "task_id": "T1f0237fd88adc8"
+      },
+      {
+        "checkpoint": "18f278639e2ce2f1",
+        "statuses": {
+          "NO_DOCID": 12
+        },
+        "task_id": "T1f0237fd88adc8"
+      },
+      {
+        "checkpoint": "1b70d396675429fa",
+        "statuses": {
+          "NO_DOCID": 12
+        },
+        "task_id": "T114aaa1d55b0cb"
+      },
+      {
+        "checkpoint": "1ec88862507ce3fb",
+        "statuses": {
+          "NO_DOCID": 13
+        },
+        "task_id": "T1f0237fd88adc8"
+      }
+    ],
+    "page_status": {
+      "NO_DOCID": 2032,
+      "VERIFIED": 14367
+    },
+    "page_verification_rate": 0.8761,
+    "snippet_only_pages": 0
+  },
+  "whole_batch_view": {
+    "candidates": {
+      "max": 14168,
+      "mean": 1184.64,
+      "min": 87,
+      "n": 1632,
+      "p50": 913,
+      "p90": 2278,
+      "p95": 2848,
+      "p99": 5422
+    },
+    "over_candidate_cap": 1632,
+    "over_candidate_cap_rate": 1.0,
+    "over_window": 1011,
+    "over_window_rate": 0.6195,
+    "prompt_tokens": {
+      "max": 261004,
+      "mean": 46367.23,
+      "min": 4835,
+      "n": 1632,
+      "p50": 37094,
+      "p90": 89198,
+      "p95": 107143,
+      "p99": 147680
+    },
+    "selected_ids_cap": 64,
+    "views_measured": 1632,
+    "window_ceiling": 32000
+  }
+}
