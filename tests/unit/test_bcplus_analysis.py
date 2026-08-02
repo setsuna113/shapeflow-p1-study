@@ -22,10 +22,32 @@ from shapeflow.bench.bcplus.analysis import (
 from shapeflow.bench.bcplus.render import render_markdown
 
 
+def _runner_label(page_variant: str, close_variant: str) -> str:
+    """The ``variant_id`` a real cell carries: the treated halves only, joined by ``+``.
+
+    Reproduced here because the encoding is the trap. A both-boundary arm stamps ``"H02+C01"``
+    and splits cleanly into a page half and a close half; a C-only arm stamps a bare ``"C01"``,
+    whose first ``+``-separated field is a *close* variant sitting where a page variant would be.
+    Analysis that parsed this label credited every C-only arm with a perfect publication rate at
+    H -- the boundary it does not touch -- and printed ``--`` at C, the boundary under test.
+    """
+    treated = [v for v in (page_variant, close_variant) if v != "P0"]
+    return "+".join(treated) if treated else "P0"
+
+
 def _cell(task: str, arm: str, *, work: float, prompt: int, completion: int,
-          correct=None, recall=None, state: str = "COMMITTED", counts=None) -> CellRecord:
+          correct=None, recall=None, state: str = "COMMITTED", counts=None,
+          page_variant: str = "P0", close_variant: str = "P0",
+          variant_id: str | None = None) -> CellRecord:
     return CellRecord(
-        task_id=task, arm_id=arm, variant_id=arm, replicate_id="0", seed=1, state=state,
+        task_id=task, arm_id=arm,
+        # Defaults to the runner's own lossy label: the two variants joined, with a ``P0`` half
+        # dropped. Tests pass the boundary variants separately and on purpose, because the label
+        # is not what the analysis may read.
+        variant_id=variant_id if variant_id is not None else _runner_label(
+            page_variant, close_variant),
+        page_variant=page_variant, close_variant=close_variant,
+        replicate_id="0", seed=1, state=state,
         final_report="x", error="", counts=counts or {"search_queries": 3},
         work={"interval_union_seconds": work,
               "tokens": {"prompt_tokens": prompt, "completion_tokens": completion,
@@ -42,7 +64,7 @@ def _pair(n: int, *, treatment_correct, baseline_correct, treatment_work, baseli
         records.append(_cell(task, "P0", work=baseline_work, prompt=1000, completion=800,
                              correct=baseline_correct, recall=0.5))
         records.append(_cell(task, "H", work=treatment_work, prompt=1400, completion=200,
-                             correct=treatment_correct, recall=0.5,
+                             correct=treatment_correct, recall=0.5, page_variant="H02",
                              counts={"search_queries": 3, "page_batches_reduced": 2,
                                      "page_fallbacks": 0}))
     return records
@@ -105,7 +127,7 @@ def test_an_inert_arm_shows_zero_publications_before_any_effect_is_shown():
         records.append(_cell(f"t{i}", "P0", work=10, prompt=1000, completion=800, correct=True,
                              recall=0.5))
         records.append(_cell(f"t{i}", "H", work=2, prompt=1000, completion=10, correct=True,
-                             recall=0.5,
+                             recall=0.5, page_variant="H02",
                              counts={"search_queries": 3, "page_batches_reduced": 2,
                                      "page_fallbacks": 2}))
     report = build_report(records, resamples=100)
@@ -125,12 +147,6 @@ def test_the_render_never_sums_prompt_and_completion_tokens():
     assert "Total tokens" not in markdown
 
 
-def _variant_cell_at(task: str, arm: str, variant: str, **kw) -> CellRecord:
-    cell = _cell(task, arm, **kw)
-    cell.variant_id = variant
-    return cell
-
-
 def _hc_counts(*, h_batches: int, h_fallbacks: int, c_reduced: int, c_failed: int) -> dict:
     return {"search_queries": 3, "page_batches_reduced": h_batches,
             "page_fallbacks": h_fallbacks, "close_reduced": c_reduced,
@@ -146,8 +162,8 @@ def test_a_dead_h_boundary_is_not_covered_by_a_live_c_boundary():
     publishes and the H selector falls back every time.
     """
     counts = _hc_counts(h_batches=6, h_fallbacks=6, c_reduced=3, c_failed=1)
-    cell = _cell("t1", "H_PLUS_C", work=1.0, prompt=10, completion=2, counts=counts)
-    cell.variant_id = "H02+C01"
+    cell = _cell("t1", "H_PLUS_C", work=1.0, prompt=10, completion=2, counts=counts,
+                 page_variant="H02", close_variant="C01")
     summary = summarize_arm([cell])
     assert summary.h_publications == 0 and summary.h_opportunities == 6
     assert summary.c_publications == 3 and summary.c_opportunities == 4
@@ -159,9 +175,8 @@ def test_a_dead_h_boundary_is_not_covered_by_a_live_c_boundary():
 
 def test_an_arm_with_no_treatment_at_a_boundary_reports_none_not_zero():
     """Absent and never-published produce the same count and mean opposite things."""
-    cell = _cell("t1", "H_MARKDOWN_ID", work=1.0, prompt=10, completion=2,
+    cell = _cell("t1", "H_MARKDOWN_ID", work=1.0, prompt=10, completion=2, page_variant="H02",
                  counts=_hc_counts(h_batches=4, h_fallbacks=4, c_reduced=0, c_failed=0))
-    cell.variant_id = "H02+P0"
     summary = summarize_arm([cell])
     assert summary.h_publication_rate == 0.0, "ran at H and published nothing"
     assert summary.c_publication_rate is None, "never ran at C at all"
@@ -172,14 +187,12 @@ def test_the_report_names_the_boundary_that_published_nothing():
     for i in range(5):
         records += [
             _cell(f"t{i}", "P0", work=2.0 + i, prompt=100 + i, completion=20 + i),
-            _variant_cell_at(f"t{i}", "H_MARKDOWN_ID", "H02+P0", work=3.0 + i,
-                             prompt=150 + i, completion=22 + i,
-                             counts=_hc_counts(h_batches=4, h_fallbacks=4,
-                                               c_reduced=0, c_failed=0)),
-            _variant_cell_at(f"t{i}", "C_ID", "P0+C01", work=2.0 + i,
-                             prompt=98 + i, completion=19 + i,
-                             counts=_hc_counts(h_batches=2, h_fallbacks=0,
-                                               c_reduced=3, c_failed=1)),
+            _cell(f"t{i}", "H_MARKDOWN_ID", work=3.0 + i, prompt=150 + i, completion=22 + i,
+                  page_variant="H02",
+                  counts=_hc_counts(h_batches=4, h_fallbacks=4, c_reduced=0, c_failed=0)),
+            _cell(f"t{i}", "C_ID", work=2.0 + i, prompt=98 + i, completion=19 + i,
+                  close_variant="C01",
+                  counts=_hc_counts(h_batches=2, h_fallbacks=0, c_reduced=3, c_failed=1)),
         ]
     text = render_markdown(build_report(records, baseline_arm="P0", resamples=100))
     assert "Nothing was published at H (WEBPAGE_P1)" in text
@@ -191,10 +204,8 @@ def test_the_report_names_the_boundary_that_published_nothing():
         "C_ID's page half is plain P0; it must not be credited with publishing at H")
 
 
-def _variant_cell(arm: str, variant: str, counts: dict) -> CellRecord:
-    cell = _cell("t1", arm, work=1.0, prompt=10, completion=2, counts=counts)
-    cell.variant_id = variant
-    return cell
+def _variant_cell(arm: str, counts: dict, **variants) -> CellRecord:
+    return _cell("t1", arm, work=1.0, prompt=10, completion=2, counts=counts, **variants)
 
 
 def test_a_p0_page_half_is_not_credited_with_publishing_at_h():
@@ -205,8 +216,8 @@ def test_a_p0_page_half_is_not_credited_with_publishing_at_h():
     contradict the study's central finding in the study's own table.
     """
     summary = summarize_arm([_variant_cell(
-        "C_ID", "P0+C01",
-        _hc_counts(h_batches=2, h_fallbacks=0, c_reduced=3, c_failed=1))])
+        "C_ID", _hc_counts(h_batches=2, h_fallbacks=0, c_reduced=3, c_failed=1),
+        close_variant="C01")])
     assert summary.h_opportunities == 0 and summary.h_publications == 0
     assert summary.h_publication_rate is None, "no H treatment is not a zero rate"
     assert summary.c_publication_rate == 0.75
@@ -214,10 +225,32 @@ def test_a_p0_page_half_is_not_credited_with_publishing_at_h():
 
 def test_a_p0_close_half_is_not_credited_with_publishing_at_c():
     summary = summarize_arm([_variant_cell(
-        "H_MARKDOWN_ID", "H02+P0",
-        _hc_counts(h_batches=4, h_fallbacks=1, c_reduced=2, c_failed=0))])
+        "H_MARKDOWN_ID", _hc_counts(h_batches=4, h_fallbacks=1, c_reduced=2, c_failed=0),
+        page_variant="H02")])
     assert summary.c_opportunities == 0 and summary.c_publication_rate is None
     assert summary.h_publications == 3 and summary.h_opportunities == 4
+
+
+def test_the_boundary_is_read_from_the_variant_not_from_the_stamped_label():
+    """The regression the campaign's own report was printed with.
+
+    Every test above passed while the live analysis credited `C_ID` and `C_CPU_CONTROL` with a
+    100% publication rate at H and `--` at C, because they fed the parser ``"P0+C01"`` -- a
+    string no runner emits. A C-only cell is stamped with a bare ``"C01"``, which the parser read
+    as a *page* variant. So the label is pinned to the real one here, and the boundary counts
+    must come out the same as the test above.
+    """
+    cell = _variant_cell(
+        "C_ID", _hc_counts(h_batches=2, h_fallbacks=0, c_reduced=3, c_failed=1),
+        close_variant="C01")
+    assert cell.variant_id == "C01", "this is what the runner actually stamps on a C-only cell"
+    summary = summarize_arm([cell])
+    assert summary.h_publication_rate is None, (
+        "a bare close-variant label must not be read as a page variant")
+    assert summary.c_publications == 3 and summary.c_opportunities == 4
+    text = render_markdown({"arms": {"C_ID": summary.content()},
+                            "contrasts": {}, "baseline_arm": "P0", "cells": []})
+    assert "| `C_ID` | -- | 3 / 4 (75%) |" in text
 
 
 def test_a_run_id_that_escapes_its_root_is_refused():
