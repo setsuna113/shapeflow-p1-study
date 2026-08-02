@@ -151,11 +151,46 @@ asymmetry is worth recording: the registered endpoint gave the weaker evidence.
 
 ---
 
-## 4. Accuracy
+## 4. Accuracy — reported, and not established
 
-*Pending — the official grader is running over all 520 cells. This section will carry the
-per-arm accuracy and the paired contrasts, under the interpretation already committed to in
-`reports/gates/COMPETENCE_PILOT.md`: reported, and reported as* **not established** *(section 7).*
+All 520 committed cells were graded by the benchmark's official grader. None failed to grade.
+
+| arm | graded | correct | accuracy |
+|---|---|---|---|
+| `H_PLUS_C` | 74 | 8 | 0.108 |
+| `H_MARKDOWN_ID` | 77 | 8 | 0.104 |
+| `H_PROSE_CONTROL` | 77 | 8 | 0.104 |
+| `H_CPU_CONTROL` | 80 | 8 | 0.100 |
+| `P0` | 74 | 7 | **0.095** |
+| `C_ID` | 76 | 7 | 0.092 |
+| `C_CPU_CONTROL` | 62 | 2 | 0.032 |
+
+**The whole study contains 48 correct answers across 520 cells.** Every paired contrast against
+P0 is "no detectable difference", and the discordant-pair counts show why there was never a
+prospect of anything else:
+
+| arm | n paired | paired diff | 95 % CI | tasks where the arms disagreed |
+|---|---|---|---|---|
+| `H_MARKDOWN_ID` | 73 | 0 (0 %) | [0, 0] | **0** |
+| `H_PLUS_C` | 72 | +0.014 | [0, +0.042] | 1 |
+| `H_CPU_CONTROL` | 74 | −0.014 | [−0.041, 0] | 1 |
+| `C_ID` | 74 | −0.014 | [−0.041, 0] | 1 |
+| `C_CPU_CONTROL` | 61 | −0.016 | [−0.049, 0] | 1 |
+| `H_PROSE_CONTROL` | 71 | −0.014 | [−0.070, +0.042] | 5 |
+
+Across all six arms, **nine tasks in total** were graded differently from P0. At a 9.5 % baseline
+almost every task is wrong in every arm, so almost every pair is concordant-and-wrong and carries
+no information. This is the outcome committed to in writing in `reports/gates/COMPETENCE_PILOT.md`
+*before* any cell was graded, and it is reported here rather than mined.
+
+`C_CPU_CONTROL`'s 0.032 is the one number that looks like a finding and is not: it is **2 correct
+answers out of 62**, on the arm that also lost 22 % of its cells to censoring (section 5), and its
+paired contrast rests on a single discordant task.
+
+**`H_MARKDOWN_ID` at 0 discordant tasks out of 73 is a positive control, and it passed.** That arm
+falls back on every batch and therefore publishes output byte-identical to P0, so a coherent
+pipeline must grade it identically on every task — and it did, 73 times out of 73. The grading
+path is behaving; the resolution simply is not there.
 
 ---
 
@@ -249,7 +284,40 @@ evidence, says the agent is not failing for want of a usable retriever.
 
 ---
 
-## 7. What is established and what is not
+## 7. The verdict
+
+**P1 as specified — LLM-driven span-ID selection under a fixed rendered-token budget — does not
+work, and the study can say precisely which part fails.**
+
+**What works.** The *boundary* is real and the saving at it is large. Replacing an LLM-written
+page summary with a short, budget-respecting artefact cuts **67 % of GPU-busy seconds, 66 % of
+prompt tokens and 79 % of completion tokens**, paired on 74 tasks, and cuts **32 %** at the
+researcher-close boundary. Both are the study's pre-registered primary and co-primary endpoints,
+both intervals exclude zero, and the direction holds on 67 of 74 and 52 of 61 tasks respectively.
+The H boundary is worth roughly twice the C boundary. Nothing about the agent's measured accuracy
+degraded when this was done — though see the limit on that claim below.
+
+**What does not work.** The *selector* is the failure, not the boundary and not the plumbing.
+Asked to choose spans under a 512-token rendered budget, the LLM published **14 times out of 518
+opportunities**. A greedy CPU loop, on the identical chunker, aggregator, contract, budget,
+renderer and preflight — differing in exactly one pre-registered field — published **256 of 268**.
+The failure is specifically budget compliance: the median rejected selection renders to **4.1× its
+budget**, and at the C boundary **11.2×**. The same model on the same pages keeps to the same
+budget when asked for short prose (median 226 of 512 tokens). It cannot keep to it when asked to
+choose items whose combined rendered cost the prompt never shows it.
+
+**What it costs to get this wrong.** An arm that assigns span-ID selection and always falls back
+pays for the selector *and* the prose it was meant to replace: `H_MARKDOWN_ID` costs **+59 %
+prompt tokens on 69 of 73 tasks** and publishes output byte-identical to P0.
+
+**So the mechanism claim is settled and the quality claim is not.** The publication result is a
+property of the machine at n = 518 and will not move. The accuracy comparison has no resolution at
+all — 48 correct answers in 520 cells, nine discordant tasks across six arms — and that was
+committed to in writing before grading, not concluded after seeing it.
+
+---
+
+## 8. What is established and what is not
 
 **Established — mechanism.** These are properties of the machine, measured at n = 518 selector
 opportunities, and they will not move with more data:
@@ -289,7 +357,7 @@ never considered.
 
 ---
 
-## 8. Declared deviations
+## 9. Declared deviations
 
 1. **Two pre-registered control arms were added to the roster after the liveness smoke**
    (`H_CPU_CONTROL`, `C_CPU_CONTROL`). Both were already frozen in `matched_contrasts`; the first
@@ -308,7 +376,7 @@ never considered.
 
 ---
 
-## 9. Reproducing this
+## 10. Reproducing this
 
 ```bash
 shapeflow doctor                       # includes the installed-graph digest refusal
