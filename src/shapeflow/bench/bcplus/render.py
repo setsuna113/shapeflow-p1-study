@@ -139,12 +139,14 @@ def _liveness_table(arms: Mapping, *, baseline: str) -> list[str]:
         any_treatment = True
         h_n, h_d = a.get("h_publications") or 0, a.get("h_opportunities") or 0
         c_n, c_d = a.get("c_publications") or 0, a.get("c_opportunities") or 0
-        if h_d and not h_n:
+        treats_h = (a.get("page_variant") or "P0") != "P0"
+        treats_c = (a.get("close_variant") or "P0") != "P0"
+        if treats_h and not h_n:
             dead_h.append(arm_id)
-        if c_d and not c_n:
+        if treats_c and not c_n:
             dead_c.append(arm_id)
         rows.append(
-            f"| `{arm_id}` | {_fraction(h_n, h_d)} | {_fraction(c_n, c_d)} | "
+            f"| `{arm_id}` | {_fraction(h_n, h_d, treats_h)} | {_fraction(c_n, c_d, treats_c)} | "
             f"{a.get('page_fallbacks')} | {a.get('close_failures')} | "
             f"{_n(a.get('publication_rate'))} |")
     if not any_treatment:
@@ -165,10 +167,18 @@ def _liveness_table(arms: Mapping, *, baseline: str) -> list[str]:
             *([n for note in notes for n in (note, "")] if notes else [])]
 
 
-def _fraction(numerator: int, denominator: int) -> str:
-    """`--` where the arm has no treatment at this boundary: absent is not the same as zero."""
-    if not denominator:
+def _fraction(numerator: int, denominator: int, treated: bool) -> str:
+    """`--` where the arm has no treatment at this boundary: absent is not the same as zero.
+
+    ``treated`` comes from the arm's variant, not from the denominator. Reading it off a zero
+    denominator would print the same `--` for "this arm does not touch this boundary" and for
+    "this arm treats this boundary and never got a single opportunity" -- and the second is a
+    finding.
+    """
+    if not treated:
         return "--"
+    if not denominator:
+        return "0 / 0 (no opportunity)"
     return f"{numerator} / {denominator} ({numerator / denominator:.0%})"
 
 

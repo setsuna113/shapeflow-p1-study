@@ -70,7 +70,13 @@ class CellRecord:
 
     task_id: str
     arm_id: str
+    #: Display label the runner stamped on the artifact. Lossy -- it drops a ``P0`` half -- so it
+    #: is carried for the reader and never parsed. See :attr:`treats_h`.
     variant_id: str
+    #: The arm's two boundary variants, verbatim from the frozen schedule. ``"P0"`` means the
+    #: boundary is untreated, which is not the same as a treatment that never fired.
+    page_variant: str
+    close_variant: str
     replicate_id: str
     seed: int
     state: str
@@ -122,22 +128,21 @@ class CellRecord:
     # batches reduced and no fallbacks and would otherwise be reported as publishing at H with a
     # perfect rate. It has no H treatment at all. The variant decides whether a boundary is
     # under treatment; the counters only say what happened once it is.
-    @property
-    def _page_variant(self) -> str:
-        return (self.variant_id or "").split("+")[0]
-
-    @property
-    def _close_variant(self) -> str:
-        parts = (self.variant_id or "").split("+")
-        return parts[1] if len(parts) > 1 else ""
-
+    #
+    # Which variant is read matters as much as reading one. This first asked ``variant_id``,
+    # splitting it on ``+`` into a page half and a close half. But ``variant_id`` is a display
+    # label that omits an untreated boundary: ``H_PLUS_C`` stamps ``"H02+C01"`` and parses
+    # correctly, while ``C_ID`` stamps a bare ``"C01"`` -- which lands in the page half and made
+    # every C-only arm report a perfect publication rate at H, the boundary it does not touch,
+    # and ``--`` at C, the boundary under test. The schedule carries both variants explicitly for
+    # every cell, so they are read from there and the label is never parsed.
     @property
     def treats_h(self) -> bool:
-        return bool(self._page_variant) and self._page_variant != "P0"
+        return self.page_variant != "P0"
 
     @property
     def treats_c(self) -> bool:
-        return bool(self._close_variant) and self._close_variant != "P0"
+        return self.close_variant != "P0"
 
     @property
     def published_h(self) -> int:
@@ -212,10 +217,12 @@ def load_cells(
             item = ledger.get_work_item(work_key)
             state = item.state if item is not None else "MISSING"
             arm = cell["arm"]
+            page_variant, close_variant = _boundary_variants(arm)
             if ref is None:
                 records.append(CellRecord(
                     task_id=str(cell["task_id"]), arm_id=str(arm["arm_id"]),
-                    variant_id=f"{arm['page_variant']}+{arm['close_variant']}",
+                    variant_id=f"{page_variant}+{close_variant}",
+                    page_variant=page_variant, close_variant=close_variant,
                     replicate_id=str(cell["replicate_id"]), seed=int(cell["seed"]),
                     state=state, final_report="", error="no artifact", counts={}, work={},
                     e2e_latency_seconds=float("nan"), energy_joules=None, retrieval_trace=[],
@@ -226,6 +233,7 @@ def load_cells(
                 task_id=str(body["cell"]["task_id"]),
                 arm_id=str(body["cell"]["arm"]["arm_id"]),
                 variant_id=str(body.get("variant_id", "")),
+                page_variant=page_variant, close_variant=close_variant,
                 replicate_id=str(body["cell"]["replicate_id"]),
                 seed=int(body["cell"]["seed"]),
                 state=state,
@@ -325,6 +333,8 @@ def attach_grades(records: Sequence[CellRecord], evaluator_queries, grader,
 class ArmSummary:
     arm_id: str
     variant_id: str
+    page_variant: str
+    close_variant: str
     cells: int
     committed: int
     failed: int
@@ -384,6 +394,8 @@ def summarize_arm(records: Sequence[CellRecord]) -> ArmSummary:
     return ArmSummary(
         arm_id=records[0].arm_id,
         variant_id=records[0].variant_id,
+        page_variant=records[0].page_variant,
+        close_variant=records[0].close_variant,
         cells=len(records),
         committed=len(committed),
         failed=sum(1 for r in records if not r.committed),
@@ -408,6 +420,21 @@ def summarize_arm(records: Sequence[CellRecord]) -> ArmSummary:
         c_publications=sum(r.published_c for r in committed),
         c_opportunities=sum(r.opportunities_c for r in committed),
     )
+
+
+def _boundary_variants(arm: Mapping) -> tuple[str, str]:
+    """The arm's ``(page_variant, close_variant)`` from the frozen schedule, or a refusal.
+
+    Defaulting a missing key to ``"P0"`` would silently reclassify a treated boundary as
+    untreated, drop its publications from the report and leave a `--` where the study's whole
+    result belongs. An arm spec that cannot say which boundaries it treats is not analysable.
+    """
+    missing = [k for k in ("page_variant", "close_variant") if k not in arm]
+    if missing:
+        raise AnalysisError(
+            f"schedule cell for arm {arm.get('arm_id', '?')!r} is missing {', '.join(missing)}; "
+            "per-boundary publication counts cannot be attributed without it")
+    return str(arm["page_variant"]), str(arm["close_variant"])
 
 
 def _mean(values) -> Optional[float]:
