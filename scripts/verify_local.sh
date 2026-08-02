@@ -73,6 +73,12 @@ echo "== leakage firewall (no evaluator material may reach the treatment path) =
 # in the results because a leaked run looks like a very good run.
 "$PY" tools/ci/check_leakage_firewall.py || { echo "LEAKAGE FIREWALL CHECK FAILED"; exit 1; }
 
+echo "== cited artifacts (a report's evidence must ship with the report) =="
+# reports/* is gitignored and the finals are force-added by hand, so a newly generated artifact
+# is skipped by `git add -A` in silence. A report citing a file nobody else receives states a
+# number whose backing is unverifiable.
+"$PY" tools/ci/check_cited_artifacts.py || { echo "CITED ARTIFACT CHECK FAILED"; exit 1; }
+
 echo "== unit + property tests =="
 "$PY" -m pytest tests -q -p no:cacheprovider
 

@@ -116,9 +116,3 @@ def _snippet_of(text: str, *, chars: int = 320) -> str:
         _, _, rest = rest.partition("---")
         body = rest or text
     return " ".join(body.split())[:chars]
-
-
-def make_backend(index: DenseIndex, corpus: CorpusStore, encode: EncodeFn,
-                 *, cache: Optional[dict] = None) -> BrowseCompPlusBackend:
-    return BrowseCompPlusBackend(index=index, corpus=corpus, encode=encode,
-                                 cache=cache if cache is not None else {})

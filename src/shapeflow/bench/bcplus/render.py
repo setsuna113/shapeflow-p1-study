@@ -98,6 +98,12 @@ def render_markdown(report: Mapping, *, title: str = "BrowseComp-Plus: P1 agains
     for arm in sorted(contrasts):
         lines += _contrast_section(arm, contrasts[arm], baseline=baseline)
     lines += _reading(contrasts, arms, baseline=baseline)
+    # Every section builder ends with "" so the next one starts after a blank line, which leaves
+    # a trailing empty on the last section and a blank line at end of file. The repository's
+    # whitespace gate rejects that, so a generated report could not be committed as generated --
+    # and an artifact that has to be hand-edited before it can ship is no longer the artifact.
+    while lines and not lines[-1]:
+        lines.pop()
     return "\n".join(lines) + "\n"
 
 
@@ -221,7 +227,15 @@ def _reading(contrasts: Mapping, arms: Mapping, *, baseline: str) -> list[str]:
     for arm in sorted(contrasts):
         metrics = contrasts[arm].get("metrics") or {}
         works, fails, flat = [], [], []
-        for key, metric in metrics.items():
+        # Iterate the label registry, not the caller's dict. The JSON artifact is written with
+        # sorted keys and the markdown is rendered from the in-memory report, so reading the
+        # JSON back and re-rendering used to produce a different ordering from the same data --
+        # a report that cannot be re-derived byte-for-byte from its own record. Any metric the
+        # registry does not name is appended, so a new endpoint still appears.
+        ordered = [k for k in _LABELS if k in metrics]
+        ordered += [k for k in metrics if k not in _LABELS]
+        for key in ordered:
+            metric = metrics[key]
             if not metric.get("reportable"):
                 continue
             label = _LABELS.get(key, (key, "neutral"))[0]

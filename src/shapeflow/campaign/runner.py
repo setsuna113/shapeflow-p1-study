@@ -1006,7 +1006,3 @@ def available_tasks(settings: Settings, split: str) -> list[str]:
         if body.get("split") == split and body["task_id"] in frozen:
             ids.append(body["task_id"])
     return ids
-
-
-def phase_for(name: str) -> Phase:
-    return Phase(name)

@@ -164,23 +164,3 @@ def load_freeze(path: Path) -> RetrievalFreeze:
         raise RuntimeError(f"{path} has been edited: records {body.get('digest', '')[:12]}, "
                            f"hashes to {freeze.digest[:12]}")
     return freeze
-
-
-def freeze_from_measurements(*, encoder_spec, index, corpus_shards: Sequence[str], top_k: int,
-                             index_subset: str, conformance_sha256: str = "",
-                             bench_repo_commit: str = "", notes: Mapping | None = None
-                             ) -> RetrievalFreeze:
-    """Build a freeze from the objects that were actually used, not from a config file."""
-    spec = encoder_spec.content()
-    return RetrievalFreeze(
-        encoder_repo=spec["model"], encoder_revision=spec["revision"], encoder_dtype=spec["dtype"],
-        pooling=spec["pooling"], normalize=spec["normalize"],
-        query_prefix_sha256=spec["query_prefix_sha256"],
-        passage_prefix_sha256=spec["passage_prefix_sha256"],
-        query_max_len=spec["query_max_len"], passage_max_len=spec["passage_max_len"],
-        index_subset=index_subset, index_dim=index.dim, index_num_docs=index.num_docs,
-        index_shard_sha256=tuple(s.sha256 for s in index.shards),
-        top_k=top_k, corpus_shard_sha256=tuple(corpus_shards),
-        bench_repo_commit=bench_repo_commit, conformance_sha256=conformance_sha256,
-        notes=dict(notes or {}),
-    )

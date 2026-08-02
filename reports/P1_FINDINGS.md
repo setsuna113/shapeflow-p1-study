@@ -387,5 +387,10 @@ shapeflow grade-bcplus --run-id <id> --layer b1_select --lanes 0,1 \
     --ran-under-binding <the binding the run committed under>
 ```
 
-Artifacts: `reports/BCPLUS_<run-id>.{json,md}` for the paired analysis, `reports/gates/` for gate
-verdicts, and the per-lane ledger and object store under `$DATA_ROOT/runner-lane{n}/`.
+The paired analysis behind every number above is `reports/BCPLUS_campaign1.json` and its rendering
+`reports/BCPLUS_campaign1.md` — the arm summaries, the per-boundary publication counts and the
+bootstrap intervals, keyed by `content_sha256` and by the object-store digest of every cell that
+fed them. Gate verdicts are in `reports/gates/`; the per-lane ledger and object store live under
+`$DATA_ROOT/runner-lane{n}/` and are not in this repository.
+
+A run other than this one writes `reports/BCPLUS_<run-id>.{json,md}`.
