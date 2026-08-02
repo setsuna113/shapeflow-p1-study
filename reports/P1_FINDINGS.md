@@ -1,14 +1,12 @@
 # P1 on BrowseComp-Plus — findings
 
-**Status: interim.** The main campaign is in flight (343 of 560 cells committed at the time of
-writing, plus 31 censored -- see section 3a, which is the biggest caveat on everything here).
-Everything below is stated at the sample size it was measured at, and the mechanism findings are
-separated from the effect sizes on purpose: the first are properties of the machine and are
-already settled, the second are estimates that will tighten.
+**Status: final.** The campaign is complete: 80 tasks × 7 arms = 560 cells, of which **520
+committed and 40 were censored** (section 5). Every number below is measured on the full run.
 
 Provenance: branch `freeze1/phase0`, protocol `protocol/SHAPEFLOW_FREEZE_1.md`, benchmark pinned
-by `protocol/bench_manifest.json`, retriever by `protocol/retrieval_freeze.json`. Every run is
-namespaced by an execution binding recorded in an append-only approval chain.
+by `protocol/bench_manifest.json`, retriever by `protocol/retrieval_freeze.json`. The cells were
+committed under execution binding `c091c41f1a0e`, recorded in an append-only approval chain; the
+analysis names that binding explicitly rather than re-running the campaign under a later one.
 
 ---
 
@@ -49,28 +47,17 @@ exact same renderer against the exact same budget, so they publish or fail struc
 **Span-ID selection driven by an LLM almost never publishes, at either boundary. The identical
 mechanism driven by a greedy CPU loop almost always does, at both.**
 
-Publication, campaign to date, per boundary:
-
 | arm | selector | H published | C published |
 |---|---|---|---|
-| `H_CPU_CONTROL` | CPU greedy | **138 / 138 (100 %)** | — |
-| `H_PROSE_CONTROL` | LLM, prose | **92 / 98 (94 %)** | — |
-| `H_MARKDOWN_ID` | LLM, span IDs | **2 / 125 (2 %)** | — |
-| `H_PLUS_C` | LLM, span IDs | **4 / 119 (3 %)** | **2 / 49 (4 %)** |
-| `C_CPU_CONTROL` | CPU greedy | — | **29 / 37 (78 %)** |
-| `C_ID` | LLM, span IDs | — | **3 / 50 (6 %)** |
+| `H_CPU_CONTROL` | CPU greedy | **206 / 206 (100 %)** | — |
+| `H_PROSE_CONTROL` | LLM, prose | **129 / 141 (91 %)** | — |
+| `H_MARKDOWN_ID` | LLM, span IDs | **2 / 188 (1 %)** | — |
+| `H_PLUS_C` | LLM, span IDs | **4 / 181 (2 %)** | **3 / 73 (4 %)** |
+| `C_CPU_CONTROL` | CPU greedy | — | **50 / 62 (81 %)** |
+| `C_ID` | LLM, span IDs | — | **5 / 76 (7 %)** |
 
-At 343 committed cells these are no longer estimates of a rate; they are the rate. The LLM
-selector has published 11 times out of 391 opportunities across four arms and two boundaries.
-The CPU selector has published 167 times out of 175.
-
-Every failure is the same assertion:
-
-```
-PREFLIGHT: rendered 4815 tokens exceeds selected_token_budget 512
-```
-
-and the whole page batch falls back to P0, as the contract specifies.
+Pooled across four arms and both boundaries: the LLM span-ID selector published **14 times out of
+518 opportunities (2.7 %)**. The CPU selector published **256 out of 268 (95.5 %)**.
 
 ### Why this is a selector result and not a plumbing defect
 
@@ -80,121 +67,168 @@ and the whole page batch falls back to P0, as the contract specifies.
 nothing; the other publishes everything. That contrast — `H_LLM_VS_CPU` — was frozen in
 `matched_contrasts` before any data existed, and it is the reason the answer is available at all.
 
-Four measurements from 85 preflight overruns say the budget is not the villain:
+### How far over budget, measured on all 472 overruns
 
-- **rendered ÷ raw selected tokens: 1.07 min, 1.34 median, 3.42 max.** Renderer framing is a
-  third, not a multiple.
-- **Cheapest-first, 5 / 35 / 259 candidates fit in 512** (min / median / max), out of 60–170
-  offered. The budget is reachable.
-- **The selector emitted 12–64 ids totalling 562–3070 raw tokens.** Even at zero rendering cost
-  the smallest of those exceeds 512.
-- **The median overshoot is only ~30 %** — and destroys the whole batch, because
-  `stable_union_v1` deduplicates and returns while `coverage_budget_v1` is the aggregator that
-  trims. Both `H02` and `C01` use `stable_union_v1`.
+Every rejection is the same assertion, and the whole page batch then falls back to P0 as the
+contract specifies:
 
-So the mechanism is: *the model is told a rendered-token budget it cannot measure — the prompt
-shows candidate text, never per-candidate cost — and the aggregator behind it drops nothing.* A
-greedy loop that can price each candidate meets the same budget every time.
+```
+PREFLIGHT: rendered <n> tokens exceeds selected_token_budget 512
+```
+
+| arm | overruns | min | median | p90 | max | median ÷ budget | within 2× budget |
+|---|---|---|---|---|---|---|---|
+| `H_MARKDOWN_ID` | 186 | 525 | 1 605 | 3 642 | 9 938 | **3.1×** | 27 % |
+| `H_PLUS_C` | 231 | 525 | 2 142 | 7 063 | 9 938 | **4.2×** | 20 % |
+| `C_ID` | 55 | 652 | 5 728 | 8 113 | 9 622 | **11.2×** | 4 % |
+| **all** | **472** | 525 | **2 095** | 7 038 | 9 938 | **4.1×** | 21 % |
+
+**This corrects the interim report**, which put the median overshoot at about 30 % from an early
+sample of 85 overruns. At full scale the median selection renders to **four times** its budget,
+and at the C boundary to **eleven times**. The consequence matters for section 7: an aggregator
+that trimmed to budget would not be recovering a near-miss, it would be discarding 75–91 % of
+what the model asked for.
+
+The three regimes are cleanest in what each selector renders *when it does publish*:
+
+| selector | median rendered tokens | as a fraction of the 512 budget |
+|---|---|---|
+| CPU greedy (`H_CPU_CONTROL`, n = 79 cells) | **512** | packs to the limit, exactly |
+| LLM prose (`H_PROSE_CONTROL`, n = 76 cells) | **226** | 44 % — comfortably under |
+| LLM span IDs | — | rejected before publication |
+
+So the model complies with a budget when the task is *write briefly*, and does not when the task
+is *choose items whose combined rendered size you cannot see*. The prompt shows candidate text and
+never per-candidate cost, and `stable_union_v1` deduplicates and returns without dropping
+anything. A greedy loop that can price each candidate meets the same budget every time.
 
 ---
 
 ## 3. What P1 costs and what it saves
 
-Paired on the same task, campaign to date. **n = 17–21 tasks; magnitudes provisional until the
-full run gives bootstrap intervals.** The signs are mechanically forced, and the reason is given
-for each.
+Paired within task, on the tasks where both arms committed. 10 000-resample bootstrap, seed
+pinned. **Bold** where the 95 % interval excludes zero.
 
-| arm | GPU-busy | prompt tok | completion tok | energy | why the sign is not luck |
+| arm | n | GPU-busy (primary) | prompt tok (co-primary) | completion tok (co-primary) | e2e |
 |---|---|---|---|---|---|
-| `H_CPU_CONTROL` | **−66 %** | **−63 %** | **−79 %** | −64 % | replaces the page summary outright: no `PAGE_P0_SUMMARY` at all |
-| `H_PROSE_CONTROL` | **−61 %** | −21 % | **−73 %** | −59 % | same, and the shorter pages shrink the researcher's context downstream |
-| `C_CPU_CONTROL` | −32 % | −15 % | −24 % | −32 % | replaces the compressor (`COMPRESSOR_P0` drops to 0.1 per cell) |
-| `C_ID` | −15 % | **+3 %** | −20 % | −15 % | publishes almost nothing; see caveat below |
-| `H_PLUS_C` | +5 % | **+59 %** | −3 % | +6 % | pays for the selector, then pays for P0 anyway |
-| `H_MARKDOWN_ID` | **+24 %** | **+70 %** | +12 % | +25 % | same, at every page: a selector call *and* a summary per page |
+| `H_CPU_CONTROL` | 74 | **−67.1 %** | **−66.0 %** | **−78.5 %** | **−64.9 %** |
+| `H_PROSE_CONTROL` | 71 | **−57.0 %** | **−17.6 %** | **−66.9 %** | **−56.4 %** |
+| `C_CPU_CONTROL` | 61 | **−31.7 %** | **−9.8 %** | **−25.7 %** | **−31.2 %** |
+| `C_ID` | 74 | −13.4 % | +4.7 % | −13.8 % | −13.3 % |
+| `H_PLUS_C` | 72 | +3.6 % | **+67.6 %** | −4.6 % | +3.8 % |
+| `H_MARKDOWN_ID` | 73 | +6.8 % | **+59.0 %** | −0.6 % | +6.9 % |
 
-The `H_MARKDOWN_ID` row is the sharpest statement of the result. It runs
-`PAGE_P1_SELECTOR_LOCAL` on every batch, fails preflight, runs `PAGE_P0_SUMMARY` on every batch,
-and publishes output **byte-identical to P0**. It is a 70 % prompt-token surcharge for nothing.
+Two rows carry the result.
 
-**Caveat on `C_ID`.** Its prompt tokens are now +3 %, which is what an arm that pays for a
-selector and publishes nothing should look like. Its GPU-busy and completion tokens are still
-*down* (−15 %, −20 %), which an inert arm should not be. The likely mechanism is that assigning a
-selector at the close changes when the researcher closes — a mediated effect of the assignment
-rather than of the published output — but coupled-seed end-to-end ITT lets trajectories diverge
-after the first intervention and the between-task variance is large. Not interpreted until the
-full run.
+**`H_CPU_CONTROL` is the largest saving in the study, and it is real.** It issues *no*
+`PAGE_P0_SUMMARY` calls at all — the selector replaces every page summary rather than preceding
+it — so the arm runs about 12 inference requests per cell against P0's 34. 67 of 74 tasks moved
+in the same direction.
+
+**`H_MARKDOWN_ID` is the sharpest statement of the failure.** It runs `PAGE_P1_SELECTOR_LOCAL` on
+every batch (19.8 per cell), fails preflight, runs `PAGE_P0_SUMMARY` on every batch (20.8 per
+cell), and publishes output byte-identical to P0. It is a **59 % prompt-token surcharge for
+nothing**, and 69 of 73 tasks paid it.
+
+`C_ID` and `H_PLUS_C` are the arms that assign a treatment which then almost never fires; their
+work differences are not distinguishable from zero except for the prompt-token surcharge they pay
+for the attempt.
+
+### Two behavioural changes, weighted honestly
+
+The precheck flagged an evidence-recall regression for `H_CPU_CONTROL`: −20.1 %, interval
+[−0.054, −0.004], nominally excluding zero. **It is not being reported as established harm.**
+The interval is on the mean, and the mean rests on 14 discordant pairs out of 74 — 4 tasks better,
+10 worse, sign test *p* = 0.18. Across 6 arms × 9 metrics at nominal 95 % coverage, one or two
+such exclusions are expected by chance alone, and no multiplicity correction is pre-registered.
+It is a signal worth a follow-up, not a finding.
+
+The one behavioural change that does survive that scrutiny is `H_PROSE_CONTROL` issuing **18.9 %
+fewer search queries** ([−1.63, −0.39], 16 tasks better / 38 worse, sign *p* = 0.004). Shorter
+page summaries change what the agent goes looking for next. `search_queries` is *not* a
+pre-registered endpoint, so this is exploratory — but it is the more robust of the two, and the
+asymmetry is worth recording: the registered endpoint gave the weaker evidence.
 
 ---
 
-## 3a. Censoring — the largest threat to the numbers above
+## 4. Accuracy
 
-At 374 terminal cells, **31 have failed and every one has the same cause**:
-`telemetry_complete: False`, one or two inference attempts left unaccounted after
-`BrokenPipeError` in the provider writing a response to a client that had already hung up. The
-cells were otherwise fine — full reports, treatment published where it was assigned,
-`fell_back: false`. The runner refuses a cell whose work accounting is incomplete, which is the
+*Pending — the official grader is running over all 520 cells. This section will carry the
+per-arm accuracy and the paired contrasts, under the interpretation already committed to in
+`reports/gates/COMPETENCE_PILOT.md`: reported, and reported as* **not established** *(section 7).*
+
+---
+
+## 5. Censoring
+
+**40 of 560 cells failed, and every one has the same cause**: `telemetry_complete: False` — one or
+two inference attempts left unaccounted after `BrokenPipeError` in the provider writing a response
+to a client that had already hung up. The cells were otherwise fine: full reports, treatment
+published where assigned. The runner refuses a cell whose work accounting is incomplete, which is
 correct behaviour for a study whose primary endpoint *is* the work accounting.
+
+The cause is uniform and verifiable: `unavailable_attempt_ids` is **0.00 per cell in every
+committed cell of every arm**, and **1.0–1.8 in every failed one**.
 
 | arm | committed | failed | survival |
 |---|---|---|---|
-| `H_CPU_CONTROL` | 54 | 0 | 100 % |
-| `H_MARKDOWN_ID` | 51 | 2 | 96 % |
-| `H_PROSE_CONTROL` | 52 | 2 | 96 % |
-| `C_ID` | 50 | 3 | 94 % |
-| `H_PLUS_C` | 51 | 3 | 94 % |
-| `P0` | 48 | 5 | 91 % |
-| `C_CPU_CONTROL` | 37 | **16** | **70 %** |
-| **total** | **343** | **31** | **92 %** |
+| `H_CPU_CONTROL` | 80 | 0 | **100 %** |
+| `H_MARKDOWN_ID` | 77 | 3 | 96 % |
+| `H_PROSE_CONTROL` | 77 | 3 | 96 % |
+| `C_ID` | 76 | 4 | 95 % |
+| `H_PLUS_C` | 74 | 6 | 93 % |
+| `P0` | 74 | 6 | 93 % |
+| `C_CPU_CONTROL` | 62 | **18** | **78 %** |
+| **total** | **520** | **40** | **93 %** |
 
-Two things about it are uncomfortable and are stated rather than smoothed.
+`C_CPU_CONTROL` is a genuine outlier at 22.5 %, against 0 % for the other CPU-selector arm. Two
+candidate explanations were tested and **both are refuted**:
 
-**It is accelerating.** By quarter of the run: 5.4 %, 4.3 %, 10.8 %, 12.8 %. It is not the engine
-degrading — median cell latency is flat across those quarters (139 s, 118 s, 140 s, 115 s) and
-p90 is noisy without a trend, disk is at 30 %, memory has 76 GB free, and there is exactly one
-engine process per GPU. The cause is understood at the level of *what* fails and not yet *why it
-worsens*.
+- *Publication at C causes the failure* — i.e. the CPU selector publishes, the in-flight
+  `COMPRESSOR_P0` request is abandoned, and the provider hits a broken pipe. Refuted: committed
+  cells publish 0.81 closes per cell, failed cells 0.78. Publication does not distinguish them.
+- *It is positional* — the arm sits at an unlucky position in the block order. Refuted: within-block
+  arm order is randomised across 14 distinct orders, and failure by position is flat at
+  3.8 %–10.0 %.
 
-**It is not proportional across arms.** `C_CPU_CONTROL` loses 30 % of its cells while
-`H_CPU_CONTROL` loses none, and the heaviest arm — `H_MARKDOWN_ID`, at +70 % prompt tokens —
-loses only 2. So this is not simply "long cells die", which would at least bias every arm the
-same way. `C_CPU_CONTROL`'s contrast falls well below the pre-registered
-`MIN_PAIRED_SURVIVAL` of 0.95 and will be reported with the survivorship warning, not as a clean
-estimate. `P0` at 91 % matters more than it looks: the baseline losing cells shrinks *every*
-pairing, since a contrast needs both arms to have committed on the same task.
+So the arm association is real, is not explained by the treatment firing, and is **not explained
+at all**. `C_CPU_CONTROL` falls below the pre-registered `MIN_PAIRED_SURVIVAL` of 0.95 and is
+reported with a survivorship warning, not as a clean estimate. `H_PLUS_C`, `H_MARKDOWN_ID`,
+`H_PROSE_CONTROL` and `H_CPU_CONTROL` also carry the warning, because `P0` at 93 % shrinks every
+pairing: a contrast needs both arms to have committed on the same task.
 
-Not fixed mid-run, and that is a deliberate choice rather than an oversight: the client timeout
-lives in a hashed config, so changing it re-mints the execution binding, which renames every work
-key and orphans the campaign in progress. The honest options were to let it run and report the
-censoring, or to stop and re-run 374 cells under a new binding. The first is taken.
+Not fixed mid-run, deliberately: the client timeout lives in a hashed config, so changing it
+re-mints the execution binding, renames every work key and orphans the campaign in progress. The
+honest options were to let it run and report the censoring, or to stop and re-run under a new
+binding. The first was taken.
 
 ---
 
-## 4. Gates
+## 6. Gates
 
-Three gates ran. Two failed. Both failures are recorded with measured-vs-threshold, a diagnosis
-and a priced menu, and **no frozen parameter was changed in response to either**.
+Four gate criteria ran. Two failed. Both failures are recorded with measured-vs-threshold, a
+diagnosis and a priced menu, and **no frozen parameter was changed in response to either**.
 
 | gate | verdict | measured vs threshold | file |
 |---|---|---|---|
 | P1 liveness (H) | **FAIL** | 0 published spans, floor ≥ 1 | `gates/P1_LIVENESS_SMOKE.md` |
 | P1 liveness (C) | PASS | 6 published spans in the smoke | same |
+| retrieval competence — accuracy | **PASS** | 0.1224 vs 0.10 (n = 98) | `gates/COMPETENCE_PILOT.md` |
+| retrieval competence — evidence recall | **FAIL** | 0.1488 vs 0.40 (n = 98) | same |
 
-**The C gate passed on four tasks and would not pass on eighty.** `C_ID` published 6 of 6 close
-reductions across the smoke's four `pilot_competence` tasks; on the campaign's `b1_select` tasks
-it publishes 1 of 21. The gate is recorded as it was decided — it is a pre-registered check on a
-pre-registered sample, not a claim that gets revised when more data arrives — but the campaign
+**The C liveness gate passed on four tasks and would not pass on eighty.** `C_ID` published 6 of 6
+close reductions across the smoke's four `pilot_competence` tasks; on the campaign's 80
+`b1_select` tasks it published 5 of 76. The gate is recorded as it was decided — a pre-registered
+check on a pre-registered sample, not a claim revised when more data arrives — but the campaign
 number is the one to believe about the mechanism, and it says the C boundary fails the same way H
-does. A four-task liveness sample is enough to catch a mechanism that never fires and not enough
-to characterise one that fires sometimes.
-| retrieval competence — accuracy | **PASS** | 0.1224 vs 0.10 (n=98) | `gates/COMPETENCE_PILOT.md` |
-| retrieval competence — evidence recall | **FAIL** | 0.1488 vs 0.40 (n=98) | same |
+does. A four-task liveness sample catches a mechanism that never fires; it cannot characterise one
+that fires sometimes.
 
 ### The recall failure is a calibration mismatch, not a broken retriever
 
-Every query returns a full top-5 with cosines in the expected 0.49–0.65 band, and the frozen
-index measured Recall@100 = 0.4831 on evidence. What fails is the agent's *coverage*: its
-reformulations are paraphrases of one another. One task's six queries —
+Every query returns a full top-5 with cosines in the expected 0.49–0.65 band, and the frozen index
+measured Recall@100 = 0.4831 on evidence. What fails is the agent's *coverage*: its reformulations
+are paraphrases of one another. One task's six queries —
 
 ```
 news publications co-founded by individuals who dropped out of university
@@ -209,62 +243,72 @@ news outlets founded by college dropouts with official websites
 reach 13.2 distinct documents against evidence sets of three to six in a 100 195-document corpus.
 
 The prereg justifies the 0.40 floor by "dense retrieval at Recall@100 = 55.8 %" — one query, a
-hundred documents returned — then applies it to an agent whose frozen `top_k` is 5. No run of
-this configuration could have cleared it. That accuracy passes anyway (12.2 % while surfacing
-15 % of the evidence) says the agent is not failing for want of a usable retriever.
+hundred documents returned — then applies it to an agent whose frozen `top_k` is 5. No run of this
+configuration could have cleared it. That accuracy passes anyway, while surfacing 15 % of the
+evidence, says the agent is not failing for want of a usable retriever.
 
 ---
 
-## 5. Declared deviations
+## 7. What is established and what is not
 
-Three, all recorded rather than argued away.
+**Established — mechanism.** These are properties of the machine, measured at n = 518 selector
+opportunities, and they will not move with more data:
 
-1. **Two pre-registered control arms were added to the roster after the liveness smoke**
-   (`H_CPU_CONTROL`, `C_CPU_CONTROL`). Both were already frozen in `matched_contrasts`; the first
-   roster omitted them for budget. Without them, 100 % fallback stays ambiguous between "this
-   path cannot emit a span on this corpus" and "this selector will not keep to a budget". A
-   control can only weaken a P1 claim, never manufacture one.
-2. **The campaign ran past a failed competence gate**, a departure from §10's order. The gate
-   governs whether the *quality* comparison can carry a non-inferiority claim; it does not touch
-   the co-primary work endpoints, which are boundary measurements independent of retrieval
-   quality.
-3. **`C_CPU_CONTROL` will be reported with a survivorship warning** rather than dropped or
-   silently included.
+- LLM-driven span-ID selection under a 512-token rendered budget does not publish on
+  BrowseComp-Plus pages: **2.7 % across both boundaries** (1–2 % at H, 4–7 % at C).
+- The identical mechanism with a budget-aware selector publishes **95.5 %** of the time.
+- The failure is budget compliance, not capability or plumbing: the median rejected selection
+  renders to **4.1× its budget**, and the same model keeps to the same budget when asked for
+  short prose instead of ids.
+- An arm that assigns P1 and always falls back costs strictly more than P0 for byte-identical
+  output — **+59 % prompt tokens** for `H_MARKDOWN_ID`.
 
-Not done, and reserved for a human: changing `selected_token_budget`, the encoder, `top_k`, or
+**Established — work.** Paired, bootstrap intervals excluding zero, on 61–74 tasks:
+
+- Replacing the page summary with anything shorter is a large saving: **−67 % GPU-busy** for
+  CPU-selected spans, **−57 %** for short prose.
+- The C boundary is worth about half of that: **−32 % GPU-busy** for `C_CPU_CONTROL`.
+- The saving is not a token artefact — it holds on GPU-busy seconds, on both token components
+  separately, and on end-to-end latency.
+
+**Not established, and not resolvable by this campaign:**
+
+- **Any non-inferiority claim about accuracy.** The workload never cleared the evidence-recall
+  floor its own pre-registration set, and 12.2 % baseline accuracy over 80 tasks cannot resolve
+  the between-arm differences such a claim needs. This was committed to in writing *before* the
+  campaign was graded.
+- **Whether span-ID selection would help if the selector met its budget.** The instrument never
+  delivered that treatment. Section 2's overrun distribution makes this worse than the interim
+  report implied: switching to `coverage_budget_v1` would trim a median selection by 75 %, so it
+  would test a substantially different treatment rather than rescue this one.
+- **Why `C_CPU_CONTROL` alone lost 22 % of its cells.** Two explanations tested, both refuted.
+
+**Reserved for a human, and not done:** changing `selected_token_budget`, the encoder, `top_k`, or
 any floor. Each is a change to a frozen object made after seeing agent data. Gold injection was
 never considered.
 
 ---
 
-## 6. What is established and what is not
+## 8. Declared deviations
 
-**Established** (mechanism properties, robust to sample size):
-
-- LLM-driven span-ID selection under a 512-token rendered budget does not publish on
-  BrowseComp-Plus pages: 4 % at H, 5 % at C.
-- The same mechanism with a budget-aware selector publishes: 100 % at H, 88 % at C.
-- The failure is a budget-compliance failure, not a capability or plumbing failure.
-- An arm that assigns P1 and always falls back costs strictly more than P0 for identical output.
-
-**Established** (work endpoints, direction certain, magnitude provisional at n ≈ 10):
-
-- Replacing the page summary with *anything shorter* is a large saving — around −61 % GPU-busy
-  for short prose, −66 % for CPU-selected spans.
-- The saving compounds downstream: shorter page outputs shrink the researcher's context.
-
-**Not established**, and will not be by this campaign:
-
-- Any non-inferiority claim about **accuracy**. The workload did not clear the recall floor its
-  own pre-registration set, and 12.2 % baseline accuracy over 80 tasks cannot resolve the
-  between-arm differences such a claim needs.
-- Whether span-ID selection *would* help if the selector could meet its budget. The instrument
-  never delivered that treatment. `coverage_budget_v1` and per-candidate costing in the prompt
-  are the two obvious routes, and both are design changes requiring a human.
+1. **Two pre-registered control arms were added to the roster after the liveness smoke**
+   (`H_CPU_CONTROL`, `C_CPU_CONTROL`). Both were already frozen in `matched_contrasts`; the first
+   roster omitted them for budget. Without them, 100 % fallback stays ambiguous between "this path
+   cannot emit a span on this corpus" and "this selector will not keep to a budget". A control can
+   only weaken a P1 claim, never manufacture one.
+2. **The campaign ran past a failed competence gate**, a departure from §10's order. The gate
+   governs whether the *quality* comparison can carry a non-inferiority claim; it does not touch
+   the co-primary work endpoints, which are boundary measurements independent of retrieval
+   quality.
+3. **Five arms are reported with a survivorship warning** rather than dropped or silently
+   included (section 5).
+4. **The analysis ran under a later execution binding than the campaign** (`--ran-under-binding`).
+   Grading is read-only; requiring a matching binding would mean a bug in the *analysis* could
+   only ever be fixed by re-running the campaign.
 
 ---
 
-## 7. Reproducing this
+## 9. Reproducing this
 
 ```bash
 shapeflow doctor                       # includes the installed-graph digest refusal
@@ -275,6 +319,5 @@ shapeflow grade-bcplus --run-id <id> --layer b1_select --lanes 0,1 \
     --ran-under-binding <the binding the run committed under>
 ```
 
-Artifacts: `reports/BCPLUS_<run-id>.{json,md}` for the paired analysis,
-`reports/gates/` for gate verdicts, and the per-lane ledger and object store under
-`$DATA_ROOT/runner-lane{n}/`.
+Artifacts: `reports/BCPLUS_<run-id>.{json,md}` for the paired analysis, `reports/gates/` for gate
+verdicts, and the per-lane ledger and object store under `$DATA_ROOT/runner-lane{n}/`.
