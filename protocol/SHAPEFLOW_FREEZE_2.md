@@ -249,3 +249,77 @@ Phase 0/1/3 **不消耗任何新 task**——它们重放已花掉的 183 个 ta
 ## 12. 修订规则
 
 本文冻结。此后改动以 amendment 追加于文末:编号、日期、动因、改动内容、影响的实验/门;正文不改写。任何 amendment 若发生在相应数据已被查看之后,受影响的结论自动降级为 exploratory。
+
+---
+
+## Amendment 1 — selector 拆成两个 CPU packer 夹一次 LLM 排序(2026-08-02)
+
+**动因。** Phase 0 普查(`reports/gates/FREEZE2_CENSUS.json`)测出两道**互相独立**的 selector 障碍,当前的 direct full-view LLM selector 在**两端同时**不成立:
+
+| 障碍 | 发生阶段 | 证据 |
+|---|---|---|
+| **输入上限** | LLM 调用之前,whole-batch prompt 装不进 context | 61.9% 的 batch 超过 32,000;prompt 中位数 37,094 |
+| **输出上限** | LLM 选完 ID 之后,renderer 展开超过 512 | Freeze-1 rejected output 中位约 4.1×512 |
+
+在现定义下,full-view LLM selector 的 event-weighted 机械可达率上界只有 `1 − 1011/1632 = 38.1%`,且尚未扣除 schema error、timeout 与 512-output failure。
+
+**裁定:这是 "direct full-view LLM 方案失败",不是 P1 失败。** 本轮不因此 kill P1。
+
+**改动内容。** H 边界的 P1* 结构改为:
+
+```text
+whole-batch evidence
+→ CPU PromptPacker        (解决 32k 输入上限)
+→ ≤ context limit 的 source-balanced view
+→ 一次 LLM,只做语义排序
+→ CPU EvidencePacker      (解决 512 输出上限)
+→ ≤512-token P1 payload
+→ preflight
+```
+
+LLM 不再负责猜任何 token budget;两个 budget 各由一个确定性 CPU packer 保证。这仍然是**每个 gather batch 恰好一次 selector 请求**,§5.1 的 whole_batch 单位不变。
+
+**PromptPacker 合同(确定性、非生成式)。**
+- 用精确模型 tokenizer 计数;
+- 先扣除 system、instructions、schema、最大 completion 与安全余量;
+- **每个非空 page 至少保留一个 evidence-bearing span**;
+- 保留 title、heading、table header 等必要上下文;
+- 剩余空间按 query relevance、source diversity、contradiction potential 填充;
+- 记录全部 dropped span、page coverage 与 token accounting;
+- 不得使用 gold、P0 summary 或任何 evaluator label。
+
+**合同澄清(§5.1 与 `HC_MECHANISM_v1.md:20` 的 "covering every page")。** 判定为:**每个 page 至少有真实的 evidence representation**,而非必须包含每个 raw candidate span。理由:后一种读法在 32k 模型上使 one-call whole-batch LLM selector 结构性失败,只剩换长上下文模型或改 P1 合同两条路;而 §5.1 的"整批一次请求、整批原子发布"在前一种读法下完全成立。超过 32k 就静默截尾**明确禁止**——它系统性丢掉 batch 后部页面,不能称为 covering whole batch。
+
+**§5.4 的候选 selector 表作废,改为四个匹配臂加一个 diagnostic:**
+
+| Arm | 输入 view | 排序者 | 最终 packer | 回答什么 |
+|---|---|---|---|---|
+| `CPU-FULL` | 全部 candidates | CPU | exact ≤512 | CPU 产品候选与上界 |
+| `CPU-PROMPTVIEW` | PromptPacker 后 | CPU | exact ≤512 | 单独测 prompt pruning 的损失 |
+| `LLM-PROMPTVIEW` | 同一 PromptView | LLM | exact ≤512 | 同等可见证据下 LLM 是否更聪明 |
+| `SHORTPROSE-PROMPTVIEW` | 同一 PromptView | LLM prose | completion ≤512 | pointer 是否优于普通短输出 |
+| `LLM-FULL` | 全部 candidates | LLM | exact ≤512 | **diagnostic only**:prompt ≤32k 才运行,否则记 `PROMPT_INFEASIBLE`;留在 all-offered 分母;不得晋级 |
+
+两个关键对比必须分开报告:
+
+- `CPU-FULL − CPU-PROMPTVIEW` = **为了塞进 LLM 而删证据的代价**;
+- `LLM-PROMPTVIEW − CPU-PROMPTVIEW` = **同等可见证据下 LLM 的增量价值**。
+
+缺了前者,LLM 落败时无法分辨是排序差还是它只看到被截断的候选。
+
+**`LLM-PROMPTVIEW` 的三道预注册门。**
+1. **输入合法性**:≥95% 的 whole batch 能构造 context-compliant PromptView;长 batch 层 ≥90%;每个 page 有真实 evidence representation。
+2. **输出合法性**:budget / ID / lineage / atomicity 零违规;最终 payload ≤512。
+3. **增量价值**:同一 PromptView 下相对 `CPU-PROMPTVIEW` 有可测的质量提升,且覆盖其自身额外的 prefill/decode 成本。
+
+**kill 规则。**
+- PromptPacker 无法在多数 batch 上同时满足 context limit 与每页 evidence coverage ⇒ kill one-call LLM selector;
+- 装得下但 LLM 不胜 CPU ⇒ 最终 selector 采用 CPU;
+- LLM 质量更好但全口径成本不划算 ⇒ 仍采用 CPU;
+- 仅部分 batch LLM 胜 ⇒ 冻结 hybrid policy,但归入后续 quality qualifier,**不得事后挑样本**。
+
+**明确不采用的"修复"。** 换 64k/128k 模型(可作独立 variant,但改变模型、成本与 resource shape,不是免费修复);退回 per-page LLM(违反 whole-batch P1 定义,是另一种 P1);多次 hierarchical LLM call(违反"一次 selector 请求",且可能吃掉 P1 的 work saving,只能作独立 treatment);先用另一个 LLM 总结再选择(重新引入生成式 compressor,可能退化回 P0);超过 32k 静默截尾。
+
+**影响的实验/门。** §5.4、§5.5、§5.7 的候选集与冠军规则按本 amendment 执行;§9 增补一行:若 `CPU-FULL` 最终胜出,P1 与 dynamic shape 仍然成立,死掉的只是"LLM selector 必不可少"这一条子主张。
+
+**降级声明。** 本 amendment 在 Phase 0 普查数据已被查看之后作出。普查是 P0-only 的描述性测量、不含任何臂间比较,但按 §12 的规则,由它触发的结构改动使**受影响结论的确认性下降**:`LLM-PROMPTVIEW` 相关的门在本轮按 confirmatory 执行,而"为什么淘汰 direct full-view LLM"这一判断本身是 data-dependent 的,记为 exploratory。
