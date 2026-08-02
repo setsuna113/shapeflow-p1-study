@@ -294,7 +294,9 @@ def test_the_markdown_is_reproducible_from_the_json_it_ships_with():
 
     # Endpoint-hierarchy order, not alphabetical: the primary work endpoint leads.
     reading = from_memory.split("## Reading", 1)[1]
-    assert reading.index("GPU-busy seconds") < reading.index("Prompt tokens")
+    assert reading.index("GPU-busy seconds") < reading.index("Prompt tokens"), (
+        "the primary work endpoint must lead the co-primary ones; alphabetical order would put "
+        "Completion before GPU-busy and read as a ranking the study does not make")
 
 
 def test_the_markdown_does_not_end_with_a_blank_line():
@@ -304,7 +306,11 @@ def test_the_markdown_does_not_end_with_a_blank_line():
     report = build_report(_pair(4, treatment_correct=True, baseline_correct=True,
                                 treatment_work=4.0, baseline_work=10.0), resamples=100)
     text = render_markdown(report)
-    assert text.endswith("\n") and not text.endswith("\n\n")
+    assert text.endswith("\n"), "a text file ends with a newline"
+    assert not text.endswith("\n\n"), (
+        "a trailing blank line fails `git diff --check`, so the report could not be committed "
+        "as generated -- and an artifact that must be hand-edited before it ships is no longer "
+        "the artifact")
 
 
 def test_the_namespace_the_cells_came_from_is_named_when_it_is_not_the_live_binding():
@@ -316,12 +322,19 @@ def test_the_namespace_the_cells_came_from_is_named_when_it_is_not_the_live_bind
     """
     records = _pair(3, treatment_correct=True, baseline_correct=True,
                     treatment_work=4.0, baseline_work=10.0)
-    moved = build_report(records, resamples=100, context={
-        "execution_binding_sha256": "b" * 64, "cells_committed_under_sha256": "a" * 64})
-    assert f"--ran-under-binding {'a' * 64}" in render_markdown(moved)
-    assert "Cells committed under: `" + "a" * 16 + "`" in render_markdown(moved)
+    moved = render_markdown(build_report(records, resamples=100, context={
+        "execution_binding_sha256": "b" * 64, "cells_committed_under_sha256": "a" * 64}))
+    assert f"--ran-under-binding {'a' * 64}" in moved, (
+        "the header must carry the flag that reproduces this analysis, in full")
+    # "Execution binding" is the phrase P1_FINDINGS.md and the approval chain use for the binding
+    # a cell was committed under, so it must point at the cells here, not at the grading tree.
+    assert f"- Execution binding: `{'a' * 16}`" in moved
+    assert f"- Analysis binding: `{'b' * 16}`" in moved, (
+        "the grading tree's binding must be labelled as such once the two differ")
 
-    # Same string is the normal case, and repeating it would be noise.
-    same = build_report(records, resamples=100, context={
-        "execution_binding_sha256": "b" * 64, "cells_committed_under_sha256": "b" * 64})
-    assert "Cells committed under" not in render_markdown(same)
+    # Same string is the normal case; two lines saying one thing would be noise.
+    same = render_markdown(build_report(records, resamples=100, context={
+        "execution_binding_sha256": "b" * 64, "cells_committed_under_sha256": "b" * 64}))
+    assert f"- Execution binding: `{'b' * 16}`" in same
+    assert "Analysis binding" not in same, "one binding, one line"
+    assert "--ran-under-binding" not in same

@@ -41,20 +41,28 @@ _HEADLINE = ("accuracy", "evidence_recall", "interval_union_seconds",
              "prompt_tokens", "completion_tokens", "e2e_latency_seconds")
 
 
-def _cells_binding_line(context: Mapping) -> list[str]:
-    """Name the namespace the cells came from, but only when it is not the live binding.
+def _binding_lines(context: Mapping) -> list[str]:
+    """The binding block: one line normally, two when the analysis ran under a different one.
 
-    Analysis normally runs under the binding the run committed under and the two are the same
-    string, so printing it always would be noise. When `--ran-under-binding` moved it they differ,
-    and then the header's `Execution binding` is the tree that *graded* the run rather than the
-    one that produced any of its cells -- which is the reading a reader would otherwise take.
+    Analysis normally runs under the binding the run committed under, the two digests are the
+    same string, and "execution binding" names it unambiguously. When `--ran-under-binding` moved
+    it they differ, and the live digest is then the tree that *graded* the run rather than the one
+    that produced any of its cells -- the reading a reader would otherwise take.
+
+    In that case the label changes rather than merely gaining a sibling. Everywhere else -- in
+    `P1_FINDINGS.md`, in the approval chain -- "execution binding" means the binding a *cell* was
+    committed under, so leaving the analysis-time digest under that name would leave one phrase
+    denoting two different hashes across documents a reader is meant to cross-reference.
     """
     live = str(context.get("execution_binding_sha256", ""))
     cells = str(context.get("cells_committed_under_sha256", ""))
     if not cells or cells == live:
-        return []
-    return [f"- Cells committed under: `{cells[:16]}` "
-            f"(re-run with `--ran-under-binding {cells}`)"]
+        return [f"- Execution binding: `{live[:16]}`"]
+    return [
+        f"- Analysis binding: `{live[:16]}` (the tree that graded the run)",
+        f"- Execution binding: `{cells[:16]}` -- the cells were committed under this; "
+        f"re-run with `--ran-under-binding {cells}`",
+    ]
 
 
 def _n(value, digits: int = 3) -> str:
@@ -95,9 +103,8 @@ def render_markdown(report: Mapping, *, title: str = "BrowseComp-Plus: P1 agains
         f"- Tasks: {len(report.get('tasks') or ())}",
         f"- Run: `{context.get('run_id', '')}` layer `{context.get('layer', '')}`"
         f" lanes `{context.get('lanes')}`",
-        f"- Execution binding: `{str(context.get('execution_binding_sha256', ''))[:16]}`",
+        *_binding_lines(context),
         f"- Answer key: `{str(context.get('evaluator_source_sha256', ''))[:16]}`",
-        *_cells_binding_line(context),
         f"- Bootstrap: {(report.get('bootstrap') or {}).get('resamples')} resamples, "
         f"seed {(report.get('bootstrap') or {}).get('seed')}",
         "",

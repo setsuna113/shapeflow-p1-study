@@ -6,9 +6,9 @@
 - Cells: 520 committed of 560
 - Tasks: 80
 - Run: `campaign1` layer `b1_select` lanes `['0', '1']`
-- Execution binding: `3e73c63194e7a7fd`
+- Analysis binding: `3e73c63194e7a7fd` (the tree that graded the run)
+- Execution binding: `c091c41f1a0ea028` -- the cells were committed under this; re-run with `--ran-under-binding c091c41f1a0ea0280eb855e3909ff1dea512c81e09d24feca4ee3e90a4242f02`
 - Answer key: `0374946363a5c59f`
-- Cells committed under: `c091c41f1a0ea028` (re-run with `--ran-under-binding c091c41f1a0ea0280eb855e3909ff1dea512c81e09d24feca4ee3e90a4242f02`)
 - Bootstrap: 10000 resamples, seed 20260731
 
 ## Arms

@@ -108,8 +108,20 @@ def test_a_placeholder_is_not_a_citation(tmp_path, monkeypatch):
 
 def test_a_non_repository_fails_cleanly_rather_than_with_a_traceback(tmp_path, monkeypatch):
     """The check shells out to git. Outside a checkout that used to raise CalledProcessError,
-    which reads as the gate being broken rather than as the gate being inapplicable."""
+    which reads as the gate being broken rather than as the gate being inapplicable.
+
+    `git ls-files` walks *up* from its -C directory, so "not a repository" is a property of the
+    whole ancestor chain rather than of this directory. Asserting it here keeps the test honest
+    on a machine where the temp root happens to sit inside some checkout: without it the test
+    would silently pass for the wrong reason.
+    """
+    probe = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "--git-dir"],
+                           capture_output=True, text=True)
+    if probe.returncode == 0:
+        pytest.skip(f"{tmp_path} is inside a git repository; nothing to test")
+
     module = _load_check()
     monkeypatch.setattr(module, "REPO", tmp_path)      # no git init
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as caught:
         module.main()
+    assert "cannot run" in str(caught.value), "the exit must say why, not just exit"
