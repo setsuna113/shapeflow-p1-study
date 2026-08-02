@@ -88,6 +88,23 @@ class SharedContentBudget:
         return cls(max_chars=int(max_chars), max_tokens=int(budget))
 
 
+def budget_from_settings(settings) -> "SharedContentBudget":
+    """The run's page budget, derived from the frozen config it was derived from originally.
+
+    One definition, because the recorded ``raw_content_id`` is the hash of the text *after* this
+    budget is applied. Anything that wants to reproduce those bytes -- a replay, a census, a fork
+    -- has to apply the identical bound, and a second copy of these four keys is a second bound
+    that agrees until one of them moves.
+    """
+    return SharedContentBudget.derive(
+        max_chars=int(settings.get("week1", "odr", "max_content_length")),
+        max_model_len=int(settings.get("stack", "engine", "max_model_len")),
+        completion_cap=int(settings.get("week1", "odr", "summarization_model_max_tokens")),
+        prompt_overhead_tokens=int(
+            settings.get("week1", "odr", "summarization_prompt_overhead_tokens")),
+    )
+
+
 @dataclass(frozen=True)
 class SharedContent:
     text: str
