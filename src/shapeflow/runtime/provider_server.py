@@ -116,6 +116,7 @@ DEFAULT_MODEL_ALIASES: dict[str, OpClass] = {
     "qwen-supervisor": OpClass.SUPERVISOR_CONTINUE,
     "qwen-selector-page": OpClass.PAGE_P1_SELECTOR_LOCAL,
     "qwen-selector-page-global": OpClass.PAGE_P1_SELECTOR_GLOBAL,
+    "qwen-selector-batch": OpClass.PAGE_P1_SELECTOR_BATCH,
     "qwen-selector-close": OpClass.COMPRESSOR_P1_SELECTOR,
     # The SHORT_PROSE controls are still the arm's selector work and belong in the same op
     # class; the arm id is what separates them, so the treatment-work total stays complete.

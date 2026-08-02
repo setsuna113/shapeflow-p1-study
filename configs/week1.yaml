@@ -96,6 +96,10 @@ model_aliases:
   qwen-supervisor: SUPERVISOR_CONTINUE
   qwen-selector-page: PAGE_P1_SELECTOR_LOCAL
   qwen-selector-page-global: PAGE_P1_SELECTOR_GLOBAL
+  # The whole-batch selector: one request per gather batch, the unit HC_MECHANISM_v1 specifies.
+  # Its own alias and op class because the per-page arms issued ~9 requests per batch under ~9
+  # separate rendered-token budgets; sharing a label would sum two mechanisms into one line.
+  qwen-selector-batch: PAGE_P1_SELECTOR_BATCH
   qwen-selector-close: COMPRESSOR_P1_SELECTOR
   # The SHORT_PROSE controls carry their own op classes. These previously pointed at the
   # structured-selector classes, so every prose-control request was recorded in the work ledger

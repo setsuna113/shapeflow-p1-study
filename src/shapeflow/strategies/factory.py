@@ -28,7 +28,7 @@ from ..evidence.chunkers import Tokenizer, WhitespaceTokenizer
 from ..odr.hooks import StrategyBundle
 from .close_visible import CloseSelectionStrategy, CloseStrategyConfig
 from .p0 import VendorCloseStrategy, VendorPageStrategy
-from .page_h import PageSelectionStrategy, PageStrategyConfig
+from .page_h import PAGE_SCOPES, PageSelectionStrategy, PageStrategyConfig
 from .prose import ProseCloseStrategy, ProsePageStrategy
 from .selectors_async import CpuLexicalAsyncSelector, LlmAsyncSelector, ShortProseSelector
 
@@ -205,7 +205,13 @@ class StrategyFactory:
                 occurrence_for=self._occurrence_for, work_sink=self._work_sink,
             )
         local = LlmAsyncSelector(
-            self._model_call, op_class="PAGE_P1_SELECTOR_LOCAL",
+            self._model_call,
+            # The op class follows the *unit*, not the boundary. A whole-batch arm issues one
+            # request per gather batch where a per-page arm issues one per page, so recording
+            # both under PAGE_P1_SELECTOR_LOCAL would sum two mechanisms into one line of the
+            # work ledger and average away the very difference this rebuild measures.
+            op_class=("PAGE_P1_SELECTOR_BATCH" if spec.scope == "whole_batch"
+                      else "PAGE_P1_SELECTOR_LOCAL"),
             expected_contract=spec.contract,
         )
         if spec.scope == "hierarchical":
@@ -340,7 +346,7 @@ def _validate_spec(spec: VariantSpec) -> None:
         return
 
     if spec.node in _PAGE_NODES:
-        if spec.scope not in {"per_page", "per_tool_call", "hierarchical"}:
+        if spec.scope not in PAGE_SCOPES:
             raise ValueError(f"{spec.variant_id}: invalid page scope {spec.scope!r}")
         if spec.close_mode not in {"none", "separate"}:
             raise ValueError(f"{spec.variant_id}: page arm changed close mode")

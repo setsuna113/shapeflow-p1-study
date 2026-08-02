@@ -405,6 +405,17 @@ class ProsePageStrategy:
 
     def __init__(self, *, config: PageStrategyConfig, selector, tokenizer: Tokenizer,
                  raw_text_for, occurrence_for, work_sink=None) -> None:
+        if config.scope == "whole_batch":
+            # `PageStrategyConfig` accepts the scope because the structured path implements it,
+            # but this class summarises one page per call and assembles the results per vendor
+            # slot. Running it under a whole_batch label would issue N requests under N separate
+            # budgets while the registry, the reports and the contract all said one -- which is
+            # precisely the drift `whole_batch` was added to end. Refusing at construction keeps
+            # the failure at registry-load time instead of mid-campaign.
+            raise ValueError(
+                f"{config.variant_id}: SHORT_PROSE has no whole_batch implementation yet; it "
+                "summarises per page and would fan out below the batch under a whole-batch name"
+            )
         self.config = config
         self._selector = selector
         self._tokenizer = tokenizer

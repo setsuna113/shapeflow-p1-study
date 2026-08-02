@@ -20,8 +20,8 @@
       "enum": ["vendor", "fixed_token_v1", "paragraph_sentence_v1", "markdown_structure_v1", "manifest", "visible_view"]
     },
     "scope": {
-      "description": "hierarchical runs a per-page shortlist then a cross-source reducer; its second LLM pass is accounted separately and must never be hidden inside the aggregator.",
-      "enum": ["vendor", "per_page", "per_tool_call", "per_researcher", "hierarchical"]
+      "description": "How candidates are partitioned across selector calls. whole_batch is the one the H/C mechanism contract specifies -- one selector request per gather batch, under one rendered-token budget. per_page and per_tool_call fan out below the batch and therefore multiply the effective batch budget by the number of calls they make; they are retained because the shipped Freeze-1 arms ran on them and must stay reproducible. hierarchical runs a per-page shortlist then a cross-source reducer; its second LLM pass is accounted separately and must never be hidden inside the aggregator.",
+      "enum": ["vendor", "per_page", "per_tool_call", "whole_batch", "per_researcher", "hierarchical"]
     },
     "contract": {
       "enum": ["VENDOR_PROSE", "P1_ID", "P1_TYPED", "P1_BRIDGE", "SHORT_PROSE", "CPU_LEXICAL"]

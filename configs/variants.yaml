@@ -22,6 +22,15 @@ variants:
   - {variant_id: H00-PROSE,     node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: SHORT_PROSE,  aggregation: stable_union_v1, close_mode: separate,           selector_backend: LLM,         publication_path: DIRECT_PROSE,         output_representation: SHORT_PROSE,      is_control: true}
   - {variant_id: H01,           node: WEBPAGE_P1,  chunker: fixed_token_v1,        scope: per_page,      contract: P1_ID,        aggregation: stable_union_v1, close_mode: separate,           selector_backend: LLM,         publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS}
   - {variant_id: H02,           node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: per_page,      contract: P1_ID,        aggregation: stable_union_v1, close_mode: separate,           selector_backend: LLM,         publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS}
+  # Freeze-2 whole-batch H family. `scope: whole_batch` is the unit HC_MECHANISM_v1 always
+  # specified -- one selector request per gather batch, under one rendered-token budget. The two
+  # rows below are the exact whole-batch analogues of H00-CPU and H02 above, so `H02 -> HW02`
+  # and `H00-CPU -> HW00-CPU` each change only the scope. That is what makes the unit itself
+  # measurable rather than merely corrected: at a mean 9.07 pages per batch the per-page arms
+  # ran under an effective 9x512 budget, and these run under 512.
+  - {variant_id: HW00-CPU,      node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: whole_batch,  contract: P1_ID,        aggregation: stable_union_v1, close_mode: separate,           selector_backend: CPU_LEXICAL, publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS,      is_control: true}
+  - {variant_id: HW02,          node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: whole_batch,  contract: P1_ID,        aggregation: stable_union_v1, close_mode: separate,           selector_backend: LLM,         publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS}
+
   # Matched H ablations. These fill the missing cells needed to change exactly one factor at a
   # time: H02 -> H_TYPED_STABLE changes only the output contract;
   # H_TYPED_STABLE -> H03 changes only aggregation; H03 -> H_HIER_COVERAGE changes only scope;

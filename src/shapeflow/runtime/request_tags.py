@@ -17,6 +17,13 @@ class OpClass(enum.Enum):
     PAGE_P0_SUMMARY = "PAGE_P0_SUMMARY"
     PAGE_P1_SELECTOR_LOCAL = "PAGE_P1_SELECTOR_LOCAL"
     PAGE_P1_SELECTOR_GLOBAL = "PAGE_P1_SELECTOR_GLOBAL"
+    # The whole-batch selector: one request per gather batch, which is the unit
+    # HC_MECHANISM_v1 specifies. It is a separate op class from PAGE_P1_SELECTOR_LOCAL and not
+    # an implementation detail of it -- the per-page arms issued ~9 requests per batch under ~9
+    # separate budgets, so summing the two would report a whole-batch arm's cost as though the
+    # two mechanisms were one, and the saving the rebuild exists to measure would be averaged
+    # with the saving of the thing it replaces.
+    PAGE_P1_SELECTOR_BATCH = "PAGE_P1_SELECTOR_BATCH"
     # The SHORT_PROSE controls are model-backed work at the same two boundaries, and they get
     # their own op classes rather than borrowing the selector's. Separating "structured ID" from
     # "short prose" at op-class granularity is the entire purpose of H_ID_VS_PROSE and
@@ -48,6 +55,7 @@ TREATMENT_OPS = frozenset({
     OpClass.PAGE_P0_SUMMARY,
     OpClass.PAGE_P1_SELECTOR_LOCAL,
     OpClass.PAGE_P1_SELECTOR_GLOBAL,
+    OpClass.PAGE_P1_SELECTOR_BATCH,
     OpClass.PAGE_P1_SHORT_PROSE,
     OpClass.RESEARCHER_REACT,
     OpClass.COMPRESSOR_P0,
