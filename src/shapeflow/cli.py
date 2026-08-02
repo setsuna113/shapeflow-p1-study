@@ -1223,6 +1223,7 @@ def replay_selectors(
     """
     import asyncio
 
+    from .campaign.pages import PageRegistry
     from .campaign.replay import build_replay_setup, iter_checkpoints, run_trial, trial_key
     from .campaign.settings import Settings
     from .evidence.model_tokenizer import tokenizer_sha256
@@ -1251,9 +1252,17 @@ def replay_selectors(
     except FileNotFoundError as e:
         _fail(str(e))
 
+    # The page bytes reach the strategy the way they reach it in production: through a
+    # PageRegistry the seam prefilled. `StrategyFactory` defaults `raw_text_for` to a callable
+    # returning "", so a factory built without one yields a strategy that reads every page as
+    # empty, offers no candidates, and reports a flawless publication rate for an arm that never
+    # selected anything -- the inert-arm failure `campaign.pages` and the publication canary
+    # both exist to catch.
+    pages = PageRegistry()
     factory = StrategyFactory(
         registry=registry, model_call=_refuse_model_call, tokenizer=setup.tokenizer,
         token_budget=token_budget,
+        raw_text_for=pages.text_for, occurrence_for=pages.occurrence_for,
     )
     # The topic reaches the selector prompt, so a replay run without it is scoring a different
     # prompt from the one the arm would send.
@@ -1293,6 +1302,7 @@ def replay_selectors(
             skipped += 1
             continue
 
+        pages.prefill(*rebuilt.registry_prefill())
         # A strategy per batch: publication-scope binding is per-instance state, and reusing one
         # across unrelated checkpoints would make a replay's handle allocation depend on the
         # order batches happened to be walked in.

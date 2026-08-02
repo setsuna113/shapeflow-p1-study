@@ -46,6 +46,7 @@ __all__ = [
     "OccurrenceIndex",
     "PageReconstructor",
     "PageResolution",
+    "ReplayHarnessError",
     "ViewMeasurement",
     "ViewProbeDeclined",
     "iter_checkpoints",
@@ -334,6 +335,10 @@ class ViewMeasurement:
     view_sha256: str
 
 
+class ReplayHarnessError(RuntimeError):
+    """The replay itself is wrong, as distinct from the arm under replay failing."""
+
+
 class ViewProbeDeclined(Exception):
     """Raised by the census probe once it has measured. Never a real selector failure."""
 
@@ -573,6 +578,20 @@ async def run_trial(
         published_text = "".join(str(o.content) for o in observations)
     except PageSelectionError as failure:
         batch_failure = failure.failure.reason
+
+    # A batch with verified pages must offer candidates. Offering none means the strategy read
+    # every page as empty -- almost always because `raw_text_for` was never bound to the rebuilt
+    # bytes -- and that failure is invisible in the results: `run_selection` returns an empty
+    # publication with `text=""`, which is `ok`, so an arm that selected nothing at all reports
+    # a flawless publication rate. It is a fault in the harness, not a measurement, so it stops
+    # the walk instead of being recorded.
+    offered = sum(outcome.offered for outcome in strategy.last_outcomes)
+    if reconstruction.content_pages and not offered:
+        raise ReplayHarnessError(
+            f"batch {reconstruction.checkpoint_digest[:12]} has "
+            f"{len(reconstruction.content_pages)} verified pages but offered no candidates; "
+            "the strategy is reading them as empty, so this arm would publish nothing and "
+            "report success for it")
 
     return {
         "checkpoint_digest": reconstruction.checkpoint_digest,

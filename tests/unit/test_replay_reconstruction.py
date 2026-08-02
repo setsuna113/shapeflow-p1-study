@@ -315,3 +315,60 @@ async def test_a_replayed_batch_records_its_failure_as_an_outcome_not_an_excepti
     assert record["outcomes"][0]["selector_attempted"] is True
     assert record["outcomes"][0]["offered"] > 0, (
         "the offered candidate set is the denominator and survives the failure")
+
+
+@pytest.mark.asyncio
+async def test_a_strategy_that_reads_every_page_as_empty_stops_the_walk():
+    """An inert arm reports a flawless publication rate, so it must not be recordable.
+
+    `run_selection` returns an empty publication with ``text=""`` when a batch yields no spans,
+    and ``text is not None`` makes that outcome ``ok``. So a strategy whose ``raw_text_for`` was
+    never bound to the rebuilt bytes publishes nothing on every batch and scores 100%. This
+    happened: the first replay run wrote 1,632 trials at a perfect rate with every span count
+    zero, because `StrategyFactory` defaults `raw_text_for` to a callable returning "".
+    """
+    from shapeflow.campaign.replay import ReplayHarnessError, run_trial
+    from shapeflow.evidence.model_tokenizer import WhitespaceTokenizer
+    from shapeflow.odr.checkpoints import (
+        FrozenMessage,
+        HCheckpoint,
+        SamplingEnvelope,
+        VendorVisibleResult,
+        to_document,
+    )
+    from shapeflow.strategies.page_h import PageSelectionStrategy, PageStrategyConfig
+
+    result = VendorVisibleResult(
+        vendor_visible_order=0, url="https://a.example", title="a",
+        snippet="s", raw_content_id="cid-a", source_occurrence_id="o1",
+    )
+    checkpoint = HCheckpoint(
+        task_id="t", researcher_id="r", assistant_turn_index=0,
+        assistant_message=FrozenMessage(role="ai", content="search"),
+        sibling_tool_calls=(), search_result_sets=(("call-1", (result,)),),
+        non_search_outputs=(), researcher_state_hash="h",
+        sampling=SamplingEnvelope(model="m", temperature=0.0, top_p=1.0, max_tokens=8, seed=1),
+    )
+
+    class Unused:
+        async def select(self, *, task_ctx, view):  # pragma: no cover - never reached
+            raise AssertionError("a view with no candidates must not reach the selector")
+
+    strategy = PageSelectionStrategy(
+        PageStrategyConfig(variant_id="HW00-CPU", chunker="markdown_structure_v1",
+                           scope="whole_batch", contract="P1_ID",
+                           aggregation="stable_union_v1", token_budget=512),
+        selector=Unused(), tokenizer=WhitespaceTokenizer(),
+        # The default `StrategyFactory` behaviour, reproduced exactly.
+        raw_text_for=lambda _cid: "", occurrence_for=lambda cid: cid,
+    )
+    reconstruction = BatchReconstruction(
+        checkpoint_digest=checkpoint.digest, task_id="t", siblings=1,
+        pages=(PageResolution(raw_content_id="cid-a", occurrence_id="o1",
+                              status=VERIFIED, docid="d1", text="real page bytes"),),
+    )
+
+    with pytest.raises(ReplayHarnessError, match="offered no candidates"):
+        await run_trial(
+            document=to_document(checkpoint), reconstruction=reconstruction,
+            strategy=strategy, variant_id="HW00-CPU", topic="a topic", token_budget=512)
