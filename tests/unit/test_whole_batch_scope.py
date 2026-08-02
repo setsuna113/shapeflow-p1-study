@@ -267,6 +267,54 @@ def test_a_whole_batch_arm_is_charged_to_its_own_op_class():
     assert OpClass.PAGE_P1_SELECTOR_BATCH.value in STRUCTURED_SELECTOR_OPS
 
 
+def test_only_an_llm_arm_without_admission_carries_a_window_ceiling():
+    """The ceiling refuses a prompt the engine would reject. It belongs to exactly one shape.
+
+    A CPU arm has no context window at all, so giving CPU-FULL a ceiling would mark 61.9% of
+    batches PROMPT_INFEASIBLE for the one arm that is feasible on all of them -- the precise
+    opposite of what it measures. An arm with admission cannot exceed the window by
+    construction, so a ceiling there could only ever fire on a bug.
+    """
+    from shapeflow.strategies.factory import StrategyFactory, load_registry
+
+    factory = StrategyFactory(
+        registry=load_registry(Path(__file__).resolve().parents[2] / "configs"),
+        model_call=lambda **_kw: None, tokenizer=WhitespaceTokenizer(),
+        prompt_budget=20_000, prompt_window_ceiling=32_000,
+    )
+    ceilings = {
+        arm: factory.build(arm).page.config.prompt_window_ceiling
+        for arm in ("CPU-FULL", "CPU-PROMPTVIEW", "LLM-PROMPTVIEW", "LLM-FULL")
+    }
+
+    assert ceilings == {
+        "CPU-FULL": 0, "CPU-PROMPTVIEW": 0, "LLM-PROMPTVIEW": 0, "LLM-FULL": 32_000}
+
+
+def test_the_four_matched_arms_differ_in_exactly_one_thing_each():
+    """The shootout's two contrasts only mean something if the arms are matched.
+
+    CPU-FULL vs CPU-PROMPTVIEW must differ only in admission (that difference *is* the price of
+    pruning); CPU-PROMPTVIEW vs LLM-PROMPTVIEW only in who ranks (that difference *is* the
+    model's value). Any second difference makes both numbers unattributable.
+    """
+    from shapeflow.strategies.factory import load_registry
+
+    registry = load_registry(Path(__file__).resolve().parents[2] / "configs")
+    fields = ("node", "chunker", "scope", "contract", "aggregation", "close_mode",
+              "publication_path", "output_representation", "selector_backend",
+              "prompt_admission")
+
+    def spec(arm):
+        return {f: getattr(registry[arm], f) for f in fields}
+
+    full, view = spec("CPU-FULL"), spec("CPU-PROMPTVIEW")
+    assert [f for f in fields if full[f] != view[f]] == ["prompt_admission"]
+
+    cpu, llm = spec("CPU-PROMPTVIEW"), spec("LLM-PROMPTVIEW")
+    assert [f for f in fields if cpu[f] != llm[f]] == ["selector_backend"]
+
+
 def test_short_prose_refuses_whole_batch_instead_of_fanning_out_under_the_name():
     """`ProsePageStrategy` summarises one page per call and has no whole-batch form yet.
 

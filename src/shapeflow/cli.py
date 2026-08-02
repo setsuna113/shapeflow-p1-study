@@ -1228,6 +1228,7 @@ def replay_selectors(
     from .campaign.settings import Settings
     from .evidence.model_tokenizer import tokenizer_sha256
     from .hashing import canonical_json
+    from .p1.prompt_pack import PromptBudget
     from .strategies.factory import StrategyFactory, load_registry
 
     _require_role("runner")
@@ -1258,12 +1259,27 @@ def replay_selectors(
     # empty, offers no candidates, and reports a flawless publication rate for an arm that never
     # selected anything -- the inert-arm failure `campaign.pages` and the publication canary
     # both exist to catch.
+    # Two budgets, derived not chosen. `token_budget` bounds the rendered output; this one
+    # bounds what the selector may see. `overhead_tokens` covers the instruction block, the
+    # topic and the schema that wrap the candidate list -- 1,024 is conservative against a
+    # template measured at ~250-300 tokens, and the margin absorbs any disagreement between
+    # this tokenizer's count and the engine's own.
+    prompt_budget = PromptBudget(
+        max_model_len=int(settings.get("stack", "engine", "max_model_len")),
+        completion_cap=int(
+            settings.get("week1", "measurement", "selector_max_completion_tokens")),
+        overhead_tokens=1024,
+    )
     pages = PageRegistry()
     factory = StrategyFactory(
         registry=registry, model_call=_refuse_model_call, tokenizer=setup.tokenizer,
         token_budget=token_budget,
+        prompt_budget=prompt_budget.candidates,
+        prompt_window_ceiling=prompt_budget.max_model_len - prompt_budget.completion_cap,
         raw_text_for=pages.text_for, occurrence_for=pages.occurrence_for,
     )
+    typer.echo(f"prompt budget: {prompt_budget.candidates} candidate tokens; "
+               f"window ceiling {prompt_budget.max_model_len - prompt_budget.completion_cap}")
     # The topic reaches the selector prompt, so a replay run without it is scoring a different
     # prompt from the one the arm would send.
     questions = _bcplus_questions()

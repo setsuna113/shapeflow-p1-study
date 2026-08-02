@@ -35,6 +35,7 @@ from ..p1.aggregators import (
 )
 from ..p1.contracts import SelectionContractError, parse_selection
 from ..p1.preflight import PreflightConfig, preflight
+from ..p1.prompt_pack import PromptPackUnsatisfiable, prompt_pack_v1
 from ..p1.view import CandidateViewRecord, ViewConstructionError
 
 __all__ = [
@@ -152,6 +153,11 @@ class SelectionOutcome:
     tokenizer_sha256: str = ""
     stage: str = "single"       # single | local | global
     checkpoint_hash: str = ""
+    #: What the prompt-admission stage dropped to fit the window, or None when no admission ran.
+    #: Carried because CPU-FULL minus CPU-PROMPTVIEW is the price of that pruning, and pricing it
+    #: needs the identities of the removed spans rather than a count.
+    prompt_admission: Optional[dict] = None
+    prompt_admission_dropped_span_ids: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -205,6 +211,9 @@ async def run_selection(
     stage: str = "single",
     publication_scope: tuple[int, ...] | None = None,
     publication_ordinals: dict[str, int] | None = None,
+    prompt_admission: str = "none",
+    prompt_budget: int = 0,
+    prompt_window_ceiling: int = 0,
 ) -> SelectionOutcome:
     """Offer, select, publish -- or fail with everything it cost recorded."""
     work = WorkRecord()
@@ -221,6 +230,38 @@ async def run_selection(
             offered_query_attempt_ids=offered_query_attempt_ids,
             offered_source_occurrence_ids=offered_source_occurrence_ids,
         )
+
+    # Prompt admission, before the view exists. Two budgets bind at this boundary and they are
+    # enforced by two different objects: this one decides what the selector may *see* (the
+    # engine's context window), `budget_pack_v1` decides what survives *rendering* (512 tokens).
+    # Fusing them would put the model's ranking inside the decision about what to show the model.
+    prompt_pack: Optional[object] = None
+    if prompt_admission and prompt_admission != "none":
+        if prompt_admission != "prompt_pack_v1":
+            raise ValueError(f"unknown prompt admission {prompt_admission!r}")
+        texts = [
+            snapshot_texts.get(str(s.get("content_hash", "")), "")[
+                int(s.get("char_start", 0)):int(s.get("char_end", 0))]
+            for s in spans
+        ]
+        try:
+            prompt_pack = prompt_pack_v1(
+                spans=list(spans), texts=texts,
+                token_counts=[tokenizer.count(t) for t in texts],
+                budget=prompt_budget, topic=topic,
+            )
+        except PromptPackUnsatisfiable as e:
+            # A real outcome for a batch of very long pages, not an error: no prompt covering
+            # this batch fits the window. Recorded so it lands in the all-offered denominator.
+            return SelectionOutcome(
+                work=work, failure=SelectionFailure("PROMPT_INFEASIBLE", str(e)),
+                contract=contract, aggregation=aggregation, chunker=chunker, stage=stage,
+                tokenizer_sha256=tokenizer_digest, checkpoint_hash=checkpoint_hash,
+                offered_query_attempt_ids=offered_query_attempt_ids,
+                offered_source_occurrence_ids=offered_source_occurrence_ids,
+            )
+        admitted = set(prompt_pack.span_ids)
+        spans = [s for s in spans if str(s.get("span_id", "")) in admitted]
 
     try:
         view = CandidateViewRecord.build(
@@ -240,6 +281,26 @@ async def run_selection(
             offered_query_attempt_ids=offered_query_attempt_ids,
             offered_source_occurrence_ids=offered_source_occurrence_ids,
         )
+
+    # The diagnostic arm: no admission stage, so the prompt may simply not fit. Refusing here
+    # rather than dispatching keeps the failure attributable -- the engine would reject the
+    # request anyway, but as a provider error indistinguishable from an outage.
+    if prompt_window_ceiling and prompt_admission in ("", "none"):
+        prompt_tokens = tokenizer.count(view.prompt_bytes.decode("utf-8"))
+        if prompt_tokens > prompt_window_ceiling:
+            return SelectionOutcome(
+                work=work, view_sha256=view.view_sha256,
+                failure=SelectionFailure(
+                    "PROMPT_INFEASIBLE",
+                    f"whole-batch prompt is {prompt_tokens} tokens against a "
+                    f"{prompt_window_ceiling}-token ceiling"),
+                contract=contract, aggregation=aggregation, chunker=chunker, stage=stage,
+                tokenizer_sha256=tokenizer_digest, checkpoint_hash=checkpoint_hash,
+                offered=len(view.candidates),
+                offered_span_ids=tuple(c.span_id for c in view.candidates),
+                offered_query_attempt_ids=offered_query_attempt_ids,
+                offered_source_occurrence_ids=offered_source_occurrence_ids,
+            )
 
     offered_span_ids = tuple(c.span_id for c in view.candidates)
     publication_handle_map = view.publication_handle_map
@@ -430,6 +491,9 @@ async def run_selection(
     return SelectionOutcome(
         text=result.rendered.text, work=work, view_sha256=view.view_sha256,
         selector_attempted=True,
+        prompt_admission=(prompt_pack.accounting() if prompt_pack is not None else None),
+        prompt_admission_dropped_span_ids=(
+            prompt_pack.dropped_span_ids if prompt_pack is not None else ()),
         selected=len(aggregated.items), offered=len(view.candidates),
         dropped_for_budget=len(aggregated.dropped_for_budget),
         normalization=selection.normalization.__dict__,

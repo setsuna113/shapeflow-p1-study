@@ -31,6 +31,26 @@ variants:
   - {variant_id: HW00-CPU,      node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: whole_batch,  contract: P1_ID,        aggregation: stable_union_v1, close_mode: separate,           selector_backend: CPU_LEXICAL, publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS,      is_control: true}
   - {variant_id: HW02,          node: WEBPAGE_P1,  chunker: markdown_structure_v1, scope: whole_batch,  contract: P1_ID,        aggregation: stable_union_v1, close_mode: separate,           selector_backend: LLM,         publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS}
 
+  # Amendment 1: the four matched shootout arms. Two budgets bind at opposite ends of one
+  # request -- the engine's context window before the selector is called, the 512 rendered
+  # tokens after it has chosen -- and each is enforced by its own deterministic CPU packer, so
+  # the model guesses neither. All four share `budget_pack_v1` as the output packer, so an arm
+  # differs from its neighbour in exactly one thing.
+  #
+  # The two contrasts these exist to produce:
+  #   CPU-FULL      - CPU-PROMPTVIEW = the price of deleting evidence to fit the LLM
+  #   LLM-PROMPTVIEW - CPU-PROMPTVIEW = whether the LLM is smarter on the same visible evidence
+  # Without the first, an LLM that loses cannot be told apart from one that only saw a
+  # truncated candidate set.
+  - {variant_id: CPU-FULL,              node: WEBPAGE_P1, chunker: markdown_structure_v1, scope: whole_batch, contract: P1_ID,       aggregation: budget_pack_v1, close_mode: separate, selector_backend: CPU_LEXICAL, publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS, is_control: true, prompt_admission: none}
+  - {variant_id: CPU-PROMPTVIEW,        node: WEBPAGE_P1, chunker: markdown_structure_v1, scope: whole_batch, contract: P1_ID,       aggregation: budget_pack_v1, close_mode: separate, selector_backend: CPU_LEXICAL, publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS, is_control: true, prompt_admission: prompt_pack_v1}
+  - {variant_id: LLM-PROMPTVIEW,        node: WEBPAGE_P1, chunker: markdown_structure_v1, scope: whole_batch, contract: P1_ID,       aggregation: budget_pack_v1, close_mode: separate, selector_backend: LLM,         publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS, prompt_admission: prompt_pack_v1}
+  - {variant_id: SHORTPROSE-PROMPTVIEW, node: WEBPAGE_P1, chunker: markdown_structure_v1, scope: whole_batch, contract: SHORT_PROSE, aggregation: stable_union_v1, close_mode: separate, selector_backend: LLM,         publication_path: DIRECT_PROSE,         output_representation: SHORT_PROSE,  is_control: true, prompt_admission: prompt_pack_v1, runnable: false, unavailable_reason: "ProsePageStrategy summarises one page per call and has no whole-batch form yet; running it under this id would issue N requests under N completion caps while the registry said one, which is the drift whole_batch exists to end."}
+  # Diagnostic only. Runs when the whole-batch prompt fits the window and records
+  # PROMPT_INFEASIBLE when it does not; stays in the all-offered denominator and may never be
+  # promoted to champion. Measured over 1,632 batches, 61.9% are infeasible.
+  - {variant_id: LLM-FULL,              node: WEBPAGE_P1, chunker: markdown_structure_v1, scope: whole_batch, contract: P1_ID,       aggregation: budget_pack_v1, close_mode: separate, selector_backend: LLM,         publication_path: STRUCTURED_SELECTION, output_representation: EVIDENCE_IDS, prompt_admission: none, diagnostic_only: true}
+
   # Matched H ablations. These fill the missing cells needed to change exactly one factor at a
   # time: H02 -> H_TYPED_STABLE changes only the output contract;
   # H_TYPED_STABLE -> H03 changes only aggregation; H03 -> H_HIER_COVERAGE changes only scope;

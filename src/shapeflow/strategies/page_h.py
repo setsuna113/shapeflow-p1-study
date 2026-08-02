@@ -61,10 +61,25 @@ class PageStrategyConfig:
     chunk_max_tokens: int = 320
     bridge_token_cap_each: int | None = None
     bridge_token_cap_total: int | None = None
+    #: "none" | "prompt_pack_v1". The input-side budget, distinct from token_budget, which is the
+    #: output-side one. See Amendment 1: they bind at opposite ends of the same request.
+    prompt_admission: str = "none"
+    #: Room for candidate material after instructions, schema, completion and margin.
+    prompt_budget: int = 0
+    #: Non-zero only on the diagnostic arm that runs *without* admission, so an over-window
+    #: prompt is refused as PROMPT_INFEASIBLE instead of being dispatched and rejected by the
+    #: engine as something indistinguishable from an outage.
+    prompt_window_ceiling: int = 0
 
     def __post_init__(self) -> None:
         if self.scope not in PAGE_SCOPES:
             raise ValueError(f"unknown page scope {self.scope!r}")
+        if self.prompt_admission not in {"none", "prompt_pack_v1"}:
+            raise ValueError(f"unknown prompt admission {self.prompt_admission!r}")
+        if self.prompt_admission != "none" and self.prompt_budget <= 0:
+            raise ValueError(
+                f"{self.variant_id}: prompt admission needs a positive prompt_budget; a zero "
+                "budget would refuse every batch as infeasible")
         if self.contract == "P1_BRIDGE":
             if self.bridge_token_cap_each is None or self.bridge_token_cap_total is None:
                 raise ValueError("P1_BRIDGE page variant requires per-bridge and total token caps")
@@ -497,6 +512,9 @@ class PageSelectionStrategy:
             stage=stage,
             publication_scope=group.get("publication_scope"),
             publication_ordinals=group.get("publication_ordinals"),
+            prompt_admission=self.config.prompt_admission,
+            prompt_budget=self.config.prompt_budget,
+            prompt_window_ceiling=self.config.prompt_window_ceiling,
         )
         if outcome.ok and group.get("passthrough"):
             outcome.text = "\n\n".join((outcome.text, *group["passthrough"]))

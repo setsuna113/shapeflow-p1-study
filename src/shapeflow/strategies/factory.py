@@ -64,6 +64,11 @@ class VariantSpec:
     is_control: bool = False
     bridge_token_cap_each: int | None = None
     bridge_token_cap_total: int | None = None
+    #: Input-side budget policy: "none" or "prompt_pack_v1". Distinct from the output-side
+    #: rendered-token budget; see Amendment 1.
+    prompt_admission: str = "none"
+    #: Diagnostic arms are measured but may never be promoted to champion.
+    diagnostic_only: bool = False
     runnable: bool = True
     unavailable_reason: str = ""
 
@@ -88,6 +93,8 @@ def load_registry(configs: Path) -> dict[str, VariantSpec]:
             is_control=bool(v.get("is_control", False)),
             bridge_token_cap_each=v.get("bridge_token_cap_each"),
             bridge_token_cap_total=v.get("bridge_token_cap_total"),
+            prompt_admission=str(v.get("prompt_admission", "none")),
+            diagnostic_only=bool(v.get("diagnostic_only", False)),
             runnable=bool(v.get("runnable", True)),
             unavailable_reason=str(v.get("unavailable_reason", "")),
         )
@@ -113,6 +120,11 @@ class StrategyFactory:
         model_call: Callable,
         tokenizer: Optional[Tokenizer] = None,
         token_budget: int = 512,
+        #: Input-side budget: room for candidate material in a selector prompt, after the
+        #: instructions, schema, completion ceiling and margin are paid for. Distinct from
+        #: `token_budget`, which bounds the *rendered output*. Amendment 1.
+        prompt_budget: int = 0,
+        prompt_window_ceiling: int = 0,
         raw_text_for: Optional[Callable[[str], str]] = None,
         occurrence_for: Optional[Callable[[str], str]] = None,
         raw_spans_for: Optional[Callable[[Any], list]] = None,
@@ -123,6 +135,8 @@ class StrategyFactory:
         self._model_call = model_call
         self._tokenizer = tokenizer or WhitespaceTokenizer()
         self._token_budget = token_budget
+        self._prompt_budget = prompt_budget
+        self._prompt_window_ceiling = prompt_window_ceiling
         self._raw_text_for = raw_text_for or (lambda cid: "")
         self._occurrence_for = occurrence_for or (lambda cid: cid)
         self._raw_spans_for = raw_spans_for
@@ -237,6 +251,17 @@ class StrategyFactory:
             aggregation=spec.aggregation, token_budget=self._token_budget,
             bridge_token_cap_each=spec.bridge_token_cap_each,
             bridge_token_cap_total=spec.bridge_token_cap_total,
+            prompt_admission=spec.prompt_admission,
+            prompt_budget=self._prompt_budget,
+            # The ceiling belongs only to an LLM arm that runs without admission -- the one
+            # shape that can build a prompt the engine will refuse. An arm with admission
+            # cannot exceed the window by construction, and a CPU arm has no window at all:
+            # giving CPU-FULL a ceiling would mark 61.9% of batches infeasible for the one arm
+            # that is feasible on all of them, which is the opposite of what it measures.
+            prompt_window_ceiling=(
+                self._prompt_window_ceiling
+                if spec.prompt_admission == "none" and spec.selector_backend == "LLM"
+                else 0),
         )
 
     def _close_half(self, spec: VariantSpec):
