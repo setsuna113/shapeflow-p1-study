@@ -17,8 +17,8 @@ output, so selection and rendering agree on what "budget" means. Preflight later
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Callable, Optional, Sequence
 
 from .contracts import ParsedBridge, ParsedGap, ParsedItem, ParsedSelection
 
@@ -28,6 +28,7 @@ __all__ = [
     "Coster",
     "stable_union_v1",
     "coverage_budget_v1",
+    "budget_pack_v1",
     "global_rerank_v1",
     "AggregationError",
 ]
@@ -239,6 +240,187 @@ def coverage_budget_v1(
         items=tuple(ordered), gaps=sel.gaps, bridges=bridges,
         dropped_for_budget=tuple(dropped), dropped_bridges=dropped_bridges,
     )
+
+
+def budget_pack_v1(
+    sel: ParsedSelection,
+    registry: dict,
+    *,
+    token_budget: int,
+    coster: Coster,
+    min_sources: int = 1,
+    _selection_rank: Optional[dict[str, int]] = None,
+) -> AggregatedEvidence:
+    """Pack under a rendered-token budget that is never exceeded, and prove it before returning.
+
+    `coverage_budget_v1` force-admits contradiction pairs and the source-diversity minimum even
+    when they overflow, on the reasoning that preflight will catch it and the sample will fall
+    back to P0. Under a per-page budget that was a rare escape hatch. Under one whole-batch
+    budget it is the common case -- and it is the measured mechanism behind Freeze-1's 100%
+    H-boundary preflight rejection -- so this aggregator removes it.
+
+    The replacement is **pair-atomic admission with rollback**: a contradiction facet's spans
+    form one unit that is admitted or dropped together. That is legal because `preflight` rejects
+    a *one-sided* contradiction, not a *dropped* one -- dropping both sides costs nothing, while
+    keeping both over budget costs the entire batch. `min_sources` has no preflight check at all,
+    so it can only ever be a preference, and here it is expressed as consideration order rather
+    than as a forced admission.
+
+    **The guarantee, stated exactly.** The returned object is bit-for-bit the last object
+    `coster` measured, and that measurement was at or under `token_budget`. Nothing more is
+    claimed: the cost function is neither monotone nor submodular, because a contiguous run
+    shares one `SOURCE:` header (so adding a span can make the render *cheaper*) and a bridge is
+    re-admitted only once all its spans survive (so adding a span can cost far more than its own
+    rows). Greedy therefore has no approximation ratio here, and the distance to an optimal pack
+    is *measured* against an exhaustive packer rather than asserted away.
+
+    At most 64 exact costings run per call, because the selector schema caps `selected_ids` at
+    that -- independent of how many candidates the view offered.
+    """
+    for item in sel.items:
+        _require(registry, item.span_id)
+
+    dedup: dict[str, ParsedItem] = {}
+    for item in sel.items:
+        dedup.setdefault(item.span_id, item)
+    items = list(dedup.values())
+    if not items:
+        return AggregatedEvidence(items=(), gaps=sel.gaps, bridges=sel.bridges)
+
+    # Facets the selector marked as a live disagreement. Read from relations rather than from a
+    # single role: a span may support one facet and contradict another, and collapsing that to
+    # one value both loses the conflict and misranks the item.
+    facet_roles: dict[str, set[str]] = {}
+    for item in items:
+        for facet, role in item.relations:
+            if role:
+                facet_roles.setdefault(facet, set()).add(role)
+    contradiction_facets = {
+        f for f, roles in facet_roles.items() if {"support", "contradict"} <= roles
+    }
+
+    def rank(it) -> int:
+        roles = {r for _, r in it.relations if r}
+        return min((_ROLE_RANK.get(r, 2) for r in roles), default=2)
+
+    def sort_key(span_id: str) -> tuple:
+        it = dedup[span_id]
+        selection_rank = (
+            _selection_rank.get(span_id, len(_selection_rank))
+            if _selection_rank is not None else 0
+        )
+        return (selection_rank, rank(it), _order_key(registry[span_id]))
+
+    units = _atomic_units(items, contradiction_facets)
+    units.sort(key=lambda unit: min(sort_key(span_id) for span_id in unit))
+    units = _promote_new_sources(units, registry=registry, min_sources=min_sources)
+
+    kept: list[str] = []
+    kept_ids: set[str] = set()
+
+    def cost_of(span_ids: list[str]) -> int:
+        ordered = sorted(span_ids, key=lambda sid: _order_key(registry[sid]))
+        trial = AggregatedEvidence(
+            items=tuple(AggregatedItem.from_parsed(dedup[sid]) for sid in ordered),
+            gaps=sel.gaps,
+            bridges=_bridges_supported_by(sel.bridges, set(span_ids)),
+        )
+        return coster(trial, registry)
+
+    for unit in units:
+        trial = kept + [sid for sid in unit if sid not in kept_ids]
+        if not trial or len(trial) == len(kept):
+            continue
+        if cost_of(trial) <= token_budget:
+            kept = trial
+            kept_ids = set(trial)
+
+    ordered_ids = sorted(kept_ids, key=lambda sid: _order_key(registry[sid]))
+    bridges = _bridges_supported_by(sel.bridges, kept_ids)
+    # Exactly the ledger `preflight._provenance_errors` demands: everything the selector chose
+    # that did not survive. Computed from the two sets rather than accumulated in the loop, so a
+    # unit that was tried and rolled back cannot be double-counted or missed.
+    dropped = tuple(sid for sid in dedup if sid not in kept_ids)
+
+    packed = AggregatedEvidence(
+        items=tuple(AggregatedItem.from_parsed(dedup[sid]) for sid in ordered_ids),
+        gaps=sel.gaps, bridges=bridges,
+        dropped_for_budget=dropped,
+        dropped_bridges=tuple(b.text for b in sel.bridges if b not in bridges),
+    )
+    final = coster(packed, registry)
+    if final > token_budget:
+        # Cheap proof that the loop's invariant held on the object actually returned, rather
+        # than on some trial that resembled it. Reaching this means the ordering or the bridge
+        # set diverged between costing and assembly, which is a defect in this function -- not a
+        # budget the selector overshot -- so it must not be reported as a P1 budget failure.
+        raise AggregationError(
+            f"budget_pack_v1 assembled {final} rendered tokens against a {token_budget} budget; "
+            "the packed object differs from the trial that was costed")
+    return packed
+
+
+def _atomic_units(
+    items: Sequence[ParsedItem], contradiction_facets: set[str]
+) -> list[list[str]]:
+    """Group span ids into sets that must be admitted or dropped together.
+
+    A contradiction facet's spans are one unit, and units sharing a span merge -- a span can sit
+    on two live disagreements, and admitting it for one while dropping it for the other would
+    one-side the second. Everything else is its own unit.
+    """
+    parent: dict[str, str] = {item.span_id: item.span_id for item in items}
+
+    def find(node: str) -> str:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(left: str, right: str) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    by_facet: dict[str, list[str]] = {}
+    for item in items:
+        for facet, _role in item.relations:
+            if facet in contradiction_facets:
+                by_facet.setdefault(facet, []).append(item.span_id)
+    for members in by_facet.values():
+        for other in members[1:]:
+            union(members[0], other)
+
+    grouped: dict[str, list[str]] = {}
+    for item in items:
+        grouped.setdefault(find(item.span_id), []).append(item.span_id)
+    return list(grouped.values())
+
+
+def _promote_new_sources(
+    units: list[list[str]], *, registry: dict, min_sources: int
+) -> list[list[str]]:
+    """Pull the best-ranked unit of each new source forward, up to ``min_sources`` sources.
+
+    Breadth expressed as consideration order, not as a forced admission: a promoted unit that
+    does not fit is still dropped. At ``min_sources=1`` -- the only value any registered variant
+    uses -- the top-ranked unit is already the first new source, so this returns the input
+    unchanged and costs nothing.
+    """
+    if min_sources <= 1:
+        return units
+    promoted: list[list[str]] = []
+    remainder: list[list[str]] = []
+    seen: set[str] = set()
+    for unit in units:
+        sources = {_source_key(registry[span_id]) for span_id in unit}
+        fresh = sources - seen
+        if fresh and len(seen) < min_sources:
+            seen |= fresh
+            promoted.append(unit)
+        else:
+            remainder.append(unit)
+    return promoted + remainder
 
 
 def _bridges_supported_by(

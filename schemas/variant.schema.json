@@ -27,7 +27,7 @@
       "enum": ["VENDOR_PROSE", "P1_ID", "P1_TYPED", "P1_BRIDGE", "SHORT_PROSE", "CPU_LEXICAL"]
     },
     "aggregation": {
-      "enum": ["vendor", "stable_union_v1", "coverage_budget_v1", "global_rerank_v1", "mmr_stable_union", "token_matched"]
+      "enum": ["vendor", "stable_union_v1", "coverage_budget_v1", "budget_pack_v1", "global_rerank_v1", "mmr_stable_union", "token_matched"]
     },
     "close_mode": {
       "description": "prefix_preserving keeps the shared prompt prefix intact to exercise real prefix-cache reuse. fused_with_fallback belongs to C_FUSED_EXT only and always retains a dedicated-selector fallback for the two exit paths that do not call the fused tool.",

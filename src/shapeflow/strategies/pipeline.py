@@ -22,12 +22,17 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from ..evidence.chunkers import Tokenizer, fixed_token_v1, markdown_structure_v1, paragraph_sentence_v1
 from ..evidence.model_tokenizer import tokenizer_sha256
 from ..evidence.identity import build_evidence_span, build_visible_message_span
-from ..p1.aggregators import coverage_budget_v1, global_rerank_v1, stable_union_v1
+from ..p1.aggregators import (
+    budget_pack_v1,
+    coverage_budget_v1,
+    global_rerank_v1,
+    stable_union_v1,
+)
 from ..p1.contracts import SelectionContractError, parse_selection
 from ..p1.preflight import PreflightConfig, preflight
 from ..p1.view import CandidateViewRecord, ViewConstructionError
@@ -51,7 +56,7 @@ CHUNKERS: dict[str, Callable] = {
 #: stable_union_v1 with no MMR anywhere, and `token_matched` was in this set with no branch
 #: in _aggregate, so it would have raised had anything reached it. A registry that lists a
 #: variant it cannot run reports a null result for a thing it never tried.
-AGGREGATORS = {"stable_union_v1", "coverage_budget_v1", "global_rerank_v1"}
+AGGREGATORS = {"stable_union_v1", "coverage_budget_v1", "budget_pack_v1", "global_rerank_v1"}
 
 
 @dataclass
@@ -159,6 +164,18 @@ def _aggregate(name: str, selection, registry, *, token_budget: int, coster):
     if name == "coverage_budget_v1":
         return coverage_budget_v1(selection, registry, token_budget=token_budget,
                                   coster=coster, min_sources=1)
+    if name == "budget_pack_v1":
+        # The selector's emitted order is its ranking, exactly as `global_rerank_v1` reads it.
+        # Passing it here is what makes a ranking-only selector meaningful: without it every
+        # candidate selector would be packed in document order and the shootout would compare
+        # nothing but the packer.
+        return budget_pack_v1(
+            selection, registry, token_budget=token_budget, coster=coster, min_sources=1,
+            _selection_rank={
+                span_id: index
+                for index, span_id in enumerate(dict.fromkeys(selection.selected_span_ids))
+            },
+        )
     if name == "global_rerank_v1":
         return global_rerank_v1(selection, registry, token_budget=token_budget, coster=coster)
     raise ValueError(f"unknown aggregator {name!r}")
