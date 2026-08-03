@@ -1225,6 +1225,7 @@ def replay_selectors(
 
     from .campaign.pages import PageRegistry
     from .campaign.replay import build_replay_setup, iter_checkpoints, run_trial, trial_key
+    from .campaign.selector_client import SelectorModelCall
     from .campaign.settings import Settings
     from .evidence.model_tokenizer import tokenizer_sha256
     from .hashing import canonical_json
@@ -1240,13 +1241,33 @@ def replay_selectors(
         _fail(f"{variant!r} is not in the variant registry")
     spec = registry[variant]
 
-    def _refuse_model_call(**_kwargs):
-        # CPU-only for now. An LLM variant reaching here would otherwise fail deep inside the
-        # selector with a connection error, which reads as a broken provider rather than as a
-        # command that does not support this arm yet.
-        raise NotImplementedError(
-            f"{variant} needs a model call; replay-selectors currently runs CPU selectors only "
-            "(the zero-GPU half of the shootout). Wire the provider before replaying an LLM arm.")
+    class _BoundModelCall:
+        """Dispatches to the selector call bound to the trial currently being replayed.
+
+        The call has to be per trial, not per process: the provider attributes tokens to the
+        cell that spent them, and a selector wired to one shared token would pool every batch's
+        work under a single key -- leaving the arm's cost real but unattributable to any batch.
+        """
+
+        def __init__(self) -> None:
+            self.current = None
+
+        async def __call__(self, **kwargs):
+            if self.current is None:
+                raise RuntimeError(
+                    f"{variant} issued a model call with no cell bound; the trial's provider "
+                    "cell must be registered before the strategy runs or its tokens are "
+                    "charged to nothing")
+            return await self.current(**kwargs)
+
+    needs_model = registry[variant].selector_backend == "LLM"
+    model_call = _BoundModelCall()
+    completion_cap = int(
+        settings.get("week1", "measurement", "selector_max_completion_tokens"))
+    provider = _provider_client(settings) if needs_model else None
+    # One run id for the whole arm, so every trial's work rolls up under the arm that spent it
+    # while each cell stays individually attributable.
+    run_id = f"freeze2-shootout-{variant.lower()}"
 
     try:
         setup = build_replay_setup(settings, corpus_dir, echo=typer.echo)
@@ -1272,7 +1293,7 @@ def replay_selectors(
     )
     pages = PageRegistry()
     factory = StrategyFactory(
-        registry=registry, model_call=_refuse_model_call, tokenizer=setup.tokenizer,
+        registry=registry, model_call=model_call, tokenizer=setup.tokenizer,
         token_budget=token_budget,
         prompt_budget=prompt_budget.candidates,
         prompt_window_ceiling=prompt_budget.max_model_len - prompt_budget.completion_cap,
@@ -1323,9 +1344,31 @@ def replay_selectors(
         # across unrelated checkpoints would make a replay's handle allocation depend on the
         # order batches happened to be walked in.
         strategy = factory.build(variant).page
-        record = asyncio.run(run_trial(
-            document=document, reconstruction=rebuilt, strategy=strategy, variant_id=variant,
-            topic=questions.get(rebuilt.task_id, ""), token_budget=token_budget))
+
+        async def _replay(key=key, rebuilt=rebuilt, document=document, strategy=strategy):
+            if needs_model:
+                cell_token = "cell-" + key
+                await provider.register_cell(
+                    cell_token=cell_token, run_id=run_id, task_id=rebuilt.task_id,
+                    arm_id=variant, variant_id=variant, replicate_id="0", work_key=key,
+                    layer=str(settings.get("week1", "measurement", "layer")))
+                model_call.current = SelectorModelCall(
+                    provider, cell_token=cell_token, repo=_REPO,
+                    temperature=float(settings.get("stack", "sampling", "temperature")),
+                    top_p=float(settings.get("stack", "sampling", "top_p")),
+                    max_completion_tokens=completion_cap, seed=seed,
+                    guided_decoding=bool(
+                        settings.get("week1", "measurement", "guided_decoding")),
+                )
+            try:
+                return await run_trial(
+                    document=document, reconstruction=rebuilt, strategy=strategy,
+                    variant_id=variant, topic=questions.get(rebuilt.task_id, ""),
+                    token_budget=token_budget)
+            finally:
+                model_call.current = None
+
+        record = asyncio.run(_replay())
         record["trial_key"] = key
         record["source_tree_sha256"] = execution_binding
         record["scope"] = spec.scope

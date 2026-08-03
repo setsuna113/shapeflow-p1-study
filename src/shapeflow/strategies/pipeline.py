@@ -153,6 +153,11 @@ class SelectionOutcome:
     tokenizer_sha256: str = ""
     stage: str = "single"       # single | local | global
     checkpoint_hash: str = ""
+    #: The source occurrences actually published, as distinct from those offered. Source
+    #: coverage, evidence retention and hard-negative interference are all ratios over these two
+    #: sets, and a span id cannot be decoded back to its source -- it is a digest. Without this
+    #: the whole judge-free endpoint family is uncomputable from a trial record.
+    published_source_occurrence_ids: tuple[str, ...] = ()
     #: What the prompt-admission stage dropped to fit the window, or None when no admission ran.
     #: Carried because CPU-FULL minus CPU-PROMPTVIEW is the price of that pruning, and pricing it
     #: needs the identities of the removed spans rather than a count.
@@ -301,6 +306,13 @@ async def run_selection(
                 offered_query_attempt_ids=offered_query_attempt_ids,
                 offered_source_occurrence_ids=offered_source_occurrence_ids,
             )
+
+    # span id -> the source occurrence it came from. Built from the offered spans, because a
+    # span id is a digest over content hash, offsets and text and cannot be decoded back.
+    source_of_span = {
+        str(s.get("span_id", "")): str((s.get("source_occurrence_ids") or [""])[0])
+        for s in spans
+    }
 
     offered_span_ids = tuple(c.span_id for c in view.candidates)
     publication_handle_map = view.publication_handle_map
@@ -491,6 +503,9 @@ async def run_selection(
     return SelectionOutcome(
         text=result.rendered.text, work=work, view_sha256=view.view_sha256,
         selector_attempted=True,
+        published_source_occurrence_ids=tuple(dict.fromkeys(
+            source_of_span[span_id] for span_id in staged_span_ids
+            if source_of_span.get(span_id))),
         prompt_admission=(prompt_pack.accounting() if prompt_pack is not None else None),
         prompt_admission_dropped_span_ids=(
             prompt_pack.dropped_span_ids if prompt_pack is not None else ()),

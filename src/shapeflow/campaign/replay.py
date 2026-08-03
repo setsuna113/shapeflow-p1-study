@@ -541,6 +541,10 @@ def outcome_record(outcome) -> dict:
         "selected_span_ids": list(outcome.selected_span_ids),
         "staged_span_ids": list(outcome.staged_span_ids),
         "published_span_ids": list(outcome.published_span_ids),
+        # The join key for every judge-free endpoint. Offered against published is source
+        # coverage; intersected with the benchmark's own sets on the evaluator side it is
+        # evidence retention and hard-negative interference.
+        "published_source_occurrence_ids": list(outcome.published_source_occurrence_ids),
         "dropped_for_budget": outcome.dropped_for_budget,
         "staged_rendered_tokens": outcome.staged_rendered_tokens,
         "published_rendered_tokens": outcome.published_rendered_tokens,
