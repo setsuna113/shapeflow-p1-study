@@ -315,21 +315,50 @@ def test_the_four_matched_arms_differ_in_exactly_one_thing_each():
     assert [f for f in fields if cpu[f] != llm[f]] == ["selector_backend"]
 
 
-def test_short_prose_refuses_whole_batch_instead_of_fanning_out_under_the_name():
-    """`ProsePageStrategy` summarises one page per call and has no whole-batch form yet.
+@pytest.mark.asyncio
+async def test_whole_batch_prose_summarises_the_batch_once_and_keeps_every_source_citable():
+    """The matched control must be one request under one cap, and still cite every page.
 
-    Accepting the scope would make the control issue N requests under N budgets while the
-    registry said one -- the same drift, in the arm whose whole purpose is to be the honest
-    comparison.
+    Per-page prose names its one source in the header, which is right for a per-page summary.
+    A batch summary that kept that shape would drop provenance for every page but the first,
+    making the control a straw man: the downstream writer can cite P0 and structured P1 but
+    would not be able to cite this. The source map, like the C-side close document, is
+    immutable framing charged against the budget before a token is decoded.
     """
     from shapeflow.strategies.prose import ProsePageStrategy
 
-    config = PageStrategyConfig(
-        variant_id="CTRL", chunker="markdown_structure_v1", scope="whole_batch",
-        contract="SHORT_PROSE", aggregation="stable_union_v1", token_budget=512,
+    class OneShotProse:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.caps: list[int] = []
+
+        def prompt_for(self, *, task_ctx, view, token_budget, source_entries=None):
+            return "prompt"
+
+        async def summarize(self, *, task_ctx, view, token_budget,
+                            max_completion_tokens=None, source_entries=None):
+            self.calls += 1
+            self.caps.append(int(max_completion_tokens))
+            return "a batch summary", WorkRecord(selector_calls=1)
+
+    selector = OneShotProse()
+    strategy = ProsePageStrategy(
+        config=PageStrategyConfig(
+            variant_id="SHORTPROSE-PROMPTVIEW", chunker="markdown_structure_v1",
+            scope="whole_batch", contract="SHORT_PROSE", aggregation="stable_union_v1",
+            token_budget=512),
+        selector=selector, tokenizer=WhitespaceTokenizer(),
+        raw_text_for=lambda _cid: PAGE_TEXT,
+        occurrence_for=lambda cid: cid.replace("content-", ""),
     )
-    with pytest.raises(ValueError, match="no whole_batch implementation"):
-        ProsePageStrategy(
-            config=config, selector=RecordingSelector(), tokenizer=WhitespaceTokenizer(),
-            raw_text_for=lambda _cid: PAGE_TEXT, occurrence_for=lambda cid: cid,
-        )
+
+    observations = await strategy.transform_tool_batch(
+        task_ctx=_ctx(), checkpoint=_one_sibling(pages=4))
+
+    assert selector.calls == 1, f"{selector.calls} prose requests for one gather batch"
+    content = "".join(str(o.content) for o in observations)
+    for page in range(4):
+        assert f"https://o{page}.example" in content, (
+            f"page {page} lost its provenance; the control cannot be cited for it")
+    assert selector.caps[0] < 512, "the source map must be charged before decoding, not after"
+    assert WhitespaceTokenizer().count(content) <= 512

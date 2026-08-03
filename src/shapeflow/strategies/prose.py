@@ -291,6 +291,25 @@ def _completion_cap(*, immutable_wrapper: str, tokenizer: Tokenizer, budget: int
     return remaining
 
 
+def _batch_prose_wrapper(sources: Sequence[tuple[int, str, str]]) -> tuple[str, str]:
+    """Fixed provenance for a whole-batch prose summary: one body, a map of every source.
+
+    The per-page wrapper names one source in its header because a per-page summary describes one
+    page. A whole-batch summary describes the batch, so every page it drew on has to remain
+    citable -- otherwise the control is a straw man, since the downstream writer can cite both
+    P0 and structured P1 but not this. Modelled on the C-side close document, which solved the
+    same problem: a body followed by a SOURCES map.
+
+    The whole map is immutable framing and is charged against the budget before a token is
+    decoded, so the control never generates text its own wrapper must then discard.
+    """
+    prefix = "SUMMARY:\n"
+    if not sources:
+        return prefix, ""
+    lines = "\n".join(f"[{number}] {title} — {url}" for number, title, url in sources)
+    return prefix, "\n\nSOURCES:\n" + lines
+
+
 def _page_prose_wrapper(
     *, title: str, url: str, source_number: int
 ) -> tuple[str, str]:
@@ -405,17 +424,6 @@ class ProsePageStrategy:
 
     def __init__(self, *, config: PageStrategyConfig, selector, tokenizer: Tokenizer,
                  raw_text_for, occurrence_for, work_sink=None) -> None:
-        if config.scope == "whole_batch":
-            # `PageStrategyConfig` accepts the scope because the structured path implements it,
-            # but this class summarises one page per call and assembles the results per vendor
-            # slot. Running it under a whole_batch label would issue N requests under N separate
-            # budgets while the registry, the reports and the contract all said one -- which is
-            # precisely the drift `whole_batch` was added to end. Refusing at construction keeps
-            # the failure at registry-load time instead of mid-campaign.
-            raise ValueError(
-                f"{config.variant_id}: SHORT_PROSE has no whole_batch implementation yet; it "
-                "summarises per page and would fan out below the batch under a whole-batch name"
-            )
         self.config = config
         self._selector = selector
         self._tokenizer = tokenizer
@@ -495,6 +503,9 @@ class ProsePageStrategy:
         return observations
 
     async def _transform_one_tool_call(self, *, task_ctx, tool_call_id: str, results):
+        if self.config.scope == "whole_batch":
+            return await self._transform_whole_batch(
+                task_ctx=task_ctx, tool_call_id=tool_call_id, results=results)
         # Keep one slot per vendor-visible result. Calls within and across sibling tool calls
         # execute concurrently, but publication order remains the frozen vendor order.
         rendered_slots: list[str | None] = [None] * len(results)
@@ -643,6 +654,124 @@ class ProsePageStrategy:
             None,
             None,
         )
+
+    async def _transform_whole_batch(self, *, task_ctx, tool_call_id: str, results):
+        """One prose summary for the whole gather batch, under one completion cap.
+
+        The per-page path builds a view and a request per result. This builds one view over
+        every page's spans and issues one request, which is what makes it the matched control
+        for a whole-batch selector: both forms then see the same evidence and are held to the
+        same rendered-token budget, and the only difference is prose against span ids.
+
+        Snippet-only results still pass through as vendor rendered them -- they carry no raw
+        content for either form to compress, so summarising them would be inventing evidence P0
+        never had.
+        """
+        spans: list[dict] = []
+        snapshot_texts: dict[str, str] = {}
+        source_meta: dict = {}
+        sources: list[tuple[int, str, str]] = []
+        occurrence_ids: list[str] = []
+        passthrough: list[str] = []
+
+        for result in results:
+            if result.raw_content_id is None:
+                passthrough.append(_vendor_snippet(result))
+                if result.source_occurrence_id:
+                    occurrence_ids.append(str(result.source_occurrence_id))
+                continue
+            text = self._raw_text_for(result.raw_content_id)
+            content_hash = sha256_hex(text.encode("utf-8"))
+            occurrence_id = (result.source_occurrence_id
+                             or self._occurrence_for(result.raw_content_id))
+            page_spans = spans_from_page(
+                text, content_hash=content_hash, occurrence_id=occurrence_id,
+                chunker=self.config.chunker, tokenizer=self._tokenizer,
+                max_tokens=self.config.chunk_max_tokens,
+            )
+            if not page_spans:
+                continue
+            spans.extend(page_spans)
+            snapshot_texts[content_hash] = text
+            source_meta.update({
+                span["span_id"]: {"title": result.title, "url": result.url}
+                for span in page_spans
+            })
+            sources.append((result.vendor_visible_order + 1, result.title, result.url))
+            occurrence_ids.append(str(occurrence_id))
+
+        if not spans:
+            published = _format(passthrough)
+            return (
+                ToolObservation(tool_call_id=tool_call_id, name="tavily_search",
+                                content=published,
+                                source_occurrence_ids=tuple(dict.fromkeys(occurrence_ids))),
+                WorkRecord(), [], self._tokenizer.count(published), [], None, None,
+            )
+
+        view = CandidateViewRecord.build(
+            spans=spans, tokenizer=self._tokenizer, namespace="RAW_SOURCE",
+            topic=getattr(task_ctx, "research_topic", ""),
+            # Candidate construction stays the exact structured path; only the output
+            # instruction differs, so the contrast is the output form and nothing else.
+            contract="P1_ID", token_budget=self.config.token_budget,
+            query_attempts=[], snapshot_texts=snapshot_texts, source_meta=source_meta,
+        )
+        try:
+            bounded, work, record = await self._summarize_batch(
+                task_ctx=task_ctx, view=view, sources=sources)
+        except asyncio.CancelledError as cancelled:
+            return None, _work_from_exception(cancelled), [], None, [], None, cancelled
+        except Exception as failure:  # noqa: BLE001
+            control_record = getattr(failure, "control_record", None)
+            records = [dict(control_record)] if isinstance(control_record, dict) else []
+            return (
+                None, _work_from_exception(failure), [], None, records,
+                SelectionFailure("PROSE_CONTROL_ERROR",
+                                 f"{type(failure).__name__}: {failure}"), None,
+            )
+
+        published = _format([bounded, *passthrough])
+        return (
+            ToolObservation(tool_call_id=tool_call_id, name="tavily_search", content=published,
+                            source_occurrence_ids=tuple(dict.fromkeys(occurrence_ids))),
+            work, [int(record["rendered_tokens"])], self._tokenizer.count(published),
+            [record], None, None,
+        )
+
+    async def _summarize_batch(self, *, task_ctx, view, sources):
+        """One model call for the batch, capped so the source map is never decoded away."""
+        prose_prompt = self._selector.prompt_for(
+            task_ctx=task_ctx, view=view, token_budget=self.config.token_budget)
+        prefix, suffix = _batch_prose_wrapper(sources)
+        completion_cap = _completion_cap(
+            immutable_wrapper=prefix + suffix, tokenizer=self._tokenizer,
+            budget=self.config.token_budget)
+        base_record = {
+            "candidate_view_sha256": view.view_sha256,
+            "prose_prompt_sha256": sha256_hex(prose_prompt.encode("utf-8")),
+            "offered_span_ids": [c.span_id for c in view.candidates],
+            "completion_token_cap": completion_cap,
+            "sources": len(sources),
+            "selector_attempted": True,
+            "chunker": self.config.chunker,
+            "scope": self.config.scope,
+            "tokenizer_sha256": tokenizer_sha256(self._tokenizer),
+        }
+        # The cap is what makes the rendered total fit: the wrapper is charged first, so
+        # prefix + body + suffix is at or under the budget by construction and nothing has to be
+        # truncated after the fact. The engine enforces it as max_tokens.
+        body, work = await self._selector.summarize(
+            task_ctx=task_ctx, view=view, token_budget=self.config.token_budget,
+            max_completion_tokens=completion_cap)
+        rendered = prefix + body + suffix
+        record = {
+            **base_record,
+            "rendered_tokens": self._tokenizer.count(rendered),
+            "publication_status": "PUBLISHED",
+            "batch_accepted": True,
+        }
+        return rendered, work, record
 
     async def _summarize_one(
         self,
