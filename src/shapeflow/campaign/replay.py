@@ -528,6 +528,12 @@ def outcome_record(outcome) -> dict:
         "aggregation": outcome.aggregation,
         "chunker": outcome.chunker,
         "tokenizer_sha256": outcome.tokenizer_sha256,
+        # What the admission stage dropped to fit the window. Serialised in full because the
+        # CPU-FULL minus CPU-PROMPTVIEW contrast *is* the price of this pruning, and pricing it
+        # needs the identities of the removed spans -- a count cannot say whether the pruning
+        # took evidence or filler. Absent (None) on an arm that ran no admission.
+        "prompt_admission": outcome.prompt_admission,
+        "prompt_admission_dropped_span_ids": list(outcome.prompt_admission_dropped_span_ids),
         "offered": outcome.offered,
         "offered_span_ids": list(outcome.offered_span_ids),
         "offered_source_occurrence_ids": list(outcome.offered_source_occurrence_ids),

@@ -237,6 +237,29 @@ def test_a_checkpoint_present_in_two_lanes_is_walked_once(tmp_path):
     assert len(list(iter_checkpoints(roots, kind="H"))) == 1
 
 
+def test_the_trial_record_carries_the_prompt_admission_accounting():
+    """Computed and then not serialised is the same as not computed.
+
+    The first CPU-PROMPTVIEW run measured pruning correctly and wrote 1,632 trials that could
+    not report it, because `outcome_record` listed its fields explicitly and these two were
+    missing. The arms visibly differed and the contrast between them was unquantifiable.
+    """
+    from shapeflow.campaign.replay import outcome_record
+    from shapeflow.strategies.pipeline import SelectionOutcome
+
+    accounting = {"version": "prompt_pack_page_floor_then_diversity_v1", "budget": 30720,
+                  "admitted_spans": 40, "dropped_spans": 873, "sources_covered": 9}
+    record = outcome_record(SelectionOutcome(
+        text="x", prompt_admission=accounting,
+        prompt_admission_dropped_span_ids=("s1", "s2")))
+
+    assert record["prompt_admission"] == accounting
+    assert record["prompt_admission_dropped_span_ids"] == ["s1", "s2"]
+
+    # And an arm with no admission stage says so, rather than reporting an empty pruning.
+    assert outcome_record(SelectionOutcome(text="x"))["prompt_admission"] is None
+
+
 def test_the_trial_key_changes_when_the_prompt_or_renderer_does():
     """Resume is "the file exists", so the key must commit to everything that changes the answer.
 
