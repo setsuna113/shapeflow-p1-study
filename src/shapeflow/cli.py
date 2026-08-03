@@ -1385,6 +1385,72 @@ def replay_selectors(
     typer.echo(f"  under {out_root}")
 
 
+@app.command("score-selectors")
+def score_selectors(
+    data_root: Path = typer.Option(None, "--data-root"),
+    out: Path = typer.Option(None, "--out", help="Where to write the GQ1 report"),
+) -> None:
+    """Evaluator-only: score every replayed arm on the judge-free quality family.
+
+    The trial records are treatment-side and keyed by span id, occurrence id and docid -- all
+    identifiers the agent itself handled. The benchmark's evidence and hard-negative sets are
+    joined here, on the evaluator side of the leakage firewall. That seam is what makes it
+    legitimate to *choose* a selector on these numbers: no arm could have seen them.
+
+    Retention denominators are per batch, never per benchmark. The retriever's own evidence
+    recall was 0.1488 against a 0.40 floor, so scoring against everything the benchmark holds
+    would measure the retriever and report it as the reducer's quality.
+    """
+    import json as _json
+    from collections import defaultdict
+
+    from .bench.bcplus.qrels import load_bcplus_evaluator_queries
+    from .bench.bcplus.selection_quality import score_arm, score_batch
+    from .campaign.bcplus import benchdata_root
+    from .campaign.settings import Settings
+
+    _require_role("evaluator")
+    settings = Settings.load(_REPO, data_root=data_root) if data_root else _settings()
+    root = Path(settings.data_root)
+    trials = sorted(root.glob("runner*/runs/selector_trials/*/*.json"))
+    if not trials:
+        _fail(f"no selector trials under {root}/runner*/runs/selector_trials")
+
+    queries = load_bcplus_evaluator_queries(
+        benchdata_root() / "browsecomp-plus" / "data")
+    typer.echo(f"{len(trials)} trials, {len(queries)} judged queries")
+
+    by_arm: dict[str, list] = defaultdict(list)
+    for path in trials:
+        trial = _json.loads(path.read_text(encoding="utf-8"))
+        by_arm[str(trial.get("variant_id", ""))].append(
+            score_batch(trial, queries=queries,
+                        published_text=trial.get("published_text")))
+
+    arms = {arm: score_arm(rows, variant_id=arm).content()
+            for arm, rows in sorted(by_arm.items())}
+    body = {
+        "gate": "FREEZE2_GQ1",
+        "decided_at_utc": _now(),
+        "trials": len(trials),
+        "queries_judged": len(queries),
+        "queries_sha256": queries.source_sha256,
+        "arms": arms,
+    }
+    destination = Path(out) if out else (settings.path("judgments") / "FREEZE2_GQ1.json")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(_json.dumps(body, indent=2, sort_keys=True) + "\n",
+                           encoding="utf-8")
+    typer.echo(f"wrote {destination}\n")
+    for arm, row in arms.items():
+        typer.echo(
+            f"  {arm:22s} n={row['batches']:5d} scored={row['scored']:5d}  "
+            f"coverage={row['source_coverage_mean']}  "
+            f"retention={row['evidence_retention_mean']}  "
+            f"interference={row['interference_mean']}  "
+            f"displacement={row['negative_displacement_rate']}")
+
+
 @app.command("serve-provider")
 def serve_provider(config: Path = _CFG) -> None:  # pragma: no cover - process entry point
     """Run the provider. The only process that reads a credential, and never as root."""
