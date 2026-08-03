@@ -1,0 +1,35 @@
+{
+  "arms": {
+    "CPU-FULL": {
+      "answer_opportunities": 1632,
+      "answer_retention": 0.011029411764705883,
+      "batches": 1632,
+      "evidence_retention_mean": 0.1623789764868603,
+      "interference_mean": 0.2917689161554192,
+      "negative_displacement_rate": 0.46887966804979253,
+      "none_offered": 1150,
+      "not_judged": 0,
+      "scored": 482,
+      "source_coverage_mean": 0.2611169328380174,
+      "variant_id": "CPU-FULL"
+    },
+    "CPU-PROMPTVIEW": {
+      "answer_opportunities": 1632,
+      "answer_retention": 0.011642156862745098,
+      "batches": 1632,
+      "evidence_retention_mean": 0.16514522821576763,
+      "interference_mean": 0.29263684640522875,
+      "negative_displacement_rate": 0.470954356846473,
+      "none_offered": 1150,
+      "not_judged": 0,
+      "scored": 482,
+      "source_coverage_mean": 0.2616051398687437,
+      "variant_id": "CPU-PROMPTVIEW"
+    }
+  },
+  "decided_at_utc": "2026-08-03T23:28:41Z",
+  "gate": "FREEZE2_GQ1",
+  "queries_judged": 830,
+  "queries_sha256": "0374946363a5c59f4d3707fa9c31b9e5152269c0f024668a71687dda4e48a85e",
+  "trials": 3264
+}
