@@ -1412,9 +1412,28 @@ def score_selectors(
     _require_role("evaluator")
     settings = Settings.load(_REPO, data_root=data_root) if data_root else _settings()
     root = Path(settings.data_root)
-    trials = sorted(root.glob("runner*/runs/selector_trials/*/*.json"))
+    # Enumerated root by root, not with one multi-level glob. The evaluator can read a lane's
+    # `runs` directory but not the lane root above it, so a glob spanning `runner*/runs/...`
+    # walks into a PermissionError -- and Python 3.12's Path.glob abandons the whole iteration
+    # when it does, returning zero matches for a tree holding thousands. Silently. Making the
+    # boundary explicit means an unreadable root is reported rather than being indistinguishable
+    # from an empty one.
+    trials: list[Path] = []
+    unreadable: list[str] = []
+    for lane in sorted(root.iterdir()) if root.is_dir() else []:
+        shard_root = lane / "runs" / "selector_trials"
+        try:
+            if not shard_root.is_dir():
+                continue
+            trials.extend(sorted(shard_root.glob("*/*.json")))
+        except PermissionError:
+            unreadable.append(str(shard_root))
+    if unreadable:
+        typer.echo(f"  {len(unreadable)} trial root(s) unreadable by this identity: "
+                   f"{', '.join(unreadable)}", err=True)
     if not trials:
-        _fail(f"no selector trials under {root}/runner*/runs/selector_trials")
+        _fail(f"no selector trials under {root}/*/runs/selector_trials")
+    trials.sort()
 
     queries = load_bcplus_evaluator_queries(
         benchdata_root() / "browsecomp-plus" / "data")
