@@ -270,9 +270,9 @@ def test_the_trial_key_changes_when_the_prompt_or_renderer_does():
     from shapeflow.campaign.replay import trial_key
 
     base = dict(execution_binding="a" * 64, checkpoint_digest="b" * 64,
-                variant_id="HW02", seed=1, tokenizer_sha256="c" * 64)
+                variant_id="LLM-PROMPTVIEW", seed=1, tokenizer_sha256="c" * 64)
     assert trial_key(**base) == trial_key(**base)
-    assert trial_key(**base) != trial_key(**{**base, "variant_id": "HW00-CPU"})
+    assert trial_key(**base) != trial_key(**{**base, "variant_id": "CPU-FULL"})
     assert trial_key(**base) != trial_key(**{**base, "tokenizer_sha256": "d" * 64})
     assert trial_key(**base) != trial_key(**{**base, "checkpoint_digest": "e" * 64})
 
@@ -314,7 +314,7 @@ async def test_a_replayed_batch_records_its_failure_as_an_outcome_not_an_excepti
             raise RuntimeError("selector unavailable")
 
     strategy = PageSelectionStrategy(
-        PageStrategyConfig(variant_id="HW02", chunker="markdown_structure_v1",
+        PageStrategyConfig(variant_id="LLM-PROMPTVIEW", chunker="markdown_structure_v1",
                            scope="whole_batch", contract="P1_ID",
                            aggregation="stable_union_v1", token_budget=512),
         selector=Refusing(), tokenizer=WhitespaceTokenizer(),
@@ -328,7 +328,7 @@ async def test_a_replayed_batch_records_its_failure_as_an_outcome_not_an_excepti
 
     record = await run_trial(
         document=to_document(checkpoint), reconstruction=reconstruction, strategy=strategy,
-        variant_id="HW02", topic="a topic", token_budget=512)
+        variant_id="LLM-PROMPTVIEW", topic="a topic", token_budget=512)
 
     assert record["batch_failure"] == "SELECTOR_ERROR"
     assert record["published_text"] is None
@@ -378,7 +378,7 @@ async def test_a_strategy_that_reads_every_page_as_empty_stops_the_walk():
             raise AssertionError("a view with no candidates must not reach the selector")
 
     strategy = PageSelectionStrategy(
-        PageStrategyConfig(variant_id="HW00-CPU", chunker="markdown_structure_v1",
+        PageStrategyConfig(variant_id="CPU-FULL", chunker="markdown_structure_v1",
                            scope="whole_batch", contract="P1_ID",
                            aggregation="stable_union_v1", token_budget=512),
         selector=Unused(), tokenizer=WhitespaceTokenizer(),
@@ -394,4 +394,4 @@ async def test_a_strategy_that_reads_every_page_as_empty_stops_the_walk():
     with pytest.raises(ReplayHarnessError, match="offered no candidates"):
         await run_trial(
             document=to_document(checkpoint), reconstruction=reconstruction,
-            strategy=strategy, variant_id="HW00-CPU", topic="a topic", token_budget=512)
+            strategy=strategy, variant_id="CPU-FULL", topic="a topic", token_budget=512)

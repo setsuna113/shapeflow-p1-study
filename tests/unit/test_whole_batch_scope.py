@@ -252,9 +252,10 @@ def test_a_whole_batch_arm_is_charged_to_its_own_op_class():
 
     registry = load_registry(Path(__file__).resolve().parents[2] / "configs")
     factory = StrategyFactory(
-        registry=registry, model_call=lambda **_kw: None, tokenizer=WhitespaceTokenizer())
+        registry=registry, model_call=lambda **_kw: None, tokenizer=WhitespaceTokenizer(),
+        prompt_budget=20_000, prompt_window_ceiling=32_000)
 
-    batch_arm = factory.build("HW02")
+    batch_arm = factory.build("LLM-PROMPTVIEW")
     per_page_arm = factory.build("H02")
 
     assert batch_arm.page._selector._op_class == "PAGE_P1_SELECTOR_BATCH"
