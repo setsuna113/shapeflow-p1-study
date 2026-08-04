@@ -13,6 +13,8 @@ belong to a document the baseline never saw. So these tests are mostly about ref
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from shapeflow.campaign.replay import (
@@ -260,6 +262,76 @@ def test_the_trial_record_carries_the_prompt_admission_accounting():
     assert outcome_record(SelectionOutcome(text="x"))["prompt_admission"] is None
 
 
+def test_a_refusal_that_never_built_a_view_is_not_an_inert_arm():
+    """PROMPT_INFEASIBLE is decided before the candidate view exists, so it carries offered=0.
+
+    Reading that as "the strategy is reading pages as empty" stopped a 1,456-batch run at 536,
+    on the first batch no prompt could cover. The guard must key on a *success* with nothing
+    offered -- the empty-spans path that returns text="" and scores as ok -- not on the absence
+    of candidates, which a refusal shares with it.
+    """
+    from shapeflow.campaign.replay import ReplayHarnessError, run_trial
+    from shapeflow.strategies.pipeline import SelectionFailure, SelectionOutcome
+
+    class Refused:
+        last_outcomes = [SelectionOutcome(
+            failure=SelectionFailure("PROMPT_INFEASIBLE", "no prompt fits"), offered=0)]
+
+        async def transform_tool_batch(self, *, task_ctx, checkpoint):
+            from shapeflow.strategies.page_h import PageSelectionError
+            raise PageSelectionError(self.last_outcomes[0].failure)
+
+    reconstruction = BatchReconstruction(
+        checkpoint_digest="d" * 64, task_id="t", siblings=1,
+        pages=(PageResolution(raw_content_id="c", occurrence_id="o1", status=VERIFIED,
+                              docid="d1", text="bytes"),))
+
+    async def _go():
+        return await run_trial(
+            document={"kind": "H"}, reconstruction=reconstruction, strategy=Refused(),
+            variant_id="LLM-PROMPTVIEW", topic="t", token_budget=512)
+
+    # It must not raise ReplayHarnessError; the checkpoint document is a stub, so the only
+    # acceptable failure here is the one from rebuilding it.
+    with pytest.raises(Exception) as caught:
+        asyncio.run(_go())
+    assert not isinstance(caught.value, ReplayHarnessError), (
+        "a pre-view refusal was mistaken for an inert arm")
+
+
+def test_a_prose_strategy_is_recorded_even_though_it_has_no_selection_outcomes():
+    """`ProsePageStrategy` keeps control records, not SelectionOutcomes.
+
+    Reading `strategy.last_outcomes` off it raised AttributeError and killed the
+    SHORTPROSE-PROMPTVIEW arm on its first batch. A prose arm publishes text rather than span
+    ids, so zero published spans is correct for it and must not read as an inert arm either --
+    its source identity is what the judge-free endpoints are computed from.
+    """
+    from shapeflow.campaign.replay import _prose_records
+
+    class Prose:
+        last_control_records = ({
+            "publication_status": "PUBLISHED", "batch_accepted": True,
+            "selector_attempted": True, "candidate_view_sha256": "v" * 64,
+            "offered_span_ids": ["s1", "s2"], "rendered_tokens": 480,
+            "offered_source_occurrence_ids": ["o1", "o2"],
+            "published_source_occurrence_ids": ["o1", "o2"],
+            "chunker": "markdown_structure_v1", "tokenizer_sha256": "t" * 64,
+            "work": {"selector_calls": 1, "prompt_tokens": 900, "completion_tokens": 120,
+                     "cpu_seconds": 0.5, "retries": 0},
+        },)
+
+    records = _prose_records(Prose())
+
+    assert len(records) == 1
+    assert records[0]["ok"] is True
+    assert records[0]["offered"] == 2
+    assert records[0]["published_span_ids"] == [], "prose publishes text, not span ids"
+    assert records[0]["published_source_occurrence_ids"] == ["o1", "o2"], (
+        "without this the arm has no computable quality at all")
+    assert records[0]["work"]["selector_calls"] == 1
+
+
 def test_the_trial_key_changes_when_the_prompt_or_renderer_does():
     """Resume is "the file exists", so the key must commit to everything that changes the answer.
 
@@ -391,7 +463,7 @@ async def test_a_strategy_that_reads_every_page_as_empty_stops_the_walk():
                               status=VERIFIED, docid="d1", text="real page bytes"),),
     )
 
-    with pytest.raises(ReplayHarnessError, match="offered no candidates"):
+    with pytest.raises(ReplayHarnessError, match="no candidates offered"):
         await run_trial(
             document=to_document(checkpoint), reconstruction=reconstruction,
             strategy=strategy, variant_id="CPU-FULL", topic="a topic", token_budget=512)

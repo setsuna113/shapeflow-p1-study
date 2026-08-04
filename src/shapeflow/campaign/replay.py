@@ -561,6 +561,52 @@ def outcome_record(outcome) -> dict:
     }
 
 
+def _prose_records(strategy) -> list[dict]:
+    """A prose control's records in the shape every other arm reports.
+
+    SHORT_PROSE publishes text, not span ids, so `published_span_ids` is empty by construction
+    and `published_source_occurrence_ids` carries the sources its wrapper cites -- which is what
+    source coverage and evidence retention are computed from. Reporting zero spans is correct
+    here and must not be read as an inert arm.
+    """
+    records = []
+    for control in getattr(strategy, "last_control_records", ()) or ():
+        offered = list(control.get("offered_span_ids") or ())
+        records.append({
+            "ok": control.get("publication_status") == "PUBLISHED",
+            "failure_reason": "" if control.get("batch_accepted") else "PROSE_CONTROL",
+            "failure_detail": "",
+            "selector_attempted": bool(control.get("selector_attempted")),
+            "view_sha256": str(control.get("candidate_view_sha256", "")),
+            "contract": "SHORT_PROSE",
+            "aggregation": "vendor",
+            "chunker": str(control.get("chunker", "")),
+            "tokenizer_sha256": str(control.get("tokenizer_sha256", "")),
+            "offered": len(offered),
+            "offered_span_ids": offered,
+            "offered_source_occurrence_ids": list(
+                control.get("offered_source_occurrence_ids") or ()),
+            "offered_material_tokens": 0,
+            "selected_span_ids": [],
+            "staged_span_ids": [],
+            "published_span_ids": [],
+            "published_source_occurrence_ids": list(
+                control.get("published_source_occurrence_ids") or ()),
+            "prompt_admission": control.get("prompt_admission"),
+            "prompt_admission_dropped_span_ids": [],
+            "dropped_for_budget": 0,
+            "staged_rendered_tokens": int(control.get("rendered_tokens", 0) or 0),
+            "published_rendered_tokens": int(control.get("rendered_tokens", 0) or 0),
+            "publication_handle_map": [],
+            "publication_map_sha256": "",
+            "published_relations": [],
+            "work": dict(control.get("work") or {
+                "selector_calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                "cpu_seconds": 0.0, "retries": 0}),
+        })
+    return records
+
+
 async def run_trial(
     *, document: Mapping, reconstruction: BatchReconstruction, strategy, variant_id: str,
     topic: str, token_budget: int,
@@ -595,13 +641,23 @@ async def run_trial(
     # publication with `text=""`, which is `ok`, so an arm that selected nothing at all reports
     # a flawless publication rate. It is a fault in the harness, not a measurement, so it stops
     # the walk instead of being recorded.
-    offered = sum(outcome.offered for outcome in strategy.last_outcomes)
-    if reconstruction.content_pages and not offered:
+    outcomes = list(getattr(strategy, "last_outcomes", ()) or ())
+    # The inert-arm guard fires on exactly one shape: an outcome that *succeeded* while offering
+    # nothing. That is `run_selection`'s empty-spans path, which returns ``text=""`` -- and
+    # ``text is not None`` makes it ok -- so an arm whose pages read as empty publishes nothing
+    # and scores 100%.
+    #
+    # It must not fire on a *failure* that never reached a view. PROMPT_INFEASIBLE is decided
+    # before the candidate view exists and legitimately carries offered=0; treating it as an
+    # inert arm stopped a 1,456-batch run at 536 because the batch it hit was one no prompt
+    # could cover. A refusal is a recorded outcome, not a broken harness.
+    inert = [o for o in outcomes if o.ok and not o.offered]
+    if reconstruction.content_pages and inert:
         raise ReplayHarnessError(
             f"batch {reconstruction.checkpoint_digest[:12]} has "
-            f"{len(reconstruction.content_pages)} verified pages but offered no candidates; "
-            "the strategy is reading them as empty, so this arm would publish nothing and "
-            "report success for it")
+            f"{len(reconstruction.content_pages)} verified pages but an outcome succeeded with "
+            "no candidates offered; the strategy is reading them as empty, so this arm would "
+            "publish nothing and report success for it")
 
     return {
         "checkpoint_digest": reconstruction.checkpoint_digest,
@@ -614,7 +670,11 @@ async def run_trial(
                         for p in reconstruction.content_pages if p.docid},
         "batch_failure": batch_failure,
         "published_text": published_text,
-        "outcomes": [outcome_record(o) for o in strategy.last_outcomes],
+        # `ProsePageStrategy` keeps control records, not SelectionOutcomes -- it has no
+        # aggregation or preflight stage to produce one. Normalising here rather than teaching
+        # every reader two shapes, so an arm's records are comparable whatever produced them.
+        "outcomes": ([outcome_record(o) for o in outcomes]
+                     if outcomes else _prose_records(strategy)),
     }
 
 

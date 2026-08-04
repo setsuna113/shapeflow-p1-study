@@ -719,7 +719,8 @@ class ProsePageStrategy:
         )
         try:
             bounded, work, record = await self._summarize_batch(
-                task_ctx=task_ctx, view=view, sources=sources)
+                task_ctx=task_ctx, view=view, sources=sources,
+                occurrence_ids=tuple(dict.fromkeys(occurrence_ids)))
         except asyncio.CancelledError as cancelled:
             return None, _work_from_exception(cancelled), [], None, [], None, cancelled
         except Exception as failure:  # noqa: BLE001
@@ -739,7 +740,7 @@ class ProsePageStrategy:
             [record], None, None,
         )
 
-    async def _summarize_batch(self, *, task_ctx, view, sources):
+    async def _summarize_batch(self, *, task_ctx, view, sources, occurrence_ids=()):
         """One model call for the batch, capped so the source map is never decoded away."""
         prose_prompt = self._selector.prompt_for(
             task_ctx=task_ctx, view=view, token_budget=self.config.token_budget)
@@ -753,6 +754,12 @@ class ProsePageStrategy:
             "offered_span_ids": [c.span_id for c in view.candidates],
             "completion_token_cap": completion_cap,
             "sources": len(sources),
+            # A prose summary publishes no span ids, so source identity is the only thing the
+            # judge-free endpoints can be computed from for this arm. Published equals offered
+            # by construction: the source map cites every page the summary was built from, which
+            # is exactly what makes this control citable rather than a straw man.
+            "offered_source_occurrence_ids": list(occurrence_ids),
+            "published_source_occurrence_ids": list(occurrence_ids),
             "selector_attempted": True,
             "chunker": self.config.chunker,
             "scope": self.config.scope,
@@ -770,6 +777,13 @@ class ProsePageStrategy:
             "rendered_tokens": self._tokenizer.count(rendered),
             "publication_status": "PUBLISHED",
             "batch_accepted": True,
+            "work": {
+                "selector_calls": work.selector_calls,
+                "prompt_tokens": work.prompt_tokens,
+                "completion_tokens": work.completion_tokens,
+                "cpu_seconds": round(work.cpu_seconds, 6),
+                "retries": work.retries,
+            },
         }
         return rendered, work, record
 
