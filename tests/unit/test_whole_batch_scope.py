@@ -267,13 +267,17 @@ def test_a_whole_batch_arm_is_charged_to_its_own_op_class():
     assert OpClass.PAGE_P1_SELECTOR_BATCH.value in STRUCTURED_SELECTOR_OPS
 
 
-def test_only_an_llm_arm_without_admission_carries_a_window_ceiling():
-    """The ceiling refuses a prompt the engine would reject. It belongs to exactly one shape.
+def test_the_window_ceiling_reaches_every_arm_that_reaches_the_engine_and_no_other():
+    """The ceiling is a property of the engine, so it follows the backend, not the admission.
 
-    A CPU arm has no context window at all, so giving CPU-FULL a ceiling would mark 61.9% of
+    An admission arm needs it as the target its loop verifies the *rendered* prompt against --
+    admission bounds candidate text, and text is not the prompt, so "cannot exceed the window by
+    construction" was wrong: the first LLM run had 63% of batches refused by the engine with a
+    400. A no-admission LLM arm needs it as the refusal test.
+
+    A CPU arm has no context window at all, and giving CPU-FULL a ceiling would mark 61.9% of
     batches PROMPT_INFEASIBLE for the one arm that is feasible on all of them -- the precise
-    opposite of what it measures. An arm with admission cannot exceed the window by
-    construction, so a ceiling there could only ever fire on a bug.
+    opposite of what it measures.
     """
     from shapeflow.strategies.factory import StrategyFactory, load_registry
 
@@ -288,7 +292,8 @@ def test_only_an_llm_arm_without_admission_carries_a_window_ceiling():
     }
 
     assert ceilings == {
-        "CPU-FULL": 0, "CPU-PROMPTVIEW": 0, "LLM-PROMPTVIEW": 0, "LLM-FULL": 32_000}
+        "CPU-FULL": 0, "CPU-PROMPTVIEW": 0,
+        "LLM-PROMPTVIEW": 32_000, "LLM-FULL": 32_000}
 
 
 def test_the_four_matched_arms_differ_in_exactly_one_thing_each():

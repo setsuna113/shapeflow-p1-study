@@ -253,15 +253,14 @@ class StrategyFactory:
             bridge_token_cap_total=spec.bridge_token_cap_total,
             prompt_admission=spec.prompt_admission,
             prompt_budget=self._prompt_budget,
-            # The ceiling belongs only to an LLM arm that runs without admission -- the one
-            # shape that can build a prompt the engine will refuse. An arm with admission
-            # cannot exceed the window by construction, and a CPU arm has no window at all:
-            # giving CPU-FULL a ceiling would mark 61.9% of batches infeasible for the one arm
-            # that is feasible on all of them, which is the opposite of what it measures.
+            # The ceiling is a property of the engine, so every arm that will *reach* the engine
+            # carries it -- with admission it is the target the admission loop verifies its
+            # rendered prompt against, and without admission it is the refusal test for the
+            # diagnostic arm. A CPU arm has no context window at all: giving CPU-FULL a ceiling
+            # would mark 61.9% of batches infeasible for the one arm that is feasible on all of
+            # them, which is the opposite of what it measures.
             prompt_window_ceiling=(
-                self._prompt_window_ceiling
-                if spec.prompt_admission == "none" and spec.selector_backend == "LLM"
-                else 0),
+                self._prompt_window_ceiling if spec.selector_backend == "LLM" else 0),
         )
 
     def _close_half(self, spec: VariantSpec):

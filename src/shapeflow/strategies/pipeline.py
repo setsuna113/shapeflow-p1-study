@@ -241,51 +241,77 @@ async def run_selection(
     # engine's context window), `budget_pack_v1` decides what survives *rendering* (512 tokens).
     # Fusing them would put the model's ranking inside the decision about what to show the model.
     prompt_pack: Optional[object] = None
-    if prompt_admission and prompt_admission != "none":
-        if prompt_admission != "prompt_pack_v1":
-            raise ValueError(f"unknown prompt admission {prompt_admission!r}")
-        texts = [
-            snapshot_texts.get(str(s.get("content_hash", "")), "")[
-                int(s.get("char_start", 0)):int(s.get("char_end", 0))]
-            for s in spans
-        ]
-        try:
-            prompt_pack = prompt_pack_v1(
-                spans=list(spans), texts=texts,
-                token_counts=[tokenizer.count(t) for t in texts],
-                budget=prompt_budget, topic=topic,
-            )
-        except PromptPackUnsatisfiable as e:
-            # A real outcome for a batch of very long pages, not an error: no prompt covering
-            # this batch fits the window. Recorded so it lands in the all-offered denominator.
-            return SelectionOutcome(
-                work=work, failure=SelectionFailure("PROMPT_INFEASIBLE", str(e)),
-                contract=contract, aggregation=aggregation, chunker=chunker, stage=stage,
-                tokenizer_sha256=tokenizer_digest, checkpoint_hash=checkpoint_hash,
-                offered_query_attempt_ids=offered_query_attempt_ids,
-                offered_source_occurrence_ids=offered_source_occurrence_ids,
-            )
-        admitted = set(prompt_pack.span_ids)
-        spans = [s for s in spans if str(s.get("span_id", "")) in admitted]
 
-    try:
-        view = CandidateViewRecord.build(
-            spans=list(spans), tokenizer=tokenizer, namespace=namespace, topic=topic,
+    def _build(kept: Sequence[dict]):
+        return CandidateViewRecord.build(
+            spans=list(kept), tokenizer=tokenizer, namespace=namespace, topic=topic,
             contract=contract, token_budget=token_budget, query_attempts=list(query_attempts),
             snapshot_texts=snapshot_texts, visible_views=visible_views,
             source_meta=source_meta, query_status=query_status,
             publication_scope=publication_scope,
             publication_ordinals=publication_ordinals,
         )
-    except ViewConstructionError as e:
+
+    def _refuse(reason: str, detail: str) -> SelectionOutcome:
         return SelectionOutcome(
-            work=work, failure=SelectionFailure("VIEW_CONSTRUCTION", str(e)),
+            work=work, failure=SelectionFailure(reason, detail),
             contract=contract, aggregation=aggregation, chunker=chunker, stage=stage,
-            tokenizer_sha256=tokenizer_digest,
-            checkpoint_hash=checkpoint_hash,
+            tokenizer_sha256=tokenizer_digest, checkpoint_hash=checkpoint_hash,
             offered_query_attempt_ids=offered_query_attempt_ids,
             offered_source_occurrence_ids=offered_source_occurrence_ids,
         )
+
+    try:
+        if prompt_admission and prompt_admission != "none":
+            if prompt_admission != "prompt_pack_v1":
+                raise ValueError(f"unknown prompt admission {prompt_admission!r}")
+            texts = [
+                snapshot_texts.get(str(s.get("content_hash", "")), "")[
+                    int(s.get("char_start", 0)):int(s.get("char_end", 0))]
+                for s in spans
+            ]
+            counts = [tokenizer.count(t) for t in texts]
+            offered = list(spans)
+            budget_now = prompt_budget
+            # Admit, then check the *rendered prompt*, then shrink and re-admit if it does not
+            # fit. Counting span text alone understates the prompt badly: every candidate is
+            # rendered with a label, an origin tag, a heading breadcrumb and its context lines,
+            # and at ~900 candidates that framing is worth more than the text. Trusting the
+            # proxy produced a 30,720-token budget whose real prompt overran the window and was
+            # refused by the engine on 63% of batches -- the same mistake `budget_pack_v1`
+            # exists to avoid, one layer up. So the loop verifies against what is actually sent.
+            for _attempt in range(6):
+                prompt_pack = prompt_pack_v1(
+                    spans=offered, texts=texts, token_counts=counts,
+                    budget=budget_now, topic=topic,
+                )
+                admitted = set(prompt_pack.span_ids)
+                spans = [s for s in offered if str(s.get("span_id", "")) in admitted]
+                view = _build(spans)
+                if not prompt_window_ceiling:
+                    break
+                rendered = tokenizer.count(view.prompt_bytes.decode("utf-8"))
+                if rendered <= prompt_window_ceiling:
+                    break
+                # Scale by the observed overshoot rather than stepping blindly, so this
+                # converges in two or three passes instead of creeping down.
+                budget_now = int(budget_now * prompt_window_ceiling / rendered) - 256
+                if budget_now <= 0:
+                    raise PromptPackUnsatisfiable(
+                        f"the rendered prompt is {rendered} tokens against a "
+                        f"{prompt_window_ceiling}-token ceiling and no admission budget "
+                        "remains; no prompt covering this batch fits the window")
+            else:
+                raise PromptPackUnsatisfiable(
+                    "prompt admission did not converge to a prompt inside the window")
+        else:
+            view = _build(spans)
+    except PromptPackUnsatisfiable as e:
+        # A real outcome for a batch of very long pages, not an error: no prompt covering this
+        # batch fits the window. Recorded so it lands in the all-offered denominator.
+        return _refuse("PROMPT_INFEASIBLE", str(e))
+    except ViewConstructionError as e:
+        return _refuse("VIEW_CONSTRUCTION", str(e))
 
     # The diagnostic arm: no admission stage, so the prompt may simply not fit. Refusing here
     # rather than dispatching keeps the failure attributable -- the engine would reject the
