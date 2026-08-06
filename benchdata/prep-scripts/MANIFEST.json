@@ -1,0 +1,521 @@
+{
+  "generated_utc": "2026-07-27T21:13:51Z",
+  "base_dir": "/storage/sata/shapeflow/benchdata",
+  "documented_path_symlink": "/data/shapeflow -> /storage/sata/shapeflow",
+  "hf_endpoint_used": "https://hf-mirror.com",
+  "hf_endpoint_note": "huggingface.co is unreachable from this host (TCP timeout); all HF traffic used the mirror above.",
+  "assets": {
+    "browsecomp_plus_repo": {
+      "kind": "git repo (fetched as SHA-pinned tarball)",
+      "source_url": "https://github.com/texttron/BrowseComp-Plus",
+      "commit": "046949032b0328319cc9a02663a759ec601d9402",
+      "tarball_url": "https://codeload.github.com/texttron/BrowseComp-Plus/tar.gz/046949032b0328319cc9a02663a759ec601d9402",
+      "tarball_sha256": "6ea1ca27b582bf89410bed8958c4f23fbf8da4615183f50a94a8a513f1d05b9d",
+      "fetched_utc": "2026-07-27T20:08:02Z",
+      "license": "MIT",
+      "local_path": "/storage/sata/shapeflow/benchdata/browsecomp-plus/repo",
+      "note": "codeload tarball (github git smart-HTTP blocked from this host)"
+    },
+    "browsecomp_plus_corpus": {
+      "kind": "HF dataset",
+      "source_url": "https://huggingface.co/datasets/Tevatron/browsecomp-plus-corpus",
+      "hf_revision": "b27b02bc3e45511b8b82a13e6f90ce761df726f6",
+      "hf_endpoint": "https://hf-mirror.com",
+      "license": "MIT (per upstream repo)",
+      "download_date": "2026-07-27",
+      "num_documents": 100195,
+      "local_path": "/storage/sata/shapeflow/benchdata/browsecomp-plus/corpus",
+      "files": [
+        {
+          "path": "README.md",
+          "bytes": 3232,
+          "sha256": "6c02abf89cc0c32800e2664e72b76b14a7a28791bf46f70d35cf57bd06e51b88"
+        },
+        {
+          "path": "data/train-00000-of-00007.parquet",
+          "bytes": 218510750,
+          "sha256": "7c07f9e23b1ca548110fd831714cadc67d44db5223bace6e45fcaa795d3153d0"
+        },
+        {
+          "path": "data/train-00001-of-00007.parquet",
+          "bytes": 271758203,
+          "sha256": "e92d8202e0f656a85b262153dbcd22ecf80ea2d0c96d9884f9c8e25480b869ab"
+        },
+        {
+          "path": "data/train-00002-of-00007.parquet",
+          "bytes": 257605847,
+          "sha256": "0e4113a4503342527258d8f2c49877747435f3e65bfe1f7306b4f488c8d225fe"
+        },
+        {
+          "path": "data/train-00003-of-00007.parquet",
+          "bytes": 239125125,
+          "sha256": "0ceea5e703332a2e3ce700f641273400d84583fad84b659d3248ed06d3a9fef3"
+        },
+        {
+          "path": "data/train-00004-of-00007.parquet",
+          "bytes": 259072824,
+          "sha256": "15b62914ddc3de6946893c770f07d5d84d29646e833ca1447955668f2b57940c"
+        },
+        {
+          "path": "data/train-00005-of-00007.parquet",
+          "bytes": 257706279,
+          "sha256": "a9a75708ad37c522e93a774e5a968a3129e12b0559971c8f950a5628e0201df0"
+        },
+        {
+          "path": "data/train-00006-of-00007.parquet",
+          "bytes": 257801458,
+          "sha256": "290062b60c1a6ebba7d5469a37a431f0a2596e68788295284b1b2d35db07b62c"
+        }
+      ]
+    },
+    "browsecomp_plus_queries": {
+      "kind": "HF dataset (obfuscated upstream, decrypted locally)",
+      "source_url": "https://huggingface.co/datasets/Tevatron/browsecomp-plus",
+      "hf_revision": "144cff8e35b5eaef7e526346aa60774a9deb941f",
+      "hf_endpoint": "https://hf-mirror.com",
+      "license": "MIT",
+      "download_date": "2026-07-27",
+      "num_queries": 830,
+      "evidence_docs_per_query": {
+        "n_queries": 830,
+        "total": 5064,
+        "min": 1,
+        "max": 13,
+        "mean": 6.101,
+        "median": 6.0,
+        "p25": 4.0,
+        "p75": 8.0,
+        "p90": 9.0,
+        "zero_count": 0,
+        "histogram": {
+          "1": 3,
+          "2": 27,
+          "3": 79,
+          "4": 122,
+          "5": 133,
+          "6-10": 449,
+          "11-20": 17
+        }
+      },
+      "gold_docs_per_query": {
+        "n_queries": 830,
+        "total": 2407,
+        "min": 1,
+        "max": 9,
+        "mean": 2.9,
+        "median": 2.0,
+        "p25": 1.0,
+        "p75": 4.0,
+        "p90": 6.0,
+        "zero_count": 0,
+        "histogram": {
+          "1": 270,
+          "2": 166,
+          "3": 133,
+          "4": 87,
+          "5": 69,
+          "6-10": 105
+        }
+      },
+      "negative_docs_per_query": {
+        "n_queries": 830,
+        "total": 63316,
+        "min": 1,
+        "max": 197,
+        "mean": 76.284,
+        "median": 74.0,
+        "p25": 58.0,
+        "p75": 92.0,
+        "p90": 113.0,
+        "zero_count": 0,
+        "histogram": {
+          "1": 2,
+          "3": 1,
+          "6-10": 2,
+          "11-20": 7,
+          "21-50": 121,
+          "50+": 697
+        }
+      },
+      "qrel_files": {
+        "qrel_evidence": {
+          "queries": 830,
+          "positive_judgements": 5064
+        },
+        "qrel_golds": {
+          "queries": 830,
+          "positive_judgements": 2407
+        },
+        "evidence_matches_jsonl": true,
+        "evidence_mismatch_count": 0
+      },
+      "decryption": "official transform_decrypt() imported verbatim from scripts_build_index/decrypt_dataset.py; canary key unchanged",
+      "CONTAINS_ANSWERS": true,
+      "handling": "decrypted JSONL holds gold answers - kept out of git, never printed to logs",
+      "files": [
+        {
+          "path": "data/browsecomp_plus_decrypted.jsonl",
+          "bytes": 2127119019,
+          "sha256": "0374946363a5c59f4d3707fa9c31b9e5152269c0f024668a71687dda4e48a85e"
+        },
+        {
+          "path": "repo/topics-qrels/qrel_evidence.txt",
+          "bytes": 76162,
+          "sha256": "a6f594975be57339de9e4e9f67f13c044f647feda77c0b84c45a1581e3041bd1"
+        },
+        {
+          "path": "repo/topics-qrels/qrel_golds.txt",
+          "bytes": 36336,
+          "sha256": "b875af4a745712bee7a94f464ed989232f8c77977c31824428470e11dcb28c73"
+        },
+        {
+          "path": "repo/topics-qrels/queries.tsv",
+          "bytes": 472918,
+          "sha256": "d3d47d3cd6a8e14fa24268b75fbbda50dadd280d09c30412257978933b9c0bfa"
+        }
+      ]
+    },
+    "browsecomp_plus_indexes": {
+      "kind": "HF dataset (prebuilt indexes)",
+      "source_url": "https://huggingface.co/datasets/Tevatron/browsecomp-plus-indexes",
+      "hf_revision": "b3f37f70c33829eb09d04784a54277a31871fd63",
+      "hf_endpoint": "https://hf-mirror.com",
+      "license": "MIT (per upstream repo)",
+      "download_date": "2026-07-27",
+      "subsets": {
+        "bm25": {
+          "files": 15,
+          "bytes": 2170624147
+        },
+        "qwen3-embedding-0.6b": {
+          "files": 4,
+          "bytes": 411190349
+        },
+        "qwen3-embedding-4b": {
+          "files": 4,
+          "bytes": 1026788429
+        },
+        "qwen3-embedding-8b": {
+          "files": 4,
+          "bytes": 1642386509
+        }
+      },
+      "dense_indexes_downloaded": true,
+      "dense_note": "all three Qwen3-Embedding indexes fetched; total index footprint ~5 GB, far below the 50 GB threshold in the brief",
+      "lucene_num_docs": 100195,
+      "local_path": "/storage/sata/shapeflow/benchdata/browsecomp-plus/indexes",
+      "files": [
+        {
+          "path": "bm25/_3.fdm",
+          "bytes": 957,
+          "sha256": "fc9944ba7f16c140c2e8d99ac64d252eb78f58aac4ac309b48f80a18c81e3ee7"
+        },
+        {
+          "path": "bm25/_3.fdt",
+          "bytes": 1991597789,
+          "sha256": "756db803e706c6f372c5b9ff7ae90a7ebbc511812026d4ea92117b6fa0aaba7b"
+        },
+        {
+          "path": "bm25/_3.fdx",
+          "bytes": 81648,
+          "sha256": "e71b113388397f896f38388968207b1842aed36f14ad8d457f5fd6d27a1e5474"
+        },
+        {
+          "path": "bm25/_3.fnm",
+          "bytes": 343,
+          "sha256": "22e9099dbfccf427cd9d19c96f33d0073b9a9a1edea905cb3d8b3a00bf1eae99"
+        },
+        {
+          "path": "bm25/_3.nvd",
+          "bytes": 100254,
+          "sha256": "ecc4f5218929dc41da8b1d6ae1a24eafa58f78c5fe139e7d1ea1d694fb88311a"
+        },
+        {
+          "path": "bm25/_3.nvm",
+          "bytes": 103,
+          "sha256": "6b3932f8da1886e06e059e2c7f06bc793bc258cb7d1e0cff63d6a773494c2a43"
+        },
+        {
+          "path": "bm25/_3.si",
+          "bytes": 474,
+          "sha256": "7c8ab5a2b8002983d91785a762771d7231b7209b0153b83b94ccc66efb7dd417"
+        },
+        {
+          "path": "bm25/_3_Lucene90_0.dvd",
+          "bytes": 590329,
+          "sha256": "40c91ac892c45d0d35ca47118f1b5c0173c2c1cbf856a0727e566198c3a29317"
+        },
+        {
+          "path": "bm25/_3_Lucene90_0.dvm",
+          "bytes": 192,
+          "sha256": "a42c3f7b8a782a3daec2f92c0063fdb460f15938fd875e9ca8f84f279498d7be"
+        },
+        {
+          "path": "bm25/_3_Lucene99_0.doc",
+          "bytes": 140473531,
+          "sha256": "e2fef3a4511048a8217e82e958b95e532f5993d30c8d75e8d859d949229bbecf"
+        },
+        {
+          "path": "bm25/_3_Lucene99_0.tim",
+          "bytes": 36731670,
+          "sha256": "01311e1096e3917dada8da2af01b6072b3899400a79b5fd47f61a5b47a9934ba"
+        },
+        {
+          "path": "bm25/_3_Lucene99_0.tip",
+          "bytes": 1046419,
+          "sha256": "ce663e3f8e341eac97596413bcda8ab63fd1a698206019eb29e8538031c47fa3"
+        },
+        {
+          "path": "bm25/_3_Lucene99_0.tmd",
+          "bytes": 284,
+          "sha256": "fedef29c806a393397c5bdbd17818225a44d359cb89c5cebb428f68370231457"
+        },
+        {
+          "path": "bm25/segments_3",
+          "bytes": 154,
+          "sha256": "e0a7e730510505f90596fc6438061b947dd5e786fc4b5fc2c722442c2b493a65"
+        },
+        {
+          "path": "bm25/write.lock",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "path": "qwen3-embedding-0.6b/corpus.shard1_of_4.pkl",
+          "bytes": 102798634,
+          "sha256": "dcbe89464488f5dd03c70be5d580c3359a5a71795bf1011cdfe8dfe8567d572c"
+        },
+        {
+          "path": "qwen3-embedding-0.6b/corpus.shard2_of_4.pkl",
+          "bytes": 102798633,
+          "sha256": "8ee02040dd54deee6d3280c66dcd14429ec21833cc51196fe1d2f67dfdc4a4df"
+        },
+        {
+          "path": "qwen3-embedding-0.6b/corpus.shard3_of_4.pkl",
+          "bytes": 102798619,
+          "sha256": "bc89d5d90e8bdf127a194db6e1a352e26ca9c7a882d1da8feebbe19271c9c796"
+        },
+        {
+          "path": "qwen3-embedding-0.6b/corpus.shard4_of_4.pkl",
+          "bytes": 102794463,
+          "sha256": "6638bed8f88f4d8286af05d3c4bb232c83c2e869d1908bd400047889fe9b34bf"
+        },
+        {
+          "path": "qwen3-embedding-4b/corpus.shard1_of_4.pkl",
+          "bytes": 256699690,
+          "sha256": "38c613bbdc6ab0b710a5d4672a22818b4ad83651cd97a834ad12a4ca87a365dc"
+        },
+        {
+          "path": "qwen3-embedding-4b/corpus.shard2_of_4.pkl",
+          "bytes": 256699689,
+          "sha256": "77fef66c3f23abe601dd56417ae4a9250eccecdf490c7c36eb7aa20e2428ac7e"
+        },
+        {
+          "path": "qwen3-embedding-4b/corpus.shard3_of_4.pkl",
+          "bytes": 256699675,
+          "sha256": "eb3225596afdbae966a1569789235ce828edc90983dec36ab4066d1ba6dcc132"
+        },
+        {
+          "path": "qwen3-embedding-4b/corpus.shard4_of_4.pkl",
+          "bytes": 256689375,
+          "sha256": "5f5efc1946b4dd5b197e3d65cf01cd59be620a5dc65df8fccf38e6bbb7c4f733"
+        },
+        {
+          "path": "qwen3-embedding-8b/corpus.shard1_of_4.pkl",
+          "bytes": 410600746,
+          "sha256": "4bfad4863cc4f38d2a6bef1ee54f81b8021a0cad985abd153b91fc0e29f22c7e"
+        },
+        {
+          "path": "qwen3-embedding-8b/corpus.shard2_of_4.pkl",
+          "bytes": 410600745,
+          "sha256": "0285996dd37e58f5ad21ea4ed12d61d933c7e223c885955174e71ee30002dbd8"
+        },
+        {
+          "path": "qwen3-embedding-8b/corpus.shard3_of_4.pkl",
+          "bytes": 410600731,
+          "sha256": "0701099f6c806c086b0a1eda1b3dc6f76449236f0339bc5cc153c79eb56140ae"
+        },
+        {
+          "path": "qwen3-embedding-8b/corpus.shard4_of_4.pkl",
+          "bytes": 410584287,
+          "sha256": "b117e2d9f08c2dcf6f50229f34e1302f10a3b6960ef5dfa7f3719c21aaf0024a"
+        }
+      ]
+    },
+    "bm25_smoke_test": {
+      "kind": "derived result",
+      "script": "prep-scripts/smoke_bc_plus.py",
+      "n_queries_sampled": 20,
+      "seed": 20260727,
+      "k": 100,
+      "macro_recall": {
+        "gold@10": 0.0,
+        "gold@100": 0.1062,
+        "evidence@10": 0.01,
+        "evidence@100": 0.0357
+      },
+      "latency_ms": {
+        "mean": 221.1,
+        "median": 212.7,
+        "min": 80.7,
+        "max": 414.9
+      }
+    },
+    "bm25_full_treceval": {
+      "kind": "derived result",
+      "script": "prep-scripts/bm25_full_run.py + pyserini.eval.trec_eval",
+      "retriever": "BM25 (prebuilt Tevatron index)",
+      "n_queries": 830,
+      "k": 1000,
+      "metrics": {
+        "evidence": {
+          "recall_5": 0.0118,
+          "recall_10": 0.0173,
+          "recall_100": 0.0466,
+          "recall_1000": 0.1365,
+          "ndcg_cut_10": 0.0163
+        },
+        "gold": {
+          "recall_5": 0.0139,
+          "recall_10": 0.0206,
+          "recall_100": 0.061,
+          "recall_1000": 0.1728,
+          "ndcg_cut_10": 0.0166
+        }
+      },
+      "note": "official evaluation path from the BrowseComp-Plus README; validates the 20-query smoke test against all 830 queries"
+    },
+    "bcplus_splits": {
+      "kind": "derived (ours, in git)",
+      "script": "prep-scripts/make_splits.py",
+      "seed": 20260727,
+      "method": "pure random (no topic/answer-type field exists to stratify on)",
+      "dev_count": 530,
+      "test_count": 300,
+      "dev_sha256": "3ee68bef54a6bc02611d27dfe37fe715f7130d34d2c3b5d322d4e3431d930db5",
+      "test_sha256": "918890f6f4da1b5996875d31f6f2e2bcb95ef4ba795dedc12c718d0501636bd7",
+      "balance_check": {
+        "dev": {
+          "gold_docs_mean": 2.968,
+          "gold_docs_median": 2.0,
+          "evidence_docs_mean": 6.162,
+          "evidence_docs_median": 6.0
+        },
+        "test": {
+          "gold_docs_mean": 2.78,
+          "gold_docs_median": 2.0,
+          "evidence_docs_mean": 5.993,
+          "evidence_docs_median": 6.0
+        }
+      },
+      "files": [
+        {
+          "path": "bcplus_dev.txt",
+          "bytes": 2195,
+          "sha256": "3ee68bef54a6bc02611d27dfe37fe715f7130d34d2c3b5d322d4e3431d930db5"
+        },
+        {
+          "path": "bcplus_test.txt",
+          "bytes": 1247,
+          "sha256": "918890f6f4da1b5996875d31f6f2e2bcb95ef4ba795dedc12c718d0501636bd7"
+        },
+        {
+          "path": "splits_manifest.json",
+          "bytes": 1034,
+          "sha256": "ec353ae475711afd9c8ae3af6c811605fdb665bb76d72f2cdc9e8a1adebc998e"
+        }
+      ]
+    },
+    "deepresearch_bench": {
+      "kind": "git repo (fetched as SHA-pinned tarball)",
+      "source_url": "https://github.com/Ayanami0730/deep_research_bench",
+      "commit": "469cce54ea7f6a63c163d3d9fec879cf289ec484",
+      "tarball_sha256": "2e64c347e2d4710334d62edef29189345e0f937230725d34660faf933391caea",
+      "fetched_utc": "2026-07-27T20:08:17Z",
+      "license": "Apache-2.0",
+      "query_count": 100,
+      "query_language_split": {
+        "zh": 50,
+        "en": 50
+      },
+      "judge_models_official": {
+        "RACE": "gpt-5.5",
+        "FACT": "gpt-5.4-mini",
+        "note": "judge NOT run; needs external API key"
+      },
+      "entry_scripts": [
+        "deepresearch_bench_race.py",
+        "run_benchmark.sh",
+        "utils/extract.py",
+        "utils/deduplicate.py",
+        "utils/validate.py",
+        "utils/stat.py"
+      ],
+      "usage_in_project": "guardrail only",
+      "files": [
+        {
+          "path": "data/prompt_data/query.jsonl",
+          "bytes": 38080,
+          "sha256": "62b197a264a027fd4e2e795ff322a82dd6d566f5e350596ccc7572539ec987d1"
+        }
+      ]
+    },
+    "researchy_questions": {
+      "kind": "HF dataset",
+      "source_url": "https://huggingface.co/datasets/corbyrosset/researchy_questions",
+      "hf_revision": "f5461b32f764bf15341039723f104dd2f12a81ae",
+      "hf_endpoint": "https://hf-mirror.com",
+      "license": "CDLA-Permissive-2.0",
+      "download_date": "2026-07-27",
+      "total_records": 96448,
+      "splits": {
+        "researchy_questions.train.jsonl": 90000,
+        "researchy_questions.test.jsonl": 6448
+      },
+      "local_path": "/storage/sata/shapeflow/benchdata/drgym/researchy_questions",
+      "files": [
+        {
+          "path": "README.md",
+          "bytes": 8279,
+          "sha256": "80a0902ddffe6a3aa2a27dcaa14186944a837d2aca6c9e99f45f12592f952757"
+        },
+        {
+          "path": "researchy_questions.test.jsonl",
+          "bytes": 43387532,
+          "sha256": "c566434695d02a101d3527f4e9c73a4dcd31bae9215cce29f4b79efa28b58d19"
+        },
+        {
+          "path": "researchy_questions.train.jsonl",
+          "bytes": 605128784,
+          "sha256": "743a3bbc16aa2e94ca8d4e59d6e574ec4dd76dafdb310bf26373a00bb29ee14d"
+        }
+      ]
+    },
+    "deepresearchgym_api": {
+      "kind": "remote API (no local data)",
+      "project_page": "https://www.deepresearchgym.ai",
+      "api_host": "https://clueweb22.us",
+      "openapi": "https://clueweb22.us/openapi.json",
+      "index_used": "fineweb",
+      "clueweb22": "OUT OF SCOPE - not registered, not queried",
+      "endpoints_present": [
+        "GET /search",
+        "GET /fineweb/search",
+        "GET /health",
+        "GET /docs"
+      ],
+      "fetch_endpoint_exists": false,
+      "auth": "x-api-key header",
+      "status": "BLOCKED - 401 Invalid or missing API Key",
+      "blocker_action": "email deepresearchgym@cmu.edu to request a free key",
+      "network_reachable_from_sjtu": true,
+      "probe": {
+        "n_queries": 10,
+        "n_success": 0,
+        "latency_ms": null,
+        "response_shape": "{'results': [base64(JSON doc), ...]}; FineWeb doc fields: url, dump, language, id, text"
+      },
+      "docs": "drgym/README_api.md"
+    }
+  }
+}

@@ -1,0 +1,31 @@
+# shapeflow-holdout-gate unit (plan §7.3). The honest-holdout isolation boundary. It runs as the
+# steward/gate identity with a key the runner cannot read, and materializes the holdout task+corpus
+# (WITHOUT any evaluator labels) into a runner-readable directory ONLY when the tracked freeze
+# commit/tag/hash, ledger phase, and approval all match. TruthPackets NEVER leave the evaluator UID.
+# A read-before-release, a repeat release, or a hash mismatch is a fatal incident. Fill @PLACEHOLDERS@.
+[Unit]
+Description=ShapeFlow P1 holdout gate (release-once, hash-matched)
+After=network.target
+# At most 3 restarts in 30 min, else give up (BLOCKED_REPEATED_CRASH). These belong in
+# [Unit]; systemd ignores them under [Service], silently removing the crash ceiling.
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=@GATE_USER@
+WorkingDirectory=@REPO@
+# Verifies HEAD/tag/freeze/ledger-phase closure, then releases the label-free holdout to the runner.
+ExecStart=@REPO@/.venv/bin/shapeflow release-holdout \
+  --freeze-tag freeze/p1-holdout-v1 --protocol-sha @PROTOCOL_SHA@ --once
+
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# The gate can write only the runner-readable release dir; TruthPackets stay under the evaluator UID.
+ReadWritePaths=@REPO@/data/holdout_release @REPO@/runs @REPO@/logs
+
+StandardOutput=append:@REPO@/logs/holdout_gate.log
+StandardError=append:@REPO@/logs/holdout_gate.err
