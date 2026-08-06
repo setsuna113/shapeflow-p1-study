@@ -1,0 +1,158 @@
+# Freeze-2 pre-registration.
+#
+# Written before any quality number was computed. That ordering is the only thing that makes the
+# champion rule a rule rather than a description of what happened to win: `score-selectors` had
+# not been run against any arm when this file was frozen, and the CPU replays that feed it were
+# still in flight.
+#
+# Slot discipline, as in configs/prereg.yaml: every unresolved value is the literal PENDING with
+# a `fill` naming who may resolve it.
+#   PLAN   -- copied from the protocol document or an amendment; no data involved.
+#   PILOT  -- derived by a registered procedure from P0-only artifacts.
+#   HUMAN  -- a person decides and records a rationale. `prereg freeze` refuses while any remain.
+version: v0.1
+protocol_document: protocol/SHAPEFLOW_FREEZE_2.md
+
+# --- what the H boundary now is -----------------------------------------------------------
+#
+# Freeze-1's H arms carried `scope: per_page` while the contract specified the whole gather
+# batch, so they issued ~9 selector requests per batch under ~9 separate rendered-token budgets.
+# Freeze-2's arms are new; nothing here pools with a Freeze-1 H number.
+mechanism:
+  h_unit: whole_batch
+  selector_requests_per_batch: 1
+  rendered_token_budget: 512          # frozen, operator decision D1
+  retrieval_top_k: 5                  # frozen, operator decision D2
+  # Amendment 1: two budgets bind at opposite ends of one request and each gets its own
+  # deterministic CPU packer. The model guesses neither.
+  input_admission: prompt_pack_v1
+  output_packer: budget_pack_v1
+  # Resolved in Amendment 1: "covering every page" means every page has real evidence
+  # representation, not that every raw candidate span reaches the prompt. Silent truncation past
+  # the window is barred -- it drops the batch's tail while reporting coverage.
+  page_coverage_rule: at_least_one_evidence_span_per_non_empty_page
+
+# --- GQ0: mechanical legality (hard gate, offline) ----------------------------------------
+#
+# A selector failing any of these is eliminated without its quality being looked at. Stated as
+# a gate on the arm, not on the batch: a per-batch failure rate is the measurement, and these
+# are the thresholds it is read against.
+gq0:
+  budget_violations_max: 0
+  id_violations_max: 0
+  lineage_violations_max: 0
+  atomicity_violations_max: 0
+  partial_publications_max: 0
+  strict_valid_publication_rate_lcb_min: 0.95      # task-clustered 95% lower bound
+  long_batch_stratum_lcb_min: 0.90                 # batches at or above the p90 page count
+  telemetry_completeness_min: 0.99
+  # Batches whose whole-batch prompt cannot fit the engine window are P1-ineligible for an LLM
+  # arm and are counted, not excluded: they are a named component of the mechanical ceiling.
+  # Measured at 61.9% of 1,632 batches in the Phase 0 census.
+  window_infeasible_counts_toward_rho_mech: true
+
+# --- GQ1: local quality, judge-free -------------------------------------------------------
+#
+# Binary short-answer accuracy is NOT a primary endpoint here (operator decision D2): P0 scored
+# 12.2% over the Freeze-1 campaign and the workload never cleared its own evidence-recall floor,
+# so a binary outcome at that rate cannot resolve between-arm differences.
+gq1:
+  primary_endpoints:
+    - evidence_doc_retention
+    - source_coverage
+    - hard_negative_interference
+    - answer_string_retention
+  secondary_sentinel: bcplus_official_grader
+  # The denominator is the design. Retention is over what the reducer was handed in that batch,
+  # never over what the benchmark holds: the retriever's own evidence recall was 0.1488 against
+  # a 0.40 floor, so a benchmark-wide denominator measures the retriever and reports it as the
+  # reducer's quality.
+  retention_denominator: offered_in_this_batch
+  relevant_set: evidence_docids
+  # Three states, never two. A batch offered no relevant document has no retention; scoring it
+  # 0.0 asserts the reducer dropped something it was never given.
+  unscorable_policy: report_status_never_impute
+  analysis_unit: task
+  pairing: same_checkpoint_across_arms
+
+# --- the champion rule (§5.7, as amended) -------------------------------------------------
+champion:
+  # 1. eliminate every GQ0 or hard-quality failure
+  # 2. among those within this band of the quality leader,
+  # 3. take the lowest all-offered work,
+  # 4. ties -> simplest implementation and lowest CPU+LLM cost.
+  indifference_band_pp: 2.0
+  work_basis: all_offered
+  # Exactly one selector is frozen. No second enters Phase 2.
+  champions_frozen: 1
+  repairs_allowed: 1
+  repair_split: development_only
+  retest_split: fv_b
+  # Diagnostic arms are measured and stay in the all-offered denominator, and may never win.
+  diagnostic_arms:
+    - LLM-FULL
+
+# --- Amendment 1's three gates for the LLM arm --------------------------------------------
+llm_promptview_gates:
+  input_legality:
+    context_compliant_promptview_rate_min: 0.95
+    long_batch_stratum_min: 0.90
+    every_page_represented: true
+  output_legality:
+    budget_violations_max: 0
+    id_violations_max: 0
+    lineage_violations_max: 0
+    atomicity_violations_max: 0
+    rendered_tokens_max: 512
+  incremental_value:
+    # Measured against CPU-PROMPTVIEW on the same PromptView, so the comparison is the ranker
+    # and nothing else. The threshold is a human decision: no data can derive how much quality
+    # is worth the extra prefill and decode.
+    quality_gain_over_cpu_promptview_min_pp: PENDING
+    fill: HUMAN
+    rationale: PENDING
+    must_cover_own_work_cost: true
+
+# --- the two contrasts the shootout exists to produce -------------------------------------
+#
+# Reported separately and never summed. Without the first, an LLM that loses cannot be told
+# apart from an LLM that only saw a truncated candidate set.
+contrasts:
+  pruning_price:
+    left: CPU-FULL
+    right: CPU-PROMPTVIEW
+    # Known limitation, recorded before the number is read: prompt_pack_v1 ranks by the same
+    # lexical signal CpuLexicalAsyncSelector ranks by, so the pruner keeps what the CPU packer
+    # would have chosen and the two agree partly by construction. This contrast is therefore a
+    # LOWER BOUND on the pruning cost for a semantically different ranker.
+    interpretation: lower_bound_for_a_non_lexical_ranker
+  model_value:
+    left: CPU-PROMPTVIEW
+    right: LLM-PROMPTVIEW
+
+# --- kill rules (Amendment 1) --------------------------------------------------------------
+kill_rules:
+  - if: promptpacker_cannot_satisfy_context_and_page_coverage_on_most_batches
+    then: kill_one_call_llm_selector
+  - if: llm_does_not_beat_cpu_on_the_same_promptview
+    then: adopt_cpu_selector
+  - if: llm_better_quality_but_work_cost_not_justified
+    then: adopt_cpu_selector
+  - if: llm_wins_only_on_some_batches
+    then: freeze_hybrid_policy_as_later_quality_qualifier
+    note: must not select the batches post hoc
+  - if: cpu_full_wins_outright
+    then: p1_and_dynamic_shape_still_hold
+    note: only the sub-claim that an LLM selector is indispensable dies
+
+# --- what is not pre-registered here -------------------------------------------------------
+#
+# Phase 2 onwards. Report-level non-inferiority needs epsilon_Q from a P0-only power pilot that
+# has not run, and quoting a margin before that pilot would be choosing it with the data in
+# view. Listed so its absence is deliberate rather than an omission.
+phase2:
+  epsilon_q: PENDING
+  fill: PILOT
+  procedure: epsilon_from_power_pilot@v1
+  hard_incident_excess_ucb_max_pp: 3
+  all_offered_work_saving_lcb_min: 0.15

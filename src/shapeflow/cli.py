@@ -1004,6 +1004,472 @@ def _has(settings, config: str, *keys: str) -> bool:
         return False
 
 
+def _bcplus_questions(benchdata: Optional[Path] = None) -> dict:
+    """task_id -> question, the string the runner puts in ``TaskContext.research_topic``.
+
+    Treatment-visible by design and stated as such in `bench.bcplus.tasks`: the agent is given
+    the question. The relevance labels for it are a different file behind the leakage firewall.
+    Resolved through `benchdata_root` rather than a second path expression, so the census reads
+    the questions from wherever the campaign read them.
+
+    A missing questions file is not fatal -- a replay still measures candidate material -- so
+    the caller gets an empty map and every topic falls back to empty.
+    """
+    from .bench.bcplus.tasks import TaskSourceError, load_questions
+    from .campaign.bcplus import benchdata_root
+
+    path = benchdata_root(benchdata) / "browsecomp-plus" / "repo" / "topics-qrels" / "queries.tsv"
+    try:
+        return load_questions(path)
+    except (TaskSourceError, FileNotFoundError, OSError):
+        return {}
+
+
+@app.command("freeze2-census")
+def freeze2_census(
+    corpus_dir: Path = typer.Option(..., "--corpus-dir",
+                                    help="BC+ corpus parquet directory"),
+    data_root: Path = typer.Option(None, "--data-root",
+                                   help="Overrides the configured DATA_ROOT"),
+    limit: int = typer.Option(0, "--limit",
+                              help="Stop after this many H checkpoints (0 = all)"),
+) -> None:
+    """Freeze-2 Phase 0: can the stored gather batches be replayed, and do they fit the window?
+
+    Three numbers, none of which can be estimated and all of which decide what the rest of the
+    programme costs:
+
+    1. **Reconstruction rate.** A checkpoint names its pages by ``raw_content_id`` and the bytes
+       behind them were thrown away with the run. If they rebuild -- and hash to the recorded id
+       -- then the selector shootout replays 1,800 real gather batches for one request each. If
+       they do not, Phase 1 becomes a full re-run of the agent, which is roughly three times the
+       GPU of everything else in the plan put together.
+    2. **Whole-batch prompt size.** ``SharedContentBudget`` sizes *one* page against the engine
+       window, so a nine-page whole-batch view has no window guarantee at all. Batches that do
+       not fit cannot carry a whole-batch LLM selector under any budget, and that fraction is a
+       mechanical ceiling on the treatment rather than a tuning problem.
+    3. **Candidate count.** ``selector_output.schema.json`` caps ``selected_ids`` at 64 and the
+       cap is a post-hoc validator, so an over-long list fails the sample after its tokens have
+       been charged.
+
+    Reads only. No engine, no GPU, no task budget: every input is an artifact the completed
+    campaign already wrote.
+    """
+    import asyncio
+
+    from collections import Counter
+
+    from .campaign.replay import (
+        HASH_MISMATCH,
+        NO_DOCID,
+        NO_DOCUMENT,
+        SNIPPET_ONLY,
+        VERIFIED,
+        build_replay_setup,
+        iter_checkpoints,
+        measure_whole_batch_view,
+        quantiles,
+    )
+    from .campaign.settings import Settings
+
+    # Runner, because everything it reads is runner-owned treatment material: the checkpoints and
+    # the cell outputs carrying the retrieval traces. It touches no evaluator tree and needs no
+    # approval -- it decides nothing and writes no treatment artifact.
+    _require_role("runner")
+    settings = Settings.load(_REPO, data_root=data_root) if data_root else _settings()
+
+    max_model_len = int(settings.get("stack", "engine", "max_model_len"))
+    completion_cap = int(settings.get("week1", "measurement", "selector_max_completion_tokens"))
+    token_budget = int(settings.get("week1", "measurement", "selected_token_budget"))
+    #: A whole-batch prompt has to leave room for the completion the selector may emit. Above
+    #: this the engine refuses the request outright, so the batch is P1-ineligible for every LLM
+    #: selector regardless of how good the selector is.
+    window_ceiling = max_model_len - completion_cap
+
+    try:
+        setup = build_replay_setup(settings, corpus_dir, echo=typer.echo)
+    except FileNotFoundError as e:
+        _fail(str(e))
+    typer.echo(f"window ceiling: {window_ceiling} "
+               f"(= max_model_len {max_model_len} - completion cap {completion_cap})")
+    # The real topic, not a placeholder: `graph_driver` sets `research_topic = cell.question`,
+    # and it is interpolated into the selector prompt. Measuring with an empty one would
+    # understate every prompt by the length of the question -- small against a ~24k-token
+    # whole-batch view, but the window-overflow fraction is the number this census exists to
+    # produce, so it is measured on the prompt the arm would actually send.
+    questions = _bcplus_questions()
+    typer.echo(f"questions: {len(questions)} loaded for the prompt topic")
+    checkpoint_roots = setup.checkpoint_roots
+    reconstructor = setup.reconstructor
+
+    page_status: Counter = Counter()
+    batch_total = 0
+    batch_complete = 0
+    sibling_counts: Counter = Counter()
+    incomplete_examples: list[dict] = []
+    measurements: list = []
+    pages_per_batch: list[int] = []
+
+    for document in iter_checkpoints(checkpoint_roots, kind="H"):
+        if limit and batch_total >= limit:
+            break
+        batch_total += 1
+        rebuilt = reconstructor.rebuild(document)
+        sibling_counts[rebuilt.siblings] += 1
+        page_status.update(rebuilt.status_counts())
+        pages_per_batch.append(len(rebuilt.content_pages))
+        if not rebuilt.complete:
+            if len(incomplete_examples) < 20:
+                incomplete_examples.append({
+                    "checkpoint": rebuilt.checkpoint_digest[:16],
+                    "task_id": rebuilt.task_id,
+                    "statuses": rebuilt.status_counts(),
+                })
+            continue
+        batch_complete += 1
+        measured = asyncio.run(measure_whole_batch_view(
+            document=document, reconstruction=rebuilt, tokenizer=setup.tokenizer,
+            chunker="markdown_structure_v1", token_budget=token_budget,
+            topic=questions.get(rebuilt.task_id, ""),
+        ))
+        if measured is not None:
+            measurements.append(measured)
+        if batch_total % 100 == 0:
+            typer.echo(f"  {batch_total} batches, {batch_complete} reconstructed, "
+                       f"{len(measurements)} views measured")
+
+    prompt_tokens = [m.prompt_tokens for m in measurements]
+    candidates = [m.candidates for m in measurements]
+    over_window = [m for m in measurements if m.prompt_tokens > window_ceiling]
+    over_cap = [m for m in measurements if m.candidates > 64]
+
+    def _rate(numerator: int, denominator: int) -> Optional[float]:
+        # Never a bare 0.0 for "no denominator": a rate over nothing is not a low rate.
+        return round(numerator / denominator, 4) if denominator else None
+
+    body = {
+        "gate": "FREEZE2_CENSUS",
+        "decided_at_utc": _now(),
+        "inputs": {"corpus_dir": str(corpus_dir), **setup.provenance()},
+        "reconstruction": {
+            "h_checkpoints": batch_total,
+            "batches_fully_reconstructed": batch_complete,
+            "batch_reconstruction_rate": _rate(batch_complete, batch_total),
+            "page_status": dict(sorted(page_status.items())),
+            "page_verification_rate": _rate(
+                page_status.get(VERIFIED, 0),
+                sum(page_status.get(k, 0) for k in (VERIFIED, NO_DOCID, NO_DOCUMENT,
+                                                    HASH_MISMATCH))),
+            "snippet_only_pages": page_status.get(SNIPPET_ONLY, 0),
+            "incomplete_examples": incomplete_examples,
+        },
+        "batch_geometry": {
+            "siblings_per_batch": {str(k): v for k, v in sorted(sibling_counts.items())},
+            "content_pages_per_batch": quantiles(pages_per_batch),
+        },
+        "whole_batch_view": {
+            "views_measured": len(measurements),
+            "prompt_tokens": quantiles(prompt_tokens),
+            "candidates": quantiles(candidates),
+            "window_ceiling": window_ceiling,
+            "over_window": len(over_window),
+            "over_window_rate": _rate(len(over_window), len(measurements)),
+            "selected_ids_cap": 64,
+            "over_candidate_cap": len(over_cap),
+            "over_candidate_cap_rate": _rate(len(over_cap), len(measurements)),
+        },
+    }
+
+    # Written into the runner's own tree, not into reports/gates. The isolation is real: the
+    # runner can read the checkpoints and cell outputs this measures and cannot write a gate
+    # file, while the steward can write gate files and cannot read runner artifacts. So the
+    # measurement is produced here and promoted to a gate separately -- the same two steps as
+    # run-bcplus -> grade-bcplus -> bcplus-competence.
+    settings.ensure_paths("runs")
+    out = settings.path("runs") / "FREEZE2_CENSUS.json"
+    out.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    typer.echo(f"\nwrote {out}")
+    typer.echo(f"  batches reconstructed : {batch_complete}/{batch_total} "
+               f"({body['reconstruction']['batch_reconstruction_rate']})")
+    typer.echo(f"  whole-batch prompt p50: {body['whole_batch_view']['prompt_tokens'].get('p50')}"
+               f"  p95: {body['whole_batch_view']['prompt_tokens'].get('p95')}")
+    typer.echo(f"  over window ({window_ceiling}): {len(over_window)}/{len(measurements)} "
+               f"({body['whole_batch_view']['over_window_rate']})")
+    typer.echo(f"  over 64-candidate cap : {len(over_cap)}/{len(measurements)}")
+
+
+@app.command("replay-selectors")
+def replay_selectors(
+    variant: str = typer.Option(..., "--variant", help="Variant id, e.g. HW00-CPU"),
+    corpus_dir: Path = typer.Option(..., "--corpus-dir", help="BC+ corpus parquet directory"),
+    data_root: Path = typer.Option(None, "--data-root"),
+    limit: int = typer.Option(0, "--limit", help="Stop after this many H checkpoints"),
+    seed: int = typer.Option(0, "--seed"),
+) -> None:
+    """Replay stored gather batches through one selector variant, without running the agent.
+
+    The completed campaign left an `HCheckpoint` for every gather batch it ever formed, captured
+    before any strategy ran and therefore identical across arms. Re-offering them to a new
+    selector measures that selector on real decision points at the cost of one request per batch
+    -- or, for a CPU selector, nothing at all.
+
+    What runs here is the production strategy object, built by the same `StrategyFactory` the
+    runner uses. Chunking, view construction, selection, aggregation and preflight are the real
+    code paths, so a publication rate measured here is the publication rate that arm would have.
+
+    Trials are content-addressed and written once, so this is resumable: rerunning skips
+    everything already on disk. The key commits to the tokenizer, the prompt bundle and the
+    renderer version, so a result produced under a different prompt is never reused.
+    """
+    import asyncio
+
+    from .campaign.pages import PageRegistry
+    from .campaign.replay import build_replay_setup, iter_checkpoints, run_trial, trial_key
+    from .campaign.selector_client import SelectorModelCall
+    from .campaign.settings import Settings
+    from .evidence.model_tokenizer import tokenizer_sha256
+    from .hashing import canonical_json
+    from .p1.prompt_pack import PromptBudget
+    from .strategies.factory import StrategyFactory, load_registry
+
+    _require_role("runner")
+    settings = Settings.load(_REPO, data_root=data_root) if data_root else _settings()
+    token_budget = int(settings.get("week1", "measurement", "selected_token_budget"))
+
+    registry = load_registry(_REPO / "configs")
+    if variant not in registry:
+        _fail(f"{variant!r} is not in the variant registry")
+    spec = registry[variant]
+
+    class _BoundModelCall:
+        """Dispatches to the selector call bound to the trial currently being replayed.
+
+        The call has to be per trial, not per process: the provider attributes tokens to the
+        cell that spent them, and a selector wired to one shared token would pool every batch's
+        work under a single key -- leaving the arm's cost real but unattributable to any batch.
+        """
+
+        def __init__(self) -> None:
+            self.current = None
+
+        async def __call__(self, **kwargs):
+            if self.current is None:
+                raise RuntimeError(
+                    f"{variant} issued a model call with no cell bound; the trial's provider "
+                    "cell must be registered before the strategy runs or its tokens are "
+                    "charged to nothing")
+            return await self.current(**kwargs)
+
+    needs_model = registry[variant].selector_backend == "LLM"
+    model_call = _BoundModelCall()
+    completion_cap = int(
+        settings.get("week1", "measurement", "selector_max_completion_tokens"))
+    provider = _provider_client(settings) if needs_model else None
+    # One run id for the whole arm, so every trial's work rolls up under the arm that spent it
+    # while each cell stays individually attributable.
+    run_id = f"freeze2-shootout-{variant.lower()}"
+
+    try:
+        setup = build_replay_setup(settings, corpus_dir, echo=typer.echo)
+    except FileNotFoundError as e:
+        _fail(str(e))
+
+    # The page bytes reach the strategy the way they reach it in production: through a
+    # PageRegistry the seam prefilled. `StrategyFactory` defaults `raw_text_for` to a callable
+    # returning "", so a factory built without one yields a strategy that reads every page as
+    # empty, offers no candidates, and reports a flawless publication rate for an arm that never
+    # selected anything -- the inert-arm failure `campaign.pages` and the publication canary
+    # both exist to catch.
+    # Two budgets, derived not chosen. `token_budget` bounds the rendered output; this one
+    # bounds what the selector may see. `overhead_tokens` covers the instruction block, the
+    # topic and the schema that wrap the candidate list -- 1,024 is conservative against a
+    # template measured at ~250-300 tokens, and the margin absorbs any disagreement between
+    # this tokenizer's count and the engine's own.
+    prompt_budget = PromptBudget(
+        max_model_len=int(settings.get("stack", "engine", "max_model_len")),
+        completion_cap=int(
+            settings.get("week1", "measurement", "selector_max_completion_tokens")),
+        overhead_tokens=1024,
+    )
+    pages = PageRegistry()
+    factory = StrategyFactory(
+        registry=registry, model_call=model_call, tokenizer=setup.tokenizer,
+        token_budget=token_budget,
+        prompt_budget=prompt_budget.candidates,
+        prompt_window_ceiling=prompt_budget.max_model_len - prompt_budget.completion_cap,
+        raw_text_for=pages.text_for, occurrence_for=pages.occurrence_for,
+    )
+    typer.echo(f"prompt budget: {prompt_budget.candidates} candidate tokens; "
+               f"window ceiling {prompt_budget.max_model_len - prompt_budget.completion_cap}")
+    # The topic reaches the selector prompt, so a replay run without it is scoring a different
+    # prompt from the one the arm would send.
+    questions = _bcplus_questions()
+    # The trial key is namespaced by the *source tree*, not by the protocol document. The
+    # tokenizer, prompt bundle and renderer version are already folded into the key, but a change
+    # to the packer's own algorithm would move none of them -- and resuming across such a change
+    # would silently mix two packers inside one arm, which is invisible in the output because
+    # both halves are valid trials. Hashing the tree makes any code change a new namespace.
+    import shapeflow
+
+    from .treehash import tree_sha256
+
+    execution_binding = tree_sha256(Path(shapeflow.__file__).parent)
+    digest = tokenizer_sha256(setup.tokenizer)
+
+    # Under the runner's own runs directory: the data root is root-owned, and the identity that
+    # can read the checkpoints being replayed is the runner. Same reason the census writes here.
+    settings.ensure_paths("runs")
+    out_root = settings.path("runs") / "selector_trials"
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    seen = written = skipped = unreconstructable = 0
+    for document in iter_checkpoints(setup.checkpoint_roots, kind="H"):
+        if limit and seen >= limit:
+            break
+        seen += 1
+        rebuilt = setup.reconstructor.rebuild(document)
+        if not rebuilt.complete:
+            unreconstructable += 1
+            continue
+        key = trial_key(execution_binding=execution_binding,
+                        checkpoint_digest=rebuilt.checkpoint_digest,
+                        variant_id=variant, seed=seed, tokenizer_sha256=digest)
+        path = out_root / key[:2] / f"{key}.json"
+        if path.exists():
+            skipped += 1
+            continue
+
+        pages.prefill(*rebuilt.registry_prefill())
+        # A strategy per batch: publication-scope binding is per-instance state, and reusing one
+        # across unrelated checkpoints would make a replay's handle allocation depend on the
+        # order batches happened to be walked in.
+        strategy = factory.build(variant).page
+
+        async def _replay(key=key, rebuilt=rebuilt, document=document, strategy=strategy):
+            if needs_model:
+                cell_token = "cell-" + key
+                await provider.register_cell(
+                    cell_token=cell_token, run_id=run_id, task_id=rebuilt.task_id,
+                    arm_id=variant, variant_id=variant, replicate_id="0", work_key=key,
+                    layer=str(settings.get("week1", "measurement", "layer")))
+                model_call.current = SelectorModelCall(
+                    provider, cell_token=cell_token, repo=_REPO,
+                    temperature=float(settings.get("stack", "sampling", "temperature")),
+                    top_p=float(settings.get("stack", "sampling", "top_p")),
+                    max_completion_tokens=completion_cap, seed=seed,
+                    guided_decoding=bool(
+                        settings.get("week1", "measurement", "guided_decoding")),
+                )
+            try:
+                return await run_trial(
+                    document=document, reconstruction=rebuilt, strategy=strategy,
+                    variant_id=variant, topic=questions.get(rebuilt.task_id, ""),
+                    token_budget=token_budget)
+            finally:
+                model_call.current = None
+
+        record = asyncio.run(_replay())
+        record["trial_key"] = key
+        record["source_tree_sha256"] = execution_binding
+        record["scope"] = spec.scope
+        record["aggregation"] = spec.aggregation
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(canonical_json(record).decode("utf-8") + "\n", encoding="utf-8")
+        written += 1
+        if seen % 100 == 0:
+            typer.echo(f"  {seen} batches: {written} written, {skipped} already done, "
+                       f"{unreconstructable} unreconstructable")
+
+    typer.echo(f"\n{variant}: {written} trials written, {skipped} resumed, "
+               f"{unreconstructable}/{seen} batches unreconstructable")
+    typer.echo(f"  under {out_root}")
+
+
+@app.command("score-selectors")
+def score_selectors(
+    data_root: Path = typer.Option(None, "--data-root"),
+    out: Path = typer.Option(None, "--out", help="Where to write the GQ1 report"),
+) -> None:
+    """Evaluator-only: score every replayed arm on the judge-free quality family.
+
+    The trial records are treatment-side and keyed by span id, occurrence id and docid -- all
+    identifiers the agent itself handled. The benchmark's evidence and hard-negative sets are
+    joined here, on the evaluator side of the leakage firewall. That seam is what makes it
+    legitimate to *choose* a selector on these numbers: no arm could have seen them.
+
+    Retention denominators are per batch, never per benchmark. The retriever's own evidence
+    recall was 0.1488 against a 0.40 floor, so scoring against everything the benchmark holds
+    would measure the retriever and report it as the reducer's quality.
+    """
+    import json as _json
+    from collections import defaultdict
+
+    from .bench.bcplus.qrels import load_bcplus_evaluator_queries
+    from .bench.bcplus.selection_quality import score_arm, score_batch
+    from .campaign.bcplus import benchdata_root
+    from .campaign.settings import Settings
+
+    _require_role("evaluator")
+    settings = Settings.load(_REPO, data_root=data_root) if data_root else _settings()
+    root = Path(settings.data_root)
+    # Enumerated root by root, not with one multi-level glob. The evaluator can read a lane's
+    # `runs` directory but not the lane root above it, so a glob spanning `runner*/runs/...`
+    # walks into a PermissionError -- and Python 3.12's Path.glob abandons the whole iteration
+    # when it does, returning zero matches for a tree holding thousands. Silently. Making the
+    # boundary explicit means an unreadable root is reported rather than being indistinguishable
+    # from an empty one.
+    trials: list[Path] = []
+    unreadable: list[str] = []
+    for lane in sorted(root.iterdir()) if root.is_dir() else []:
+        shard_root = lane / "runs" / "selector_trials"
+        try:
+            if not shard_root.is_dir():
+                continue
+            trials.extend(sorted(shard_root.glob("*/*.json")))
+        except PermissionError:
+            unreadable.append(str(shard_root))
+    if unreadable:
+        typer.echo(f"  {len(unreadable)} trial root(s) unreadable by this identity: "
+                   f"{', '.join(unreadable)}", err=True)
+    if not trials:
+        _fail(f"no selector trials under {root}/*/runs/selector_trials")
+    trials.sort()
+
+    queries = load_bcplus_evaluator_queries(
+        benchdata_root() / "browsecomp-plus" / "data")
+    typer.echo(f"{len(trials)} trials, {len(queries)} judged queries")
+
+    by_arm: dict[str, list] = defaultdict(list)
+    for path in trials:
+        trial = _json.loads(path.read_text(encoding="utf-8"))
+        by_arm[str(trial.get("variant_id", ""))].append(
+            score_batch(trial, queries=queries,
+                        published_text=trial.get("published_text")))
+
+    arms = {arm: score_arm(rows, variant_id=arm).content()
+            for arm, rows in sorted(by_arm.items())}
+    body = {
+        "gate": "FREEZE2_GQ1",
+        "decided_at_utc": _now(),
+        "trials": len(trials),
+        "queries_judged": len(queries),
+        "queries_sha256": queries.source_sha256,
+        "arms": arms,
+    }
+    destination = Path(out) if out else (settings.path("judgments") / "FREEZE2_GQ1.json")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(_json.dumps(body, indent=2, sort_keys=True) + "\n",
+                           encoding="utf-8")
+    typer.echo(f"wrote {destination}\n")
+    for arm, row in arms.items():
+        typer.echo(
+            f"  {arm:22s} n={row['batches']:5d} scored={row['scored']:5d}  "
+            f"coverage={row['source_coverage_mean']}  "
+            f"retention={row['evidence_retention_mean']}  "
+            f"interference={row['interference_mean']}  "
+            f"displacement={row['negative_displacement_rate']}")
+
+
 @app.command("serve-provider")
 def serve_provider(config: Path = _CFG) -> None:  # pragma: no cover - process entry point
     """Run the provider. The only process that reads a credential, and never as root."""

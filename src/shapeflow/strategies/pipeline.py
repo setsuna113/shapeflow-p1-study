@@ -22,14 +22,20 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from ..evidence.chunkers import Tokenizer, fixed_token_v1, markdown_structure_v1, paragraph_sentence_v1
 from ..evidence.model_tokenizer import tokenizer_sha256
 from ..evidence.identity import build_evidence_span, build_visible_message_span
-from ..p1.aggregators import coverage_budget_v1, global_rerank_v1, stable_union_v1
+from ..p1.aggregators import (
+    budget_pack_v1,
+    coverage_budget_v1,
+    global_rerank_v1,
+    stable_union_v1,
+)
 from ..p1.contracts import SelectionContractError, parse_selection
 from ..p1.preflight import PreflightConfig, preflight
+from ..p1.prompt_pack import PromptPackUnsatisfiable, prompt_pack_v1
 from ..p1.view import CandidateViewRecord, ViewConstructionError
 
 __all__ = [
@@ -51,7 +57,7 @@ CHUNKERS: dict[str, Callable] = {
 #: stable_union_v1 with no MMR anywhere, and `token_matched` was in this set with no branch
 #: in _aggregate, so it would have raised had anything reached it. A registry that lists a
 #: variant it cannot run reports a null result for a thing it never tried.
-AGGREGATORS = {"stable_union_v1", "coverage_budget_v1", "global_rerank_v1"}
+AGGREGATORS = {"stable_union_v1", "coverage_budget_v1", "budget_pack_v1", "global_rerank_v1"}
 
 
 @dataclass
@@ -147,6 +153,16 @@ class SelectionOutcome:
     tokenizer_sha256: str = ""
     stage: str = "single"       # single | local | global
     checkpoint_hash: str = ""
+    #: The source occurrences actually published, as distinct from those offered. Source
+    #: coverage, evidence retention and hard-negative interference are all ratios over these two
+    #: sets, and a span id cannot be decoded back to its source -- it is a digest. Without this
+    #: the whole judge-free endpoint family is uncomputable from a trial record.
+    published_source_occurrence_ids: tuple[str, ...] = ()
+    #: What the prompt-admission stage dropped to fit the window, or None when no admission ran.
+    #: Carried because CPU-FULL minus CPU-PROMPTVIEW is the price of that pruning, and pricing it
+    #: needs the identities of the removed spans rather than a count.
+    prompt_admission: Optional[dict] = None
+    prompt_admission_dropped_span_ids: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -159,6 +175,18 @@ def _aggregate(name: str, selection, registry, *, token_budget: int, coster):
     if name == "coverage_budget_v1":
         return coverage_budget_v1(selection, registry, token_budget=token_budget,
                                   coster=coster, min_sources=1)
+    if name == "budget_pack_v1":
+        # The selector's emitted order is its ranking, exactly as `global_rerank_v1` reads it.
+        # Passing it here is what makes a ranking-only selector meaningful: without it every
+        # candidate selector would be packed in document order and the shootout would compare
+        # nothing but the packer.
+        return budget_pack_v1(
+            selection, registry, token_budget=token_budget, coster=coster, min_sources=1,
+            _selection_rank={
+                span_id: index
+                for index, span_id in enumerate(dict.fromkeys(selection.selected_span_ids))
+            },
+        )
     if name == "global_rerank_v1":
         return global_rerank_v1(selection, registry, token_budget=token_budget, coster=coster)
     raise ValueError(f"unknown aggregator {name!r}")
@@ -188,6 +216,9 @@ async def run_selection(
     stage: str = "single",
     publication_scope: tuple[int, ...] | None = None,
     publication_ordinals: dict[str, int] | None = None,
+    prompt_admission: str = "none",
+    prompt_budget: int = 0,
+    prompt_window_ceiling: int = 0,
 ) -> SelectionOutcome:
     """Offer, select, publish -- or fail with everything it cost recorded."""
     work = WorkRecord()
@@ -205,24 +236,109 @@ async def run_selection(
             offered_source_occurrence_ids=offered_source_occurrence_ids,
         )
 
-    try:
-        view = CandidateViewRecord.build(
-            spans=list(spans), tokenizer=tokenizer, namespace=namespace, topic=topic,
+    # Prompt admission, before the view exists. Two budgets bind at this boundary and they are
+    # enforced by two different objects: this one decides what the selector may *see* (the
+    # engine's context window), `budget_pack_v1` decides what survives *rendering* (512 tokens).
+    # Fusing them would put the model's ranking inside the decision about what to show the model.
+    prompt_pack: Optional[object] = None
+
+    def _build(kept: Sequence[dict]):
+        return CandidateViewRecord.build(
+            spans=list(kept), tokenizer=tokenizer, namespace=namespace, topic=topic,
             contract=contract, token_budget=token_budget, query_attempts=list(query_attempts),
             snapshot_texts=snapshot_texts, visible_views=visible_views,
             source_meta=source_meta, query_status=query_status,
             publication_scope=publication_scope,
             publication_ordinals=publication_ordinals,
         )
-    except ViewConstructionError as e:
+
+    def _refuse(reason: str, detail: str) -> SelectionOutcome:
         return SelectionOutcome(
-            work=work, failure=SelectionFailure("VIEW_CONSTRUCTION", str(e)),
+            work=work, failure=SelectionFailure(reason, detail),
             contract=contract, aggregation=aggregation, chunker=chunker, stage=stage,
-            tokenizer_sha256=tokenizer_digest,
-            checkpoint_hash=checkpoint_hash,
+            tokenizer_sha256=tokenizer_digest, checkpoint_hash=checkpoint_hash,
             offered_query_attempt_ids=offered_query_attempt_ids,
             offered_source_occurrence_ids=offered_source_occurrence_ids,
         )
+
+    try:
+        if prompt_admission and prompt_admission != "none":
+            if prompt_admission != "prompt_pack_v1":
+                raise ValueError(f"unknown prompt admission {prompt_admission!r}")
+            texts = [
+                snapshot_texts.get(str(s.get("content_hash", "")), "")[
+                    int(s.get("char_start", 0)):int(s.get("char_end", 0))]
+                for s in spans
+            ]
+            counts = [tokenizer.count(t) for t in texts]
+            offered = list(spans)
+            budget_now = prompt_budget
+            # Admit, then check the *rendered prompt*, then shrink and re-admit if it does not
+            # fit. Counting span text alone understates the prompt badly: every candidate is
+            # rendered with a label, an origin tag, a heading breadcrumb and its context lines,
+            # and at ~900 candidates that framing is worth more than the text. Trusting the
+            # proxy produced a 30,720-token budget whose real prompt overran the window and was
+            # refused by the engine on 63% of batches -- the same mistake `budget_pack_v1`
+            # exists to avoid, one layer up. So the loop verifies against what is actually sent.
+            for _attempt in range(6):
+                prompt_pack = prompt_pack_v1(
+                    spans=offered, texts=texts, token_counts=counts,
+                    budget=budget_now, topic=topic,
+                )
+                admitted = set(prompt_pack.span_ids)
+                spans = [s for s in offered if str(s.get("span_id", "")) in admitted]
+                view = _build(spans)
+                if not prompt_window_ceiling:
+                    break
+                rendered = tokenizer.count(view.prompt_bytes.decode("utf-8"))
+                if rendered <= prompt_window_ceiling:
+                    break
+                # Scale by the observed overshoot rather than stepping blindly, so this
+                # converges in two or three passes instead of creeping down.
+                budget_now = int(budget_now * prompt_window_ceiling / rendered) - 256
+                if budget_now <= 0:
+                    raise PromptPackUnsatisfiable(
+                        f"the rendered prompt is {rendered} tokens against a "
+                        f"{prompt_window_ceiling}-token ceiling and no admission budget "
+                        "remains; no prompt covering this batch fits the window")
+            else:
+                raise PromptPackUnsatisfiable(
+                    "prompt admission did not converge to a prompt inside the window")
+        else:
+            view = _build(spans)
+    except PromptPackUnsatisfiable as e:
+        # A real outcome for a batch of very long pages, not an error: no prompt covering this
+        # batch fits the window. Recorded so it lands in the all-offered denominator.
+        return _refuse("PROMPT_INFEASIBLE", str(e))
+    except ViewConstructionError as e:
+        return _refuse("VIEW_CONSTRUCTION", str(e))
+
+    # The diagnostic arm: no admission stage, so the prompt may simply not fit. Refusing here
+    # rather than dispatching keeps the failure attributable -- the engine would reject the
+    # request anyway, but as a provider error indistinguishable from an outage.
+    if prompt_window_ceiling and prompt_admission in ("", "none"):
+        prompt_tokens = tokenizer.count(view.prompt_bytes.decode("utf-8"))
+        if prompt_tokens > prompt_window_ceiling:
+            return SelectionOutcome(
+                work=work, view_sha256=view.view_sha256,
+                failure=SelectionFailure(
+                    "PROMPT_INFEASIBLE",
+                    f"whole-batch prompt is {prompt_tokens} tokens against a "
+                    f"{prompt_window_ceiling}-token ceiling"),
+                contract=contract, aggregation=aggregation, chunker=chunker, stage=stage,
+                tokenizer_sha256=tokenizer_digest, checkpoint_hash=checkpoint_hash,
+                offered=len(view.candidates),
+                offered_span_ids=tuple(c.span_id for c in view.candidates),
+                offered_query_attempt_ids=offered_query_attempt_ids,
+                offered_source_occurrence_ids=offered_source_occurrence_ids,
+            )
+
+    # span id -> the source occurrence it came from. Built from the offered spans, because a
+    # span id is a digest over content hash, offsets and text and cannot be decoded back.
+    source_of_span = {
+        str(s.get("span_id", "")): str((s.get("source_occurrence_ids") or [""])[0])
+        for s in spans
+    }
 
     offered_span_ids = tuple(c.span_id for c in view.candidates)
     publication_handle_map = view.publication_handle_map
@@ -413,6 +529,12 @@ async def run_selection(
     return SelectionOutcome(
         text=result.rendered.text, work=work, view_sha256=view.view_sha256,
         selector_attempted=True,
+        published_source_occurrence_ids=tuple(dict.fromkeys(
+            source_of_span[span_id] for span_id in staged_span_ids
+            if source_of_span.get(span_id))),
+        prompt_admission=(prompt_pack.accounting() if prompt_pack is not None else None),
+        prompt_admission_dropped_span_ids=(
+            prompt_pack.dropped_span_ids if prompt_pack is not None else ()),
         selected=len(aggregated.items), offered=len(view.candidates),
         dropped_for_budget=len(aggregated.dropped_for_budget),
         normalization=selection.normalization.__dict__,

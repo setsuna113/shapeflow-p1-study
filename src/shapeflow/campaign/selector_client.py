@@ -47,6 +47,7 @@ __all__ = [
 ALIAS_BY_OP = {
     OpClass.PAGE_P1_SELECTOR_LOCAL.value: "qwen-selector-page",
     OpClass.PAGE_P1_SELECTOR_GLOBAL.value: "qwen-selector-page-global",
+    OpClass.PAGE_P1_SELECTOR_BATCH.value: "qwen-selector-batch",
     OpClass.COMPRESSOR_P1_SELECTOR.value: "qwen-selector-close",
     OpClass.PAGE_P1_SHORT_PROSE.value: "qwen-prose-page",
     OpClass.COMPRESSOR_SHORT_PROSE.value: "qwen-prose-close",
@@ -55,6 +56,7 @@ ALIAS_BY_OP = {
 STRUCTURED_SELECTOR_OPS = frozenset({
     OpClass.PAGE_P1_SELECTOR_LOCAL.value,
     OpClass.PAGE_P1_SELECTOR_GLOBAL.value,
+    OpClass.PAGE_P1_SELECTOR_BATCH.value,
     OpClass.COMPRESSOR_P1_SELECTOR.value,
 })
 SHORT_PROSE_OPS = frozenset({

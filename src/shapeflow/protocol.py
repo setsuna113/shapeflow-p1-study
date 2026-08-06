@@ -38,7 +38,12 @@ __all__ = [
     "write_approval_file",
 ]
 
-PROTOCOL_DOCUMENT = "protocol/SHAPEFLOW_FREEZE_1.md"
+#: The protocol of record. Freeze-1 is not deleted and not superseded -- it is a completed study
+#: whose artifacts remain verifiable under the bindings they were produced with, reachable via
+#: `--ran-under-binding`. Freeze-2 is what is currently being executed, so it is what the live
+#: binding must hash: an approval naming the finished study would verify while describing a
+#: different experiment.
+PROTOCOL_DOCUMENT = "protocol/SHAPEFLOW_FREEZE_2.md"
 
 
 class ApprovalError(RuntimeError):

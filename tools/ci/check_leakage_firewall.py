@@ -107,6 +107,10 @@ FREEZE_1 = FirewallSpec(
         # and not the name rule, which is exactly the asymmetry the comment above warns about.
         # ``test_every_marked_module_is_also_named`` now makes the omission impossible to repeat.
         "shapeflow.bench.bcplus.grader",
+        # Freeze-2's judge-free quality family. It joins treatment-side trial records to the
+        # benchmark's evidence and hard-negative sets, so it holds the answer key exactly as
+        # much as recall does.
+        "shapeflow.bench.bcplus.selection_quality",
         "shapeflow.bench.grading",
     ),
     forbidden_names=(

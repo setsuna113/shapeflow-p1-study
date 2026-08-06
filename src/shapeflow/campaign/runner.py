@@ -394,16 +394,9 @@ class CampaignRunner:
         window or the completion cap moves. A separately-chosen number is how a legal character
         count became an illegal token count and vLLM refused the request outright.
         """
-        from ..evidence.shared_view import SharedContentBudget
+        from ..evidence.shared_view import budget_from_settings
 
-        return SharedContentBudget.derive(
-            max_chars=int(self.settings.get("week1", "odr", "max_content_length")),
-            max_model_len=int(self.settings.get("stack", "engine", "max_model_len")),
-            completion_cap=int(
-                self.settings.get("week1", "odr", "summarization_model_max_tokens")),
-            prompt_overhead_tokens=int(
-                self.settings.get("week1", "odr", "summarization_prompt_overhead_tokens")),
-        )
+        return budget_from_settings(self.settings)
 
     def _page_bytes(self, pool, snapshots) -> tuple[dict, dict]:
         """Resolve the exact bytes vendor would have summarised, keyed as the checkpoint keys them.

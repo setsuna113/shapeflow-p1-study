@@ -30,24 +30,56 @@ from ..odr.checkpoints import HCheckpoint
 from ..odr.hooks import ToolObservation
 from .pipeline import SelectionFailure, SelectionOutcome, WorkRecord, run_selection, spans_from_page
 
-__all__ = ["PageSelectionStrategy", "PageStrategyConfig"]
+__all__ = ["PAGE_SCOPES", "PageSelectionStrategy", "PageStrategyConfig"]
+
+#: How candidates are partitioned across selector calls.
+#:
+#: ``whole_batch`` is the one the H/C mechanism contract actually specifies: *"One whole-batch
+#: selector request covering every page in the batch"* (HC_MECHANISM_v1 §H). The three that
+#: preceded it all fan out below the gather batch, because the sibling loop in
+#: :meth:`PageSelectionStrategy.transform_tool_batch` sits *above* this switch -- so before
+#: ``whole_batch`` existed the contract's shape was unrepresentable, and every H arm ran N
+#: selector requests per batch, each with its own ``selected_token_budget``.
+#:
+#: ``per_tool_call`` is deliberately kept rather than renamed. It means "one call per search
+#: result set" and stays correct when a batch has several siblings; ``whole_batch`` means "one
+#: call per gather batch". They coincide only at one sibling per batch, which is what the
+#: recorded checkpoints happen to show. Renaming would mean a two-sibling batch silently issued
+#: two requests under two budgets while claiming to be whole-batch -- the defect, restored under
+#: the fixed name.
+PAGE_SCOPES = frozenset({"per_page", "per_tool_call", "whole_batch", "hierarchical"})
 
 
 @dataclass(frozen=True)
 class PageStrategyConfig:
     variant_id: str
     chunker: str
-    scope: str                  # per_page | per_tool_call | hierarchical
+    scope: str                  # per_page | per_tool_call | whole_batch | hierarchical
     contract: str               # P1_ID | P1_TYPED | P1_BRIDGE
     aggregation: str
     token_budget: int
     chunk_max_tokens: int = 320
     bridge_token_cap_each: int | None = None
     bridge_token_cap_total: int | None = None
+    #: "none" | "prompt_pack_v1". The input-side budget, distinct from token_budget, which is the
+    #: output-side one. See Amendment 1: they bind at opposite ends of the same request.
+    prompt_admission: str = "none"
+    #: Room for candidate material after instructions, schema, completion and margin.
+    prompt_budget: int = 0
+    #: Non-zero only on the diagnostic arm that runs *without* admission, so an over-window
+    #: prompt is refused as PROMPT_INFEASIBLE instead of being dispatched and rejected by the
+    #: engine as something indistinguishable from an outage.
+    prompt_window_ceiling: int = 0
 
     def __post_init__(self) -> None:
-        if self.scope not in {"per_page", "per_tool_call", "hierarchical"}:
+        if self.scope not in PAGE_SCOPES:
             raise ValueError(f"unknown page scope {self.scope!r}")
+        if self.prompt_admission not in {"none", "prompt_pack_v1"}:
+            raise ValueError(f"unknown prompt admission {self.prompt_admission!r}")
+        if self.prompt_admission != "none" and self.prompt_budget <= 0:
+            raise ValueError(
+                f"{self.variant_id}: prompt admission needs a positive prompt_budget; a zero "
+                "budget would refuse every batch as infeasible")
         if self.contract == "P1_BRIDGE":
             if self.bridge_token_cap_each is None or self.bridge_token_cap_total is None:
                 raise ValueError("P1_BRIDGE page variant requires per-bridge and total token caps")
@@ -84,6 +116,26 @@ class PageSelectionStrategy:
         batch_work = WorkRecord()
         observations: list[ToolObservation] = []
         self.last_outcomes = []
+
+        if self.config.scope == "whole_batch" and len(checkpoint.search_result_sets) != 1:
+            # One selector request per gather batch is the treatment; the loop below is per
+            # sibling, so with two siblings this arm would issue two requests under two separate
+            # 512-token budgets while still calling itself whole-batch. Refusing sends the batch
+            # down the ordinary P1-failure path -- component trials record it, end-to-end falls
+            # the whole batch back to P0 -- so the cell stays comparable and the exclusion is
+            # counted rather than silently absorbed.
+            #
+            # Every H checkpoint recorded so far carries exactly one sibling, so this is a
+            # checked precondition rather than a code path anyone has seen taken. That is the
+            # reason to check it: an assumption that holds by observation and not by
+            # construction is one a future vendor bump can retire without telling anyone.
+            self._record(batch_work)
+            raise PageSelectionError(SelectionFailure(
+                "WHOLE_BATCH_MULTI_SIBLING",
+                f"gather batch has {len(checkpoint.search_result_sets)} sibling tool calls; "
+                "a whole_batch arm publishes one selector request per batch and cannot span "
+                "siblings without splitting the rendered-token budget",
+            ))
 
         # Vendor executes sibling tool calls in one outer gather.  Running each sibling's P1
         # reducer sequentially would create a scheduling treatment unrelated to ID selection
@@ -331,7 +383,10 @@ class PageSelectionStrategy:
                 "passthrough_occurrence_ids": (),
             })
 
-        if self.config.scope == "per_tool_call":
+        # ``whole_batch`` merges by the same rule. It differs from ``per_tool_call`` only in
+        # what it refuses, and that refusal lives in ``transform_tool_batch`` where the sibling
+        # count is visible; here there is one sibling's results either way.
+        if self.config.scope in {"per_tool_call", "whole_batch"}:
             merged_spans = [s for g in per_source for s in g["spans"]]
             merged_texts: dict[str, str] = {}
             merged_meta: dict = {}
@@ -457,6 +512,9 @@ class PageSelectionStrategy:
             stage=stage,
             publication_scope=group.get("publication_scope"),
             publication_ordinals=group.get("publication_ordinals"),
+            prompt_admission=self.config.prompt_admission,
+            prompt_budget=self.config.prompt_budget,
+            prompt_window_ceiling=self.config.prompt_window_ceiling,
         )
         if outcome.ok and group.get("passthrough"):
             outcome.text = "\n\n".join((outcome.text, *group["passthrough"]))
