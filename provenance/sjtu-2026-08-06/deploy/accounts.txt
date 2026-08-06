@@ -1,0 +1,5 @@
+sfinfer:x:997:997::/home/sfinfer:/usr/sbin/nologin
+sfprovider:x:999:999::/home/sfprovider:/usr/sbin/nologin
+sfrunner:x:998:998::/home/sfrunner:/usr/sbin/nologin
+sfsteward:x:996:996::/home/sfsteward:/usr/sbin/nologin
+sfevaluator:x:995:995::/home/sfevaluator:/usr/sbin/nologin

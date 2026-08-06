@@ -1,0 +1,7 @@
+# Data never enters this repo — only scripts, manifests and split files.
+# (splits/*.txt and *.json are tracked; they are neither .jsonl nor .parquet)
+*.parquet
+*.jsonl
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

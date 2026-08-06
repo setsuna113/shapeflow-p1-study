@@ -1,0 +1,141 @@
+diff --git a/src/shapeflow_p1/odr/adapter.py b/src/shapeflow_p1/odr/adapter.py
+index f23e038..dcf197d 100644
+--- a/src/shapeflow_p1/odr/adapter.py
++++ b/src/shapeflow_p1/odr/adapter.py
+@@ -240,6 +240,9 @@ def build_h_checkpoint(
+     for observation, tool_call in zip(observations, tool_calls):
+         call_id = tool_call.get("id") or ""
+         if is_deferred(observation):
++            # The tool call's id is assigned HERE, not inside tavily_search: a tool cannot see
++            # its own call id, and the zip order is where the mapping actually exists.
++            observation.tool_call_id = call_id
+             search_sets.append((call_id, observation.visible_results()))
+         else:
+             non_search.append((call_id, sha256_hex(str(observation).encode("utf-8"))))
+diff --git a/src/shapeflow_p1/odr/vendor_hooks.py b/src/shapeflow_p1/odr/vendor_hooks.py
+index 8810562..8c9c0db 100644
+--- a/src/shapeflow_p1/odr/vendor_hooks.py
++++ b/src/shapeflow_p1/odr/vendor_hooks.py
+@@ -23,6 +23,10 @@ from .adapter import DeferredPageBatch, build_h_checkpoint, is_deferred, reduce_
+ from .checkpoints import SamplingEnvelope
+ from .hooks import current_strategies
+ 
++
++class _UseVendorCompression(Exception):
++    """A close strategy declining, so vendor's own compression runs."""
++
+ __all__ = [
+     "RunBinding",
+     "bind_run",
+@@ -140,8 +144,18 @@ async def reduce_published_batch(
+         sampling=run.sampling or SamplingEnvelope(model="", temperature=0.0, top_p=1.0,
+                                                  max_tokens=0),
+     )
++    # The P0 strategy replays vendor's own closures, so it needs the deferred objects rather
++    # than only the checkpoint's hashes. Handing them over here keeps the strategy protocol
++    # free of a vendor-specific parameter.
++    page = bundle.page
++    if hasattr(page, "_deferred"):
++        page._deferred = {
++            tool_calls[i]["id"]: observations[i]
++            for i in range(len(observations)) if is_deferred(observations[i])
++        }
++
+     outcome = await reduce_tool_batch(
+-        strategy=bundle.page,
++        strategy=page,
+         task_ctx=run.task_ctx,
+         checkpoint=checkpoint,
+         observations=observations,
+@@ -217,6 +231,13 @@ async def run_close_strategy(*, researcher_messages: Sequence[Any], close_reason
+         _emit("CLOSE_CANCELLED", {"checkpoint": checkpoint.digest,
+                                   "close_reason": close_reason})
+         raise
++    except _UseVendorCompression:
++        # The explicit-P0 close strategy declines rather than re-implementing
++        # compress_research: that function has retry-on-token-limit, an in-place append and a
++        # specific raw_notes construction, and a second implementation would drift into
++        # looking like a P1 effect.
++        _emit("CLOSE_DEFERRED_TO_VENDOR", {"checkpoint": checkpoint.digest})
++        return None
+     except Exception as e:  # noqa: BLE001
+         _emit("CLOSE_FAILED", {"checkpoint": checkpoint.digest,
+                                "close_reason": close_reason,
+diff --git a/tests/integration/parity_probe.py b/tests/integration/parity_probe.py
+index dcc2f0f..dae9cd0 100644
+--- a/tests/integration/parity_probe.py
++++ b/tests/integration/parity_probe.py
+@@ -247,6 +247,23 @@ async def run(scenario_name: str, strategy: str | None) -> dict:
+ 
+     from langchain_core.messages import HumanMessage
+ 
++    # Gate B binds an explicit P0 strategy so the deferred/checkpoint/reduce/refill path
++    # actually executes. Hooks-off never runs that code, so only this can show a bug inside it.
++    binding_cm = None
++    strategy_cm = None
++    if strategy == "p0":
++        from shapeflow_p1.odr.hooks import StrategyBundle, strategies_bound
++        from shapeflow_p1.odr.vendor_hooks import RunBinding, bind_run
++        from shapeflow_p1.p1.selectors import Candidate  # noqa: F401  (import sanity)
++        from shapeflow_p1.strategies.p0 import VendorCloseStrategy, VendorPageStrategy
++
++        page = VendorPageStrategy({})
++        strategy_cm = strategies_bound(
++            StrategyBundle(variant_id="P0", page=page, close=VendorCloseStrategy()))
++        binding_cm = bind_run(RunBinding(
++            task_id="parity", researcher_id="r0", attempt_id="a0",
++            task_ctx=None, component_trial=False))
++
+     config = {"configurable": {
+         "search_api": "tavily",
+         "max_react_tool_calls": 1 if scenario_name == "max_react" else 5,
+@@ -259,7 +276,13 @@ async def run(scenario_name: str, strategy: str | None) -> dict:
+     }}
+     exceptions: list[str] = []
+     result: dict = {}
++    import contextlib
++    stack = contextlib.ExitStack()
++    if strategy_cm is not None:
++        stack.enter_context(strategy_cm)
++        stack.enter_context(binding_cm)
+     try:
++      with stack:
+         result = await graph.ainvoke(
+             {"researcher_messages": [HumanMessage(content="research cats")],
+              "research_topic": "cats", "tool_call_iterations": 0},
+diff --git a/tests/integration/test_p0_parity.py b/tests/integration/test_p0_parity.py
+index 65650ee..92f768a 100644
+--- a/tests/integration/test_p0_parity.py
++++ b/tests/integration/test_p0_parity.py
+@@ -97,6 +97,31 @@ def test_pristine_vendor_matches_patched_hooks_off(scenario):
+     assert v == p, f"{scenario}: traces differ"
+ 
+ 
++@pytest.mark.parametrize("scenario", SCENARIOS)
++def test_patched_hooks_off_matches_explicit_p0_strategy(scenario):
++    """The deferred/checkpoint/reduce/refill path must introduce no difference of its own.
++
++    Gate A cannot see this: with hooks off, that code never executes. Here it does -- the tool
++    defers, the batch is checkpointed and reduced, and vendor's own closures are replayed --
++    and the result still has to be vendor's, down to the batch boundary.
++    """
++    hooks_off = _trace(PATCHED, scenario)
++    explicit_p0 = _trace(PATCHED, scenario, strategy="p0")
++    a, b = _comparable(hooks_off), _comparable(explicit_p0)
++    assert a["publish_batches"] == b["publish_batches"], (
++        f"{scenario}: the P1 code path changed what or how the batch was published"
++    )
++    assert a["exceptions"] == b["exceptions"], f"{scenario}: exception behaviour differs"
++    assert a["final_report_sha256"] == b["final_report_sha256"], f"{scenario}: output differs"
++    assert a["raw_notes_sha256"] == b["raw_notes_sha256"], f"{scenario}: raw_notes differ"
++    # Model requests are compared as a multiset: the P0 strategy issues vendor's summarization
++    # calls from its own gather, so the interleaving with the researcher's calls can differ
++    # while every request itself is identical. What must not differ is which calls were made.
++    assert sorted(map(str, a["model_requests"])) == sorted(map(str, b["model_requests"])), (
++        f"{scenario}: model requests differ"
++    )
++
++
+ def test_the_two_trees_are_actually_different():
+     """Guard against the gate passing because the patch was never applied."""
+     from shapeflow_p1.treehash import tree_sha256

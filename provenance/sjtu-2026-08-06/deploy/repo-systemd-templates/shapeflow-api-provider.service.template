@@ -1,0 +1,56 @@
+# shapeflow-api-provider unit (plan §3.1, §17.2). The ONLY unit that holds API credentials.
+#
+# It exposes a loopback + Unix-socket provider with closed request schemas, per-role bearer
+# tokens, admission control and redacted logging, and it forwards no arbitrary URL, header or
+# body. Runner, infer and evaluator identities cannot read the credential path at all; that is
+# proved by scripts/install_host.sh rather than asserted here.
+#
+# Credentials arrive as a root-owned directory readable only by @API_USER@. systemd 245 predates
+# LoadCredential=, and this host has no setfacl, so plain Unix ownership is the mechanism -- the
+# boundary is the same and it is testable. Fill @PLACEHOLDERS@.
+[Unit]
+Description=ShapeFlow P1 API provider (sole credential holder)
+After=network.target
+# At most 3 restarts in 30 min, else give up (BLOCKED_REPEATED_CRASH). These belong in
+# [Unit]; systemd ignores them under [Service], silently removing the crash ceiling.
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=@API_USER@
+WorkingDirectory=@REPO@
+ExecStart=@REPO@/.venv/bin/shapeflow serve-provider --config @REPO@/configs/week1.yaml
+
+# The paths, never the values. The provider reads them once into memory and registers them with
+# the redactor; they never enter argv, the environment of any child, or a log line.
+#
+# Exa is the acquisition credential and is MANDATORY: runtime.provider_main.build_service calls
+# load_exa_key unconditionally, so a missing EXA_API_KEY_FILE stops the provider from starting
+# at all. Tavily is optional and retained only so the requests already recorded against it stay
+# on the books; nothing new is acquired through it.
+Environment=EXA_API_KEY_FILE=@CRED_DIR@/exa.key
+Environment=TAVILY_API_KEY_FILE=@CRED_DIR@/tavily.key
+Environment=DEEPSEEK_API_KEY_FILE=@CRED_DIR@/deepseek.key
+Environment=SHAPEFLOW_DATA_ROOT=@DATA_ROOT@
+Environment=SHAPEFLOW_REPO=@REPO@
+Environment=PYTHONHASHSEED=0 TZ=UTC PYTHONUNBUFFERED=1
+
+Restart=on-failure
+RestartSec=30
+
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@DATA_ROOT@/provider @REPO@/logs
+RuntimeDirectory=shapeflow
+RuntimeDirectoryMode=0750
+# The provider executes no web-page content and no model generation code.
+
+StandardOutput=append:@REPO@/logs/provider.log
+StandardError=append:@REPO@/logs/provider.err
+
+[Install]
+WantedBy=multi-user.target

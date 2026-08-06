@@ -1,0 +1,7 @@
+python: Python 3.11.15
+uv: uv 0.11.32 (x86_64-unknown-linux-gnu)
+java: openjdk version "21.0.7" 2025-04-15
+javac_home: /usr/lib/jvm/java-21-openjdk-amd64
+os: Ubuntu 20.04.6 LTS
+pyserini: 1.6.0
+hf_endpoint: https://hf-mirror.com

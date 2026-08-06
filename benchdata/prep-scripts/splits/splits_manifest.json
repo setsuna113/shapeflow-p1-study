@@ -1,0 +1,27 @@
+{
+  "seed": 20260727,
+  "method": "pure random (no topic/answer-type field exists to stratify on)",
+  "source": "/storage/sata/shapeflow/benchdata/browsecomp-plus/data/browsecomp_plus_decrypted.jsonl",
+  "total_queries": 830,
+  "dev": {
+    "path": "/storage/sata/shapeflow/benchdata/splits/bcplus_dev.txt",
+    "count": 530,
+    "sha256": "3ee68bef54a6bc02611d27dfe37fe715f7130d34d2c3b5d322d4e3431d930db5",
+    "n": 530,
+    "gold_docs_mean": 2.968,
+    "gold_docs_median": 2.0,
+    "evidence_docs_mean": 6.162,
+    "evidence_docs_median": 6.0
+  },
+  "test": {
+    "path": "/storage/sata/shapeflow/benchdata/splits/bcplus_test.txt",
+    "count": 300,
+    "sha256": "918890f6f4da1b5996875d31f6f2e2bcb95ef4ba795dedc12c718d0501636bd7",
+    "n": 300,
+    "gold_docs_mean": 2.78,
+    "gold_docs_median": 2.0,
+    "evidence_docs_mean": 5.993,
+    "evidence_docs_median": 6.0
+  },
+  "balance_note": "gold/evidence doc counts are reported only as a sanity check that the random split did not skew difficulty; they did not drive the split."
+}

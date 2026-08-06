@@ -1,0 +1,47 @@
+# shapeflow-vllm-operational unit (plan sections 5.4, 5.5, 17.2). The SECONDARY deployment layer.
+#
+# Native APC on, continuous batching and chunked prefill per the frozen deployment config. This
+# is the only layer whose numbers may support a deployment claim: an effect that exists solely
+# under the causal engine is MECHANISM_ONLY and is a proposal NO-GO.
+#
+# Mutually exclusive with shapeflow-vllm-causal.service (Conflicts=): same port, same GPU,
+# deliberately different engine semantics. Running both would mix measurement layers.
+#
+# Cross-arm cache carry-over must be PROVED absent before this layer's numbers count -- via
+# per-(protocol, block, arm) cache_salt, or a fresh process per arm/block with identical warmup.
+# If neither can be demonstrated, operational blocks hard-stop as BLOCKED_APC_ISOLATION and the
+# isolated causal study continues without a deployment KEEP. Fill @PLACEHOLDERS@.
+[Unit]
+Description=ShapeFlow P1 vLLM engine (operational layer: real batching, APC on)
+After=network.target
+Conflicts=shapeflow-vllm-causal.service
+# At most 3 restarts in 30 min. Must live in [Unit]; systemd ignores it under [Service].
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=@INFER_USER@
+WorkingDirectory=@REPO@
+ExecStart=@VLLM_VENV@/bin/python -m vllm.entrypoints.openai.api_server \
+  --model @MODEL_PATH@ --revision @MODEL_REVISION@ \
+  --host 127.0.0.1 --port @VLLM_PORT@ \
+  --max-model-len 16384 --gpu-memory-utilization 0.90 \
+  --max-num-seqs 256 \
+  --enable-prefix-caching \
+  --enable-chunked-prefill
+
+Restart=on-failure
+RestartSec=30
+
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+# Frozen by GPU UUID, never index.
+Environment=PYTHONHASHSEED=0 TZ=UTC CUDA_VISIBLE_DEVICES=@GPU_UUID@
+
+StandardOutput=append:@REPO@/logs/vllm-operational.log
+StandardError=append:@REPO@/logs/vllm-operational.err
+
+[Install]
+WantedBy=multi-user.target

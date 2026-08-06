@@ -1,0 +1,49 @@
+# shapeflow-p1-week1 coordinator unit (plan §17.2). Fill @PLACEHOLDERS@ and install as
+# /etc/systemd/system/shapeflow-p1-week1.service. Runs as the downgraded runner identity: it never
+# holds a credential path (the provider does), only reads the frozen corpus and writes run state.
+[Unit]
+Description=ShapeFlow P1 Week-1 coordinator
+After=network.target shapeflow-api-provider.service shapeflow-vllm-causal.service
+Requires=shapeflow-api-provider.service shapeflow-vllm-causal.service
+# At most 3 restarts in 30 min, else give up (BLOCKED_REPEATED_CRASH). These belong in
+# [Unit]; systemd ignores them under [Service], silently removing the crash ceiling.
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=sfrunner
+WorkingDirectory=/storage/nvme/shapeflow-p1-study
+# Resume-only once launched; the exact execution-binding digest is pinned so drift cannot run.
+ExecStart=/storage/nvme/shapeflow-p1-study/.venv/bin/shapeflow-p1 run-week1 --config configs/week1.yaml --resume --protocol-sha UNSET
+ExecStop=/storage/nvme/shapeflow-p1-study/scripts/stop_safely.sh
+
+# Restart policy: give up after 3 restarts in 30 min (BLOCKED_REPEATED_CRASH). The
+# StartLimit* half lives in [Unit] -- systemd ignores it here.
+Restart=on-failure
+RestartSec=30
+
+# Hardening.
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Only these paths are writable; everything else is read-only to this unit.
+ReadWritePaths=/storage/nvme/shapeflow-data/runner /storage/nvme/shapeflow-p1-study/reports /storage/nvme/shapeflow-p1-study/logs
+# The runner gets an explicit environment allowlist; no credential variables are present.
+Environment=PYTHONHASHSEED=0 TZ=UTC PYTHONUNBUFFERED=1
+Environment=SHAPEFLOW_DATA_ROOT=/storage/nvme/shapeflow-data
+Environment=SHAPEFLOW_APPROVAL_FILE=/storage/nvme/shapeflow-data/approvals/launch_approval.json
+Environment=SHAPEFLOW_REPO=/storage/nvme/shapeflow-p1-study
+Environment=SHAPEFLOW_ENGINE_EPOCH_FILE=/run/shapeflow-vllm-causal/engine_epoch
+# The leased device. The coordinator takes an flock on it, which is what stops a second worker
+# from using the same card; without this variable the lease was silently skipped entirely.
+Environment=SHAPEFLOW_GPU_UUID=GPU-ef013951-e496-78da-da70-a5a289dcc634
+
+# Redacted logs (the app's SecretRedactor runs before every handler; journald captures stdio).
+StandardOutput=append:/storage/nvme/shapeflow-p1-study/logs/coordinator.log
+StandardError=append:/storage/nvme/shapeflow-p1-study/logs/coordinator.err
+
+[Install]
+WantedBy=multi-user.target
