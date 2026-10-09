@@ -172,6 +172,34 @@ def _write_once_content_addressed_json(
         raise RuntimeError(f"{path} already contains a different {label}; it is write-once")
 
 
+def strategy_factory_for(settings: Settings, registry, *, model_call, tokenizer, pages,
+                         prompt_budget=None) -> StrategyFactory:
+    """The factory every cell's strategies come from, bound to one cell's selector and pages.
+
+    ``prompt_budget`` (a :class:`~shapeflow.p1.prompt_pack.PromptBudget`) is needed only by
+    arms with prompt admission. The campaign passes None, which is what it has always built;
+    an arm that needs one refuses to construct without it.
+    """
+    extra = {}
+    if prompt_budget is not None:
+        extra = {
+            "prompt_budget": prompt_budget.candidates,
+            "prompt_window_ceiling": prompt_budget.max_model_len - prompt_budget.completion_cap,
+        }
+    return StrategyFactory(
+        registry=registry,
+        model_call=model_call,
+        tokenizer=tokenizer,
+        token_budget=int(settings.get("week1", "measurement", "selected_token_budget")),
+        # Without these the page selector is offered no candidates at all: it would publish
+        # empty content, spend nothing, and look like a working P1 arm that happens to save
+        # everything. That is exactly the inert-P1 failure the canary exists to catch.
+        raw_text_for=pages.text_for,
+        occurrence_for=pages.occurrence_for,
+        **extra,
+    )
+
+
 class CampaignRunner:
     """Drives one phase's worth of cells to terminal states, resumably."""
 
@@ -467,17 +495,9 @@ class CampaignRunner:
             # arrive through the seam as they are served. Both land in the same registry, so the
             # selector's lookup does not know which world it is reading.
             pages.prefill(*self._page_bytes(pool, snapshots))
-        factory = StrategyFactory(
-            registry=self.registry,
-            model_call=self._model_call_for(cell_token, seed),
-            tokenizer=self.tokenizer,
-            token_budget=int(self.settings.get("week1", "measurement",
-                                               "selected_token_budget")),
-            # Without these the page selector is offered no candidates at all: it would publish
-            # empty content, spend nothing, and look like a working P1 arm that happens to save
-            # everything. That is exactly the inert-P1 failure the canary exists to catch.
-            raw_text_for=pages.text_for,
-            occurrence_for=pages.occurrence_for,
+        factory = strategy_factory_for(
+            self.settings, self.registry, model_call=self._model_call_for(cell_token, seed),
+            tokenizer=self.tokenizer, pages=pages,
         )
         page = factory.build(arm.page_variant).page if arm.page_variant != "P0" \
             else VendorPageStrategy({})

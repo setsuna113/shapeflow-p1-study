@@ -173,6 +173,41 @@ class SelectorModelCall:
         max_tokens: int,
         schema_name: Optional[str] = None,
     ) -> tuple[Any, dict]:
+        body = self.request_body(prompt=prompt, op_class=op_class, max_tokens=max_tokens,
+                                 schema_name=schema_name)
+        prose = op_class in SHORT_PROSE_OPS
+        payload = await self._client.chat_completions(body, cell_token=self._cell_token)
+        usage = dict(payload.get("usage") or {})
+        content = _content_of(payload)
+        if prose:
+            return content, usage
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as e:
+            # The tokens were spent. The caller records the failure with its cost attached.
+            raise SelectorResponseError(
+                f"selector returned invalid JSON: {e}", usage=usage
+            ) from e
+        if not isinstance(parsed, dict):
+            raise SelectorResponseError(
+                "selector output must be a JSON object", usage=usage
+            )
+        return parsed, usage
+
+    def request_body(
+        self,
+        *,
+        prompt: str,
+        op_class: str,
+        max_tokens: int,
+        schema_name: Optional[str] = None,
+    ) -> dict:
+        """The exact provider request ``__call__`` would send, built without sending it.
+
+        Separated so an offer can price a selector request -- its prompt hash, its decode cap
+        -- from the same code that will later send it, rather than from a second rendering of
+        the rules below that could drift from them.
+        """
         alias = ALIAS_BY_OP.get(op_class)
         if alias is None:
             raise ProviderCallError(
@@ -233,24 +268,7 @@ class SelectorModelCall:
                 "type": "json_schema",
                 "json_schema": {"name": schema_name, "schema": self._schemas[contract]},
             }
-
-        payload = await self._client.chat_completions(body, cell_token=self._cell_token)
-        usage = dict(payload.get("usage") or {})
-        content = _content_of(payload)
-        if prose:
-            return content, usage
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as e:
-            # The tokens were spent. The caller records the failure with its cost attached.
-            raise SelectorResponseError(
-                f"selector returned invalid JSON: {e}", usage=usage
-            ) from e
-        if not isinstance(parsed, dict):
-            raise SelectorResponseError(
-                "selector output must be a JSON object", usage=usage
-            )
-        return parsed, usage
+        return body
 
 
 def _content_of(payload: dict) -> str:

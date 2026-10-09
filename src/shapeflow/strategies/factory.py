@@ -145,6 +145,23 @@ class StrategyFactory:
 
     # --- public ------------------------------------------------------------------------
 
+    def rebind(self, *, model_call: Callable, work_sink: Optional[Callable] = None
+               ) -> "StrategyFactory":
+        """The same configuration with a different model call.
+
+        Used to price a plan: a strategy built from the rebound factory constructs exactly the
+        view and prompt the original would, while its model call only records the request. The
+        work sink is not carried over, so pricing never lands in the work ledger.
+        """
+        return StrategyFactory(
+            registry=self.registry, model_call=model_call, tokenizer=self._tokenizer,
+            token_budget=self._token_budget, prompt_budget=self._prompt_budget,
+            prompt_window_ceiling=self._prompt_window_ceiling,
+            raw_text_for=self._raw_text_for, occurrence_for=self._occurrence_for,
+            raw_spans_for=self._raw_spans_for, snapshot_texts_for=self._snapshot_texts_for,
+            work_sink=work_sink,
+        )
+
     def build(self, variant_id: str) -> StrategyBundle:
         spec = self.registry.get(variant_id)
         if spec is None:

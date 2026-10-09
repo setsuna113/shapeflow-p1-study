@@ -72,6 +72,7 @@ __all__ = [
     "CellRegistration",
     "UpstreamReply",
     "ProviderService",
+    "provider_prompt_sha256",
     "RoleTokens",
     "peer_uid_of_tcp",
     "make_handler",
@@ -423,6 +424,15 @@ def peer_uid_of_tcp(local: tuple[str, int], remote: tuple[str, int]) -> Optional
 
 
 # --- the service ---------------------------------------------------------------------------
+
+
+def provider_prompt_sha256(messages) -> str:
+    """The ``prompt_sha256`` recorded for every committed inference: a digest of ``messages``.
+
+    Public so a caller that prices a request before sending it -- an offer -- can compute the
+    same identity and be joined to the call that later carries it.
+    """
+    return sha256_hex(json.dumps(list(messages), sort_keys=True).encode("utf-8"))
 
 
 class ProviderService:
@@ -1422,8 +1432,7 @@ class ProviderService:
         salt = self.cache_salt_for(cell.arm_id if cell else None)
         if salt:
             outbound["cache_salt"] = salt
-        prompt_sha = sha256_hex(json.dumps(outbound.get("messages", []), sort_keys=True)
-                                .encode("utf-8"))
+        prompt_sha = provider_prompt_sha256(outbound.get("messages", []))
         url = self._cfg.vllm_base_url.rstrip("/") + "/chat/completions"
         gate = self._inference_gate or contextlib.nullcontext()
         with gate:

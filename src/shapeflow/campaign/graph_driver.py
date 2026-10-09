@@ -601,10 +601,17 @@ class CellSpec:
     execution_binding_sha256: str
     protocol_document_sha256: str
     component_trial: bool = False
+    #: "fixed": the form is the arm's, chosen before the run. "brokered": at every handoff the
+    #: agent offers both forms and a broker chooses; the variants name the P1 forms on offer.
+    form_policy: str = "fixed"
 
     @property
     def variant_id(self) -> str:
         """The composed arm id. H+C is the two halves, named as such, not a third thing."""
+        if self.form_policy == "brokered":
+            # Never a registered variant id: a brokered cell runs a different form per handoff,
+            # and recording it under a fixed arm's id would misdescribe every one of them.
+            return f"BROKERED[{self.page_variant}+{self.close_variant}]"
         if self.page_variant == "P0" and self.close_variant == "P0":
             return "P0"
         if self.close_variant == "P0":
@@ -1220,6 +1227,11 @@ async def run_cell(
     ):
         if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
             raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+    if cell.form_policy not in {"fixed", "brokered"}:
+        raise ValueError(f"unknown form_policy {cell.form_policy!r}")
+    if cell.form_policy == "brokered" and cell.component_trial:
+        raise ValueError(
+            "a component trial estimates one fixed reducer; a brokered cell has none to estimate")
 
     summarize_timeout = str(
         float(settings.get("week1", "odr", "summarization_timeout_seconds")))

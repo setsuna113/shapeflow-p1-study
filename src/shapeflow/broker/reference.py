@@ -12,7 +12,7 @@ is a difference in code and not in configuration.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..contracts.offer import Decision, Form, Offer, SchedulerSnapshot
 from ..contracts.versions import assert_contract
@@ -20,7 +20,8 @@ from ..contracts.versions import assert_contract
 CONTRACT = "OFFER_INTERFACE_v1.md"
 CONTRACT_SHA256 = "f9a400457f00ed7cf918fd202ac0307a9cf9c196c4ce7f22a94f3ce575c93084"
 
-__all__ = ["ReferenceBroker", "GreedyJointBroker", "plan_weight"]
+__all__ = ["ReferenceBroker", "GreedyJointBroker", "EngineGatedBroker", "DeadlineBroker",
+           "plan_weight"]
 
 
 def plan_weight(offer: Offer, form: Form) -> int:
@@ -84,6 +85,78 @@ class GreedyJointBroker:
             snapshot_version=snapshot.version,
             solve_ns=0,
             reason=f"greedy joint: {used}/{self.capacity_tokens} tokens",
+        )
+
+
+@dataclass(frozen=True)
+class EngineGatedBroker:
+    """Admit nothing while the engine's own queue is long; otherwise decide as ``inner`` does.
+
+    ``GreedyJointBroker`` never reads the snapshot's features, so on its own a live engine's
+    state would bind the decision (version, age) without informing it. This wrapper is the
+    smallest policy that does read it: ``engine.num_requests_waiting`` is a registered STATE
+    gauge (C9), and the outcome is a function of ``(offers, snapshot)`` alone (C10).
+
+    ``max_waiting`` is a placeholder in the same sense as ``capacity_tokens``: uncalibrated, and
+    nothing here claims it is a good threshold.
+    """
+
+    inner: GreedyJointBroker = GreedyJointBroker()
+    max_waiting: int = 4
+
+    def decide(self, offers, snapshot: SchedulerSnapshot, budget_ns: int) -> Decision:
+        waiting = snapshot.features["engine.num_requests_waiting"]
+        if waiting > self.max_waiting:
+            return Decision(
+                admitted=(),
+                form={},
+                deferred=tuple(o.item_id for o in offers),
+                snapshot_version=snapshot.version,
+                solve_ns=0,
+                reason=f"engine gate shut: {waiting:g} waiting > {self.max_waiting}",
+            )
+        decision = self.inner.decide(offers, snapshot, budget_ns)
+        return replace(decision,
+                       reason=f"engine gate open: {waiting:g} waiting; {decision.reason}")
+
+
+@dataclass(frozen=True)
+class DeadlineBroker:
+    """Admit every offer whose deadline has passed; decide the rest as ``inner`` does.
+
+    ``GreedyJointBroker`` defers forever an offer whose cheapest plan exceeds its capacity, and
+    ``EngineGatedBroker`` defers everything while the engine queue is long. Against replayed
+    offers that only stalls a queue; against a live agent blocked on the decision it stalls the
+    agent. An overdue offer is therefore admitted with its lowest-weight form regardless of
+    capacity or the gate. "Overdue" compares ``deadline_ns`` with the snapshot's ``taken_at_ns``,
+    so the outcome is still a function of ``(offers, snapshot)`` alone (C10).
+    """
+
+    inner: object = EngineGatedBroker()
+
+    def decide(self, offers, snapshot: SchedulerSnapshot, budget_ns: int) -> Decision:
+        overdue = [o for o in offers
+                   if o.deadline_ns is not None and o.deadline_ns <= snapshot.taken_at_ns]
+        overdue_ids = {o.item_id for o in overdue}
+        rest = [o for o in offers if o.item_id not in overdue_ids]
+        inner = self.inner.decide(rest, snapshot, budget_ns) if rest else None
+
+        form: dict[str, Form] = {}
+        for offer in sorted(overdue, key=lambda o: o.item_id):
+            form[offer.item_id] = min(
+                offer.forms(), key=lambda f: (plan_weight(offer, f), f.value))
+        admitted = [o.item_id for o in sorted(overdue, key=lambda o: o.item_id)]
+        if inner is not None:
+            admitted.extend(inner.admitted)
+            form.update(inner.form)
+        reason = f"deadline-forced {len(overdue)}" if overdue else "no deadline due"
+        return Decision(
+            admitted=tuple(admitted),
+            form=form,
+            deferred=tuple(inner.deferred) if inner is not None else (),
+            snapshot_version=snapshot.version,
+            solve_ns=0,
+            reason=f"{reason}; {inner.reason}" if inner is not None else reason,
         )
 
 

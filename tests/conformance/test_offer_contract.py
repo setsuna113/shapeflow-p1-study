@@ -14,6 +14,7 @@ import time
 
 import pytest
 from conformance.chaos_host import BrokenBroker, ChaosHost
+from fixtures.fake_vllm import agent_host_with, proxy_host_with
 
 from shapeflow.broker.driver import DEFAULT_SOLVE_BUDGET_NS, run_tick
 from shapeflow.broker.hosts.simulated import SimulatedHost
@@ -63,16 +64,21 @@ def c_offer(item_id="C1"):
     )
 
 
-@pytest.fixture(params=["simulated", "chaos-benign"])
+@pytest.fixture(params=["simulated", "chaos-benign", "proxy", "agent"])
 def host_factory(request):
-    """Every obligation is checked on both a cooperative and an adversarial host.
+    """Every obligation is checked on a cooperative, an adversarial, a proxy and an agent host.
 
     The adversarial host is configured benignly here -- its hostile knobs are exercised by the
-    tests that target them -- so that the shared obligations are genuinely checked twice against
-    different implementations rather than once against one.
+    tests that target them -- so that the shared obligations are genuinely checked against
+    different implementations rather than once against one. The proxy and agent hosts run their
+    real scrape/commit code against a fake vLLM.
     """
     if request.param == "simulated":
         return lambda offers: SimulatedHost(offers=list(offers))
+    if request.param == "proxy":
+        return lambda offers: proxy_host_with(offers)
+    if request.param == "agent":
+        return lambda offers: agent_host_with(offers)
     return lambda offers: ChaosHost(
         offers=list(offers), gang_schedule=False, reverse_dispatch=False,
         materialize_partially=False,
